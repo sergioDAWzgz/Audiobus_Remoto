@@ -1,0 +1,594 @@
+:root {
+  color-scheme: dark light;
+  /* Dark theme (default) */
+  --bg: #0b0e14;
+  --bg-elev: #131824;
+  --bg-elev-2: #1b2230;
+  --bg-accent: #16203a;
+  --border: #263041;
+  --text: #e6ebf2;
+  --muted: #8a97a8;
+  --brand: #5b8cff;
+  --brand-ink: #ffffff;
+  --good: #3ecf8e;
+  --bad: #ff6b6b;
+  --warn: #ffcf5c;
+  --code-bg: #0a0d13;
+  --stage-bg: #05070b; /* remote-screen letterbox — kept dark in both themes */
+  --panel: rgba(19, 24, 36, 0.96);
+  --danger-border: #4a2530;
+  --danger-hover-bg: #2a171c;
+  --good-border: #1e4636;
+  --bad-border: #4a2530;
+  --warn-border: #4a3f1e;
+  --radius: 14px;
+  --shadow: 0 10px 30px rgba(0, 0, 0, 0.35);
+}
+
+:root[data-theme="dark"] { color-scheme: dark; }
+
+/* Light theme tokens. Applied when the user forces Light (data-theme="light"), or
+   in Auto mode (no forced theme) when the OS/browser prefers light. The two blocks
+   share the same values (CSS can't combine a media-query and an attribute selector
+   into one rule). */
+:root[data-theme="light"] {
+  color-scheme: light;
+  --bg: #eef1f7;
+  --bg-elev: #ffffff;
+  --bg-elev-2: #e7ebf3;
+  --bg-accent: #dbe4f5;
+  --border: #d2d9e6;
+  --text: #141a24;
+  --muted: #434e5e;
+  --brand: #234f9e;
+  --brand-ink: #ffffff;
+  --good: #0d7346;
+  --bad: #b01e1e;
+  --warn: #6e5400;
+  --code-bg: #eef1f7;
+  --stage-bg: #eef1f7;
+  --panel: rgba(255, 255, 255, 0.96);
+  --danger-border: #e3b7bd;
+  --danger-hover-bg: #f7e6e8;
+  --good-border: #b7e0cc;
+  --bad-border: #e3b7bd;
+  --warn-border: #e6d9a8;
+  --shadow: 0 10px 30px rgba(20, 30, 60, 0.12);
+}
+
+* { box-sizing: border-box; }
+
+/* The [hidden] attribute must win over any element's display rule below. */
+[hidden] { display: none !important; }
+
+html, body {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+}
+
+body {
+  background: radial-gradient(1200px 600px at 50% -10%, var(--bg-accent) 0%, var(--bg) 55%);
+  color: var(--text);
+  font: 15px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+a { color: var(--brand); text-decoration: none; }
+a:hover { text-decoration: underline; }
+
+.muted { color: var(--muted); }
+.error { color: var(--bad); }
+.good { color: var(--good); }
+.bad { color: var(--bad); }
+
+/* ---------- Landing / marketing pages ---------- */
+.wrap {
+  max-width: 960px;
+  margin: 0 auto;
+  padding: 40px 20px 64px;
+}
+
+.masthead {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 48px;
+}
+
+.brand {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  font-weight: 700;
+  font-size: 20px;
+  letter-spacing: 0.2px;
+  color: var(--text);
+}
+.brand:hover { text-decoration: none; }
+.brand-logo {
+  width: 28px;
+  height: 28px;
+  display: block;
+  flex: 0 0 auto;
+}
+.bar .brand-logo { width: 24px; height: 24px; }
+
+.hero h1 {
+  font-size: clamp(28px, 5vw, 44px);
+  line-height: 1.1;
+  margin: 0 0 12px;
+}
+.hero p { font-size: 18px; color: var(--muted); max-width: 620px; margin: 0 0 32px; }
+
+.cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 20px;
+}
+
+.tile {
+  display: block;
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 26px;
+  box-shadow: var(--shadow);
+  transition: transform 0.12s ease, border-color 0.12s ease;
+}
+.tile:hover { transform: translateY(-3px); border-color: var(--brand); text-decoration: none; }
+.tile .icon { font-size: 30px; margin-bottom: 12px; }
+.tile h2 { margin: 0 0 8px; font-size: 20px; }
+.tile p { margin: 0; color: var(--muted); }
+
+.steps {
+  counter-reset: step;
+  list-style: none;
+  padding: 0;
+  margin: 24px 0;
+}
+.steps li {
+  position: relative;
+  padding: 14px 14px 14px 52px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--bg-elev);
+  margin-bottom: 12px;
+}
+.steps li::before {
+  counter-increment: step;
+  content: counter(step);
+  position: absolute;
+  left: 14px; top: 12px;
+  width: 26px; height: 26px;
+  display: grid; place-items: center;
+  background: var(--brand); color: var(--brand-ink);
+  border-radius: 50%; font-weight: 700; font-size: 13px;
+}
+
+pre, code {
+  font-family: ui-monospace, SFMono-Regular, "Cascadia Code", Consolas, monospace;
+}
+pre {
+  background: var(--code-bg);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 14px 16px;
+  overflow: auto;
+  font-size: 13px;
+}
+code { background: var(--bg-elev-2); padding: 1px 6px; border-radius: 6px; font-size: 0.92em; }
+pre code { background: none; padding: 0; }
+
+.notice {
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--warn);
+  background: var(--bg-elev);
+  border-radius: 10px;
+  padding: 12px 16px;
+  margin: 20px 0;
+  color: var(--muted);
+}
+
+/* ---------- Buttons ---------- */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  border: 1px solid var(--border);
+  background: var(--bg-elev-2);
+  color: var(--text);
+  padding: 10px 16px;
+  border-radius: 10px;
+  font-size: 15px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.12s ease, border-color 0.12s ease, opacity 0.12s;
+}
+.btn:hover { border-color: var(--brand); text-decoration: none; }
+.btn.primary { background: var(--brand); border-color: var(--brand); color: var(--brand-ink); }
+.btn.primary:hover { opacity: 0.92; }
+.btn.ghost { background: transparent; }
+/* Cross-nav shortcut chips (top-right "Share this computer" / "Connect to a
+   computer"): a filled, slightly-raised background so they stand out like the
+   elevated instruction panels, instead of a transparent ghost button. */
+.btn.nav { background: var(--bg-elev-2); border-color: var(--border); }
+.btn.nav:hover { border-color: var(--brand); }
+/* In light mode, the "Connect to a computer" nav button (on the Share page)
+   matches the step boxes there (--bg-elev = white with the same border). */
+:root[data-theme="light"] .btn.nav[href="/connect"] { background: var(--bg-elev); }
+.btn.danger { border-color: var(--danger-border); color: var(--bad); }
+.btn.danger:hover { background: var(--danger-hover-bg); border-color: var(--bad); }
+.btn.big { padding: 14px 22px; font-size: 16px; }
+
+/* Button icons: a crisp inline SVG attached to the label (and shown alone in the
+   fullscreen rail). Outline style via currentColor so it matches the button text. */
+.btn-ico {
+  width: 1.05em;
+  height: 1.05em;
+  flex: 0 0 auto;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.6;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.btn-label { display: inline; }
+
+/* ---------- Theme selector ---------- */
+.masthead-actions { display: inline-flex; align-items: center; gap: 12px; }
+.theme-select { position: relative; display: inline-flex; align-items: center; gap: 7px; }
+.theme-ico { width: 16px; height: 16px; flex: 0 0 auto; color: var(--muted); }
+.theme-select select {
+  appearance: none;
+  -webkit-appearance: none;
+  background: var(--bg-elev-2);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 7px 30px 7px 12px;
+  font: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.2;
+  cursor: pointer;
+}
+.theme-select select:hover,
+.theme-select select:focus { outline: none; border-color: var(--brand); }
+/* In light mode the selector matches the "Connect to a computer" nav button and
+   the step boxes (--bg-elev = white with the same border). */
+:root[data-theme="light"] .theme-select select { background: var(--bg-elev); }
+.theme-select::after {
+  content: "▾";
+  position: absolute;
+  right: 11px;
+  color: var(--muted);
+  font-size: 11px;
+  pointer-events: none;
+}
+
+/* ---------- Controller app ---------- */
+body.app {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.bar {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 10px 16px;
+  background: var(--bg-elev);
+  border-bottom: 1px solid var(--border);
+  flex: 0 0 auto;
+}
+.bar .brand { font-size: 16px; }
+.bar-actions { margin-left: auto; display: flex; align-items: center; gap: 12px; }
+
+.status {
+  font-size: 13px;
+  font-weight: 700;              /* bold in both themes */
+  color: var(--muted);
+  padding: 4px 10px;
+  border-radius: 999px;
+  border: 2px solid #3b4760;     /* thicker + more visible (dark) */
+  background: var(--bg-elev-2);
+  white-space: nowrap;
+}
+.status.good { color: var(--good); border-color: #37b083; }
+.status.bad { color: var(--bad); border-color: #e06a6a; }
+.status.warn { color: var(--warn); border-color: #d9b24f; }
+
+/* In light mode make the status pill a clearly-outlined white box so it stands
+   out from both the page and the (white) top bar. Borders stay 2px (from base)
+   with stronger colors for visibility. */
+:root[data-theme="light"] .status {
+  background: #ffffff;
+  border-color: #96a2b6;
+}
+:root[data-theme="light"] .status.good { color: #0a6238; border-color: #4fa97f; }
+:root[data-theme="light"] .status.bad { color: #9e1414; border-color: #cf6b6b; }
+:root[data-theme="light"] .status.warn { color: #5f4800; border-color: #c0a33e; }
+
+.toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  color: var(--muted);
+  cursor: pointer;
+  user-select: none;
+}
+
+.join {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 16px;
+  padding: 20px;
+}
+/* Status box shown below the center card while not connected. */
+.join-status {
+  display: flex;
+  justify-content: center;
+}
+.join-status:empty {
+  display: none;
+}
+.card {
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  padding: 32px;
+  width: 100%;
+  max-width: 440px;
+}
+.card h1 { margin: 0 0 8px; font-size: 24px; }
+.card .muted { margin: 0 0 22px; }
+
+#joinForm { display: flex; flex-direction: column; gap: 14px; }
+.code-input {
+  font-family: ui-monospace, SFMono-Regular, "Cascadia Code", Consolas, monospace;
+  font-size: 26px;
+  letter-spacing: 6px;
+  text-align: center;
+  text-transform: uppercase;
+  padding: 14px 12px;
+  border-radius: 12px;
+  border: 1px solid var(--border);
+  background: var(--code-bg);
+  color: var(--text);
+  outline: none;
+}
+.code-input:focus { border-color: var(--brand); }
+
+.stage {
+  position: relative; /* anchor for the fullscreen hover bar */
+  flex: 1 1 auto;
+  min-height: 0;
+  min-width: 0;
+  background: var(--stage-bg);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+}
+
+/* Fullscreen menu: a vertical bar anchored to the LEFT edge (kept clear of the
+   browser's own fullscreen exit control at the top). Hidden off the left; slides
+   in when its handle is clicked. translateX(-100%) lines the bar's right edge up
+   with the screen edge, so the handle stays visible whatever the bar's width. */
+.fs-bar {
+  position: absolute;
+  top: 0;
+  left: 0;
+  bottom: 0; /* full height rail */
+  z-index: 50;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center; /* the (icon-only) button group centered vertically */
+  gap: 12px;
+  padding: 14px 10px;
+  background: var(--panel);
+  border-right: 1px solid var(--border);
+  box-shadow: 6px 0 20px rgba(0, 0, 0, 0.4);
+  transform: translateX(-100%);
+  transition: transform 0.18s ease;
+}
+.fs-bar.show {
+  transform: translateX(0);
+}
+/* In the rail the buttons are icon-only and the view controls stack vertically. */
+.fs-bar .btn { gap: 0; padding: 9px; }
+.fs-bar .btn .btn-label { display: none; }
+.fs-bar .view-controls,
+.fs-bar .mode-group,
+.fs-bar .monitor-picker {
+  flex-direction: column;
+  gap: 10px;
+}
+
+/* Pull-out tab on the RIGHT edge of the left bar. It rides with the bar: a
+   semi-transparent handle flush to the left screen edge while the bar is hidden,
+   and a fully-opaque tab beside the bar once it (or the tab) is clicked. Themed to
+   match the bar, inert unless a fullscreen session is live. */
+.fs-hint {
+  position: absolute;
+  left: 100%;
+  top: 50%;
+  transform: translateY(-50%);
+  margin: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  height: 90px;
+  padding: 0 12px;
+  font: inherit;
+  line-height: 1;
+  color: var(--text);
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-left: none;
+  border-radius: 0 14px 14px 0;
+  box-shadow: 6px 0 16px rgba(0, 0, 0, 0.28);
+  cursor: pointer;
+  pointer-events: none; /* enabled only in fullscreen, below */
+  opacity: 0;
+  transition: opacity 0.2s ease;
+}
+.fs-hint .fs-hint-arrow {
+  font-size: 26px;
+  color: var(--text);
+  transform: rotate(-90deg); /* points right: pull the menu out */
+  transition: transform 0.2s ease;
+}
+/* In a fullscreen session the hint is a prominent, clickable handle. */
+.stage.fs-on .fs-hint {
+  opacity: 0.85;
+  pointer-events: auto;
+}
+.stage.fs-on .fs-hint:hover {
+  opacity: 1;
+}
+/* Menu open: the tab sits beside the bar, fully opaque, arrow flips to point back
+   left at the bar. */
+.stage.fs-on.bar-open .fs-hint {
+  opacity: 1;
+}
+.stage.fs-on.bar-open .fs-hint .fs-hint-arrow {
+  transform: rotate(90deg); /* points left: push the menu back */
+}
+/* While a press is in progress that started somewhere other than the hint (e.g. a
+   drag on the remote screen), the hint is inert: it won't light up on hover and
+   can't be clicked, so the drag can't accidentally toggle the menu. */
+.stage.fs-on.drag-lock .fs-hint {
+  pointer-events: none;
+}
+/* Container for one <canvas> per monitor. A view-mode class (grid/single)
+   is always set on it while a session is live. */
+.screens {
+  width: 100%;
+  height: 100%;
+}
+
+/* Grid: every monitor at once, small, wrapped and centered. All interactive. */
+.screens.grid {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  align-content: center;
+  justify-content: center;
+  gap: 12px;
+  padding: 12px;
+  overflow: auto;
+}
+.screens.grid .screen {
+  flex: 0 1 auto;
+  width: auto;
+  height: auto;
+  max-width: calc(50% - 12px);
+  max-height: calc(100% - 24px);
+}
+
+/* Single: one selected monitor, large, fit to the stage (aspect preserved). */
+.screens.single {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.screens.single .screen {
+  width: auto;
+  height: auto;
+  max-width: 100%;
+  max-height: 100%;
+}
+
+.screen {
+  display: block;
+  cursor: crosshair;
+  background: var(--stage-bg);
+  image-rendering: auto;
+}
+
+/* ---------- View-mode controls (top bar) ---------- */
+.view-controls {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.mode-group,
+.monitor-picker {
+  display: inline-flex;
+  gap: 6px;
+}
+.btn.mode-btn,
+.btn.mon-btn {
+  padding: 6px 12px;
+  font-size: 13px;
+}
+.btn.mon-btn {
+  min-width: 34px;
+  justify-content: center;
+}
+.btn.mode-btn.active,
+.btn.mon-btn.active {
+  background: var(--brand);
+  border-color: var(--brand);
+  color: var(--brand-ink);
+}
+
+/* ---------- Confirmation modal ---------- */
+.modal {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+  background: rgba(0, 0, 0, 0.5);
+  opacity: 0;
+  transition: opacity 0.16s ease;
+}
+.modal.show {
+  opacity: 1;
+}
+.modal-card {
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  padding: 26px 24px 22px;
+  max-width: 360px;
+  width: 100%;
+  text-align: center;
+  transform: translateY(8px) scale(0.98);
+  transition: transform 0.16s ease;
+}
+.modal.show .modal-card {
+  transform: none;
+}
+.modal-msg {
+  font-size: 16px;
+  font-weight: 600;
+  line-height: 1.4;
+  margin: 0 0 22px;
+}
+.modal-actions {
+  display: flex;
+  gap: 12px;
+  justify-content: center;
+}
+.modal-actions .btn {
+  min-width: 120px;
+  justify-content: center;
+}

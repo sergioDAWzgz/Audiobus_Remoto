@@ -1,0 +1,17 @@
+{
+  "name": "audiobus-remote",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Consent-based remote desktop: share a computer with a session code, control it from the browser.",
+  "scripts": {
+    "dev": "wrangler dev",
+    "start": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "cf-typegen": "wrangler types"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^5.20260926.1",
+    "typescript": "^5.6.0",
+    "wrangler": "^4"
+  }
+}

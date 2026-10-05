@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Audiobus Remote</title>
+    <meta
+      name="description"
+      content="Consent-based remote control: share a computer with a session code, or connect to one from your browser."
+    />
+    <link rel="icon" href="/logo.png" type="image/png" />
+    <link rel="apple-touch-icon" href="/logo.png" />
+    <script>
+      (function () {
+        try {
+          var v = localStorage.getItem("audiobus-theme");
+          var p = v === "light" || v === "dark" ? v : "auto";
+          var eff =
+            p === "auto"
+              ? matchMedia("(prefers-color-scheme: light)").matches
+                ? "light"
+                : "dark"
+              : p;
+          document.documentElement.setAttribute("data-theme", eff);
+        } catch (e) {}
+      })();
+    </script>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body data-i18n-title="doc.title.home">
+    <div class="wrap">
+      <header class="masthead">
+        <a class="brand" href="/"
+          ><img class="brand-logo" src="/logo.png" alt="" /> Audiobus Remote</a
+        >
+        <label class="theme-select">
+          <svg class="theme-ico" viewBox="0 0 16 16" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.3">
+            <circle cx="8" cy="8" r="6.3" />
+            <path d="M8 1.7a6.3 6.3 0 0 1 0 12.6z" fill="currentColor" stroke="none" />
+          </svg>
+          <select id="themeSelect" data-i18n-attr="aria-label:theme.label;title:theme.label">
+            <option value="auto" data-i18n="theme.auto">Auto</option>
+            <option value="light" data-i18n="theme.light">Light</option>
+            <option value="dark" data-i18n="theme.dark">Dark</option>
+          </select>
+        </label>
+      </header>
+
+      <section class="hero">
+        <h1 data-i18n="home.hero.title">Control a computer from your browser.</h1>
+        <p data-i18n="home.hero.desc">
+          Run the Audiobus agent on the computer you want to reach. It shows a
+          one-time 10-character code. Type that code here and you can see and
+          control that computer — no install on this side, nothing to configure.
+        </p>
+      </section>
+
+      <div class="cards">
+        <a class="tile" href="/connect">
+          <div class="icon">🖥️</div>
+          <h2 data-i18n="home.connect.title">Connect to a computer</h2>
+          <p data-i18n="home.connect.desc">
+            You have a session code from someone. Enter it and take control.
+          </p>
+        </a>
+        <a class="tile" href="/share">
+          <div class="icon">📡</div>
+          <h2 data-i18n="home.share.title">Share this computer</h2>
+          <p data-i18n="home.share.desc">
+            Download the agent, run it, and share the code it gives you.
+          </p>
+        </a>
+      </div>
+
+      <div class="notice">
+        <strong data-i18n="home.consent.title">How consent works.</strong>
+        <span data-i18n="home.consent.body">
+          The computer being controlled always runs the agent in the foreground.
+          It shows the session code, asks the person there to approve each
+          incoming connection, displays a clear banner while someone is
+          connected, and stops the moment the agent is closed.
+        </span>
+      </div>
+    </div>
+
+    <script src="/translations.js"></script>
+    <script src="/i18n.js"></script>
+    <script src="/theme.js"></script>
+  </body>
+</html>

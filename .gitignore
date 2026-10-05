@@ -1,0 +1,21 @@
+# Node / Wrangler
+node_modules/
+.wrangler/
+.dev.vars
+.env
+worker-configuration.d.ts
+
+# Python agent build artifacts
+agent/.venv/
+agent/build/
+agent/dist/
+agent/__pycache__/
+agent/*.spec
+__pycache__/
+
+# Built agent binaries (large; build and deploy separately)
+public/downloads/*.exe
+
+# OS
+.DS_Store
+Thumbs.db

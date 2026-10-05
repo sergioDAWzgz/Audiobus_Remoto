@@ -1,0 +1,170 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Connect · Audiobus Remote</title>
+    <link rel="icon" href="/logo.png" type="image/png" />
+    <link rel="apple-touch-icon" href="/logo.png" />
+    <script>
+      // Set the effective theme before first paint (avoids a flash). Auto follows
+      // the OS; a saved "light"/"dark" overrides it. Full logic in /theme.js.
+      (function () {
+        try {
+          var v = localStorage.getItem("audiobus-theme");
+          var p = v === "light" || v === "dark" ? v : "auto";
+          var eff =
+            p === "auto"
+              ? matchMedia("(prefers-color-scheme: light)").matches
+                ? "light"
+                : "dark"
+              : p;
+          document.documentElement.setAttribute("data-theme", eff);
+        } catch (e) {}
+      })();
+    </script>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body class="app" data-i18n-title="doc.title.connect">
+    <!-- Icon sprite: referenced by buttons via <use href="#ico-*">. -->
+    <svg width="0" height="0" class="svg-sprite" aria-hidden="true" focusable="false">
+      <symbol id="ico-grid" viewBox="0 0 16 16">
+        <rect x="1.5" y="1.5" width="5.5" height="5.5" rx="1" />
+        <rect x="9" y="1.5" width="5.5" height="5.5" rx="1" />
+        <rect x="1.5" y="9" width="5.5" height="5.5" rx="1" />
+        <rect x="9" y="9" width="5.5" height="5.5" rx="1" />
+      </symbol>
+      <symbol id="ico-single" viewBox="0 0 16 16">
+        <rect x="2" y="2.5" width="12" height="11" rx="1.4" />
+      </symbol>
+      <symbol id="ico-expand" viewBox="0 0 16 16">
+        <path d="M2.5 6V2.5H6" />
+        <path d="M13.5 6V2.5H10" />
+        <path d="M2.5 10v3.5H6" />
+        <path d="M13.5 10v3.5H10" />
+      </symbol>
+      <symbol id="ico-compress" viewBox="0 0 16 16">
+        <path d="M6 2.5V6H2.5" />
+        <path d="M10 2.5V6h3.5" />
+        <path d="M6 13.5V10H2.5" />
+        <path d="M10 13.5V10h3.5" />
+      </symbol>
+      <symbol id="ico-disconnect" viewBox="0 0 16 16">
+        <path d="M8 1.6V8" />
+        <path d="M4.7 4.1a5 5 0 1 0 6.6 0" />
+      </symbol>
+    </svg>
+    <header class="bar">
+      <a class="brand" href="/"
+        ><img class="brand-logo" src="/logo.png" alt="" /> Audiobus Remote</a
+      >
+      <div id="status" class="status" data-i18n="connect.status.enterCode">
+        Enter a session code
+      </div>
+      <div class="bar-actions">
+        <div id="viewControls" class="view-controls" hidden>
+          <div class="mode-group">
+            <button id="gridBtn" class="btn mode-btn" type="button" data-i18n-attr="title:connect.btn.grid">
+              <svg class="btn-ico"><use href="#ico-grid" /></svg>
+              <span class="btn-label" data-i18n="connect.btn.grid">Grid</span>
+            </button>
+            <button id="singleBtn" class="btn mode-btn" type="button" data-i18n-attr="title:connect.btn.single">
+              <svg class="btn-ico"><use href="#ico-single" /></svg>
+              <span class="btn-label" data-i18n="connect.btn.single">Single</span>
+            </button>
+          </div>
+          <div id="monitorPicker" class="monitor-picker" hidden></div>
+        </div>
+        <label class="toggle" title="Send keyboard input to the remote computer">
+          <input type="checkbox" id="kbToggle" checked />
+          <span data-i18n="connect.toggle.keyboard">Keyboard</span>
+        </label>
+        <button id="fsBtn" class="btn" hidden type="button" data-i18n-attr="title:connect.btn.fullscreen">
+          <svg class="btn-ico"><use href="#ico-expand" /></svg>
+          <span class="btn-label" data-i18n="connect.btn.fullscreen">Fullscreen</span>
+        </button>
+        <button id="disconnectBtn" class="btn danger" hidden type="button" data-i18n-attr="title:connect.btn.disconnect">
+          <svg class="btn-ico"><use href="#ico-disconnect" /></svg>
+          <span class="btn-label" data-i18n="connect.btn.disconnect">Disconnect</span>
+        </button>
+        <a class="btn nav" href="/share" target="_blank" rel="noopener" data-i18n-attr="title:connect.nav.share">
+          <svg class="btn-ico" viewBox="0 0 16 16" aria-hidden="true">
+            <circle cx="4" cy="8" r="2.1" />
+            <circle cx="12" cy="3.6" r="2.1" />
+            <circle cx="12" cy="12.4" r="2.1" />
+            <path d="M5.9 7 10.1 4.6" />
+            <path d="M5.9 9 10.1 11.4" />
+          </svg>
+          <span class="btn-label" data-i18n="connect.nav.share">Share this computer</span>
+        </a>
+        <label class="theme-select">
+          <svg class="theme-ico" viewBox="0 0 16 16" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.3">
+            <circle cx="8" cy="8" r="6.3" />
+            <path d="M8 1.7a6.3 6.3 0 0 1 0 12.6z" fill="currentColor" stroke="none" />
+          </svg>
+          <select id="themeSelect" data-i18n-attr="aria-label:theme.label;title:theme.label">
+            <option value="auto" data-i18n="theme.auto">Auto</option>
+            <option value="light" data-i18n="theme.light">Light</option>
+            <option value="dark" data-i18n="theme.dark">Dark</option>
+          </select>
+        </label>
+      </div>
+    </header>
+
+    <main id="join" class="join">
+      <div class="card">
+        <h1 data-i18n="connect.card.title">Connect to a computer</h1>
+        <p class="muted" data-i18n="connect.card.desc">
+          Type the 10-character code shown in the Audiobus agent on the computer you
+          want to control.
+        </p>
+        <form id="joinForm">
+          <input
+            id="codeInput"
+            class="code-input"
+            autocomplete="off"
+            autocapitalize="characters"
+            spellcheck="false"
+            maxlength="10"
+            placeholder="··········"
+            aria-label="Session code"
+          />
+          <button class="btn big" type="submit" data-i18n="connect.btn.connect">Connect</button>
+        </form>
+        <p id="joinError" class="error" hidden></p>
+      </div>
+      <!-- Status sits here (below the center card) while not connected; it moves
+           up to the top bar once a session is live. -->
+      <div id="joinStatusSlot" class="join-status"></div>
+    </main>
+
+    <section id="stage" class="stage" hidden>
+      <div id="fsBar" class="fs-bar">
+        <button id="fsExitBtn" class="btn" type="button" data-i18n-attr="title:connect.btn.exitFullscreen">
+          <svg class="btn-ico"><use href="#ico-compress" /></svg>
+          <span class="btn-label" data-i18n="connect.btn.exitFullscreen">Exit fullscreen</span>
+        </button>
+        <button id="fsDisconnectBtn" class="btn danger" type="button" data-i18n-attr="title:connect.btn.disconnect">
+          <svg class="btn-ico"><use href="#ico-disconnect" /></svg>
+          <span class="btn-label" data-i18n="connect.btn.disconnect">Disconnect</span>
+        </button>
+        <button
+          id="fsHint"
+          class="fs-hint"
+          type="button"
+          aria-label="Show controls"
+          title="Show controls"
+          data-i18n-attr="aria-label:connect.fsHint.show;title:connect.fsHint.show"
+        >
+          <span class="fs-hint-arrow" aria-hidden="true">▾</span>
+        </button>
+      </div>
+      <div id="screens" class="screens"></div>
+    </section>
+
+    <script src="/translations.js"></script>
+    <script src="/i18n.js"></script>
+    <script src="/theme.js"></script>
+    <script src="/connect.js"></script>
+  </body>
+</html>
