@@ -17,6 +17,19 @@
 
 $ErrorActionPreference = "Stop"
 
+# Run from the script's own directory so the relative paths below (requirements.txt,
+# audiobus_agent.py, dist/) resolve no matter where the script is invoked from.
+Set-Location -Path $PSScriptRoot
+
+# Fail loudly if a native command (pip / PyInstaller) returns non-zero —
+# $ErrorActionPreference does not catch native exit codes, so without this a failed
+# build would silently copy a stale exe.
+function Invoke-OrThrow {
+    param([scriptblock]$Cmd)
+    & $Cmd
+    if ($LASTEXITCODE -ne 0) { throw "Command failed with exit code $LASTEXITCODE" }
+}
+
 # Pick the interpreter: the project venv if present, otherwise whatever `python`
 # is on PATH.
 $venvPy = Join-Path $PSScriptRoot ".venv\Scripts\python.exe"
@@ -43,15 +56,15 @@ then re-run ./build.ps1.
 "@
 }
 
-& $py -m pip install --upgrade pip
-& $py -m pip install -r requirements.txt pyinstaller
+Invoke-OrThrow { & $py -m pip install --upgrade pip }
+Invoke-OrThrow { & $py -m pip install -r requirements.txt pyinstaller }
 
-& $py -m PyInstaller `
+Invoke-OrThrow { & $py -m PyInstaller `
     --onefile `
     --name audiobus-agent `
     --windowed `
     --icon logo.ico `
-    audiobus_agent.py
+    audiobus_agent.py }
 
 $exe = Join-Path $PSScriptRoot "dist/audiobus-agent.exe"
 if (Test-Path $exe) {
