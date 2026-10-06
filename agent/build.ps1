@@ -46,21 +46,37 @@ then re-run ./build.ps1.
 & $py -m pip install --upgrade pip
 & $py -m pip install -r requirements.txt pyinstaller
 
+# --collect-all pulls in the native libraries these packages ship that PyInstaller's
+# static analysis misses: PyAV's bundled ffmpeg DLLs (av), and aiortc's media/ICE
+# stack (aioice, and pylibsrtp's libsrtp). cryptography/cffi/numpy are covered by
+# PyInstaller's built-in hooks.
 & $py -m PyInstaller `
     --onefile `
     --name audiobus-agent `
     --windowed `
     --icon logo.ico `
+    --collect-all av `
+    --collect-all aiortc `
+    --collect-all aioice `
+    --collect-all pylibsrtp `
     audiobus_agent.py
 
 $exe = Join-Path $PSScriptRoot "dist/audiobus-agent.exe"
 if (Test-Path $exe) {
     Write-Host ""
     Write-Host "Built: $exe"
-    $dest = Join-Path $PSScriptRoot "../public/downloads/audiobus-agent.exe"
-    Copy-Item $exe $dest -Force
-    Write-Host "Copied to: $dest"
-    Write-Host "It will be published on the next 'wrangler deploy'."
+    # The WebRTC exe is ~60MB (PyAV/ffmpeg), over the 25 MiB Workers static-asset
+    # limit, so it is served from R2 instead of /public. Upload it to the bucket
+    # (one-time: enable R2, then `wrangler r2 bucket create audiobus-remote-downloads`).
+    Write-Host "Uploading to R2 bucket 'audiobus-remote-downloads'..."
+    npx wrangler r2 object put audiobus-remote-downloads/audiobus-agent.exe --file $exe
+    if ($LASTEXITCODE -eq 0) {
+        Write-Host "Uploaded. Served at /downloads/audiobus-agent.exe once the DOWNLOADS"
+        Write-Host "binding is uncommented in wrangler.jsonc and deployed."
+    } else {
+        Write-Warning "R2 upload failed (is R2 enabled and the bucket created?). Run manually:"
+        Write-Host "  npx wrangler r2 object put audiobus-remote-downloads/audiobus-agent.exe --file `"$exe`""
+    }
 } else {
     Write-Error "Build failed: $exe not found."
 }

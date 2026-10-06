@@ -23,6 +23,13 @@ export class SessionDO extends DurableObject {
     return true;
   }
 
+  /** Read-only: has this code been reserved by a real session? Used to gate
+   *  TURN-credential minting so arbitrary well-formed codes can't drain the
+   *  Cloudflare Realtime quota (the format check alone is not a real guard). */
+  async isReserved(): Promise<boolean> {
+    return (await this.ctx.storage.get<boolean>("reserved")) === true;
+  }
+
   async fetch(request: Request): Promise<Response> {
     const url = new URL(request.url);
     if (url.pathname !== "/connect") {

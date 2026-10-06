@@ -8,9 +8,12 @@ Run this on the computer you want to let someone control. It:
   3. when a viewer connects, asks you to Approve or Deny,
   4. once approved, streams the screen and applies the viewer's mouse/keyboard.
 
-Transport is a WebSocket relayed through the Cloudflare Worker: JPEG frames go
-out, JSON input events come in. Nothing is peer-to-peer, so it works from behind
-most firewalls without any port forwarding.
+Transport: the screen is sent as a WebRTC video stream (VP8, one track per
+monitor) directly to the viewer's browser. A WebSocket relayed through the
+Cloudflare Worker carries everything else — consent, the monitor list, the
+viewer's monitor selection ("want"), the agent-window "blockrects", the viewer's
+mouse/keyboard input, and the WebRTC offer/answer/ICE signaling. STUN plus
+(when configured) Cloudflare TURN handle NAT traversal.
 
 Consent by design: your screen is not shared until you Approve, a banner is shown
 the whole time someone is connected, and closing this window ends the session.
@@ -18,7 +21,7 @@ the whole time someone is connected, and closing this window ends the session.
 
 import argparse
 import asyncio
-import io
+import fractions
 import json
 import os
 import queue
@@ -41,6 +44,17 @@ try:
     from PIL import Image
     from pynput.mouse import Button, Controller as MouseController
     from pynput.keyboard import Controller as KeyboardController, Key, KeyCode
+    import numpy as np
+    import av
+    from aiortc import (
+        RTCConfiguration,
+        RTCIceServer,
+        RTCPeerConnection,
+        RTCSessionDescription,
+        MediaStreamTrack,
+    )
+    from aiortc.mediastreams import MediaStreamError
+    from aiortc.sdp import candidate_from_sdp
 except ImportError as exc:  # pragma: no cover - dependency guard
     try:
         messagebox.showerror(
@@ -440,14 +454,155 @@ def apply_event(ev, monitors=None, window_rects=None, blocked=None,
 # Screen capture
 # --------------------------------------------------------------------------- #
 
-def _grab_and_encode(sct, monitor, out_w, out_h, quality):
-    shot = sct.grab(monitor)
-    img = Image.frombytes("RGB", shot.size, shot.rgb)
-    if (out_w, out_h) != shot.size:
-        img = img.resize((out_w, out_h))
-    buf = io.BytesIO()
-    img.save(buf, format="JPEG", quality=quality)
-    return buf.getvalue()
+def _even(n):
+    """Round down to an even number >= 2 (VP8 wants even frame dimensions)."""
+    n = int(n) & ~1
+    return n if n >= 2 else 2
+
+
+class CaptureManager:
+    """One background thread that owns a single ScreenGrabber and keeps the latest
+    RGB frame for each monitor in a slot. mss is not safe to share across threads,
+    so all grabbing happens here; ScreenTrack.recv() just reads the latest slot.
+
+    Monitors the viewer currently wants are grabbed at the full frame rate; the
+    rest are grabbed slowly (~2 fps) so their tracks stay alive without forcing an
+    SDP renegotiation when the viewer switches monitors."""
+
+    IDLE_INTERVAL = 0.5  # unwanted monitors: ~2 fps
+    STALE_SECS = 5.0     # no successful grab for this long -> capture is dead
+
+    def __init__(self, client):
+        self.client = client
+        self.monitors = client.monitors
+        self.fps = max(1, int(client.args.fps))
+        self._frames = {}            # monitor index -> latest RGB ndarray (h, w, 3)
+        self._lock = threading.Lock()
+        self._stop = threading.Event()
+        self._thread = None
+        self._last_ok = None         # monotonic time of the last successful grab
+        self._stall_signaled = False
+
+    def start(self):
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+
+    def stop(self):
+        self._stop.set()
+        if self._thread:
+            self._thread.join(timeout=2.0)
+            self._thread = None
+
+    def latest(self, i):
+        with self._lock:
+            return self._frames.get(i)
+
+    def _run(self):
+        full_interval = 1.0 / self.fps
+        last = {m["i"]: 0.0 for m in self.monitors}
+        # Start the stall clock now: if capture never works, STALE_SECS later we
+        # signal rather than sit on a black/frozen screen forever.
+        self._last_ok = time.monotonic()
+        with ScreenGrabber() as sct:
+            while not self._stop.is_set():
+                now = time.time()
+                wanted = set(self.client.wanted or [m["i"] for m in self.monitors])
+                next_due = now + full_interval
+                for m in self.monitors:
+                    i = m["i"]
+                    interval = full_interval if i in wanted else self.IDLE_INTERVAL
+                    if now - last[i] < interval:
+                        next_due = min(next_due, last[i] + interval)
+                        continue
+                    last[i] = now
+                    arr = self._grab(sct, m)
+                    if arr is not None:
+                        self._last_ok = time.monotonic()
+                        with self._lock:
+                            self._frames[i] = arr
+                # Capture has stopped producing frames (e.g. secure desktop / lock
+                # screen / display change): end the session so the viewer isn't left
+                # on a frozen image while input still reaches the machine.
+                if (not self._stall_signaled and
+                        time.monotonic() - self._last_ok > self.STALE_SECS):
+                    self._stall_signaled = True
+                    self._signal_stall()
+                sleep = max(0.005, min(full_interval, next_due - time.time()))
+                self._stop.wait(sleep)
+
+    def _signal_stall(self):
+        loop = self.client.loop
+        if loop and not loop.is_closed():
+            try:
+                loop.call_soon_threadsafe(
+                    lambda: asyncio.ensure_future(self.client._on_capture_stalled())
+                )
+            except Exception:
+                pass
+
+    def _grab(self, sct, m):
+        try:
+            shot = sct.grab({"left": m["left"], "top": m["top"],
+                             "width": m["width"], "height": m["height"]})
+            scale = self.client.scale_for(m["width"])
+            ow, oh = _even(shot.width * scale), _even(shot.height * scale)
+            if (ow, oh) != (shot.width, shot.height):
+                img = Image.frombytes("RGB", (shot.width, shot.height), shot.rgb)
+                arr = np.asarray(img.resize((ow, oh)), dtype=np.uint8)
+            else:
+                arr = np.frombuffer(shot.rgb, dtype=np.uint8).reshape(
+                    (shot.height, shot.width, 3))
+            return np.ascontiguousarray(arr)
+        except Exception:
+            return None
+
+
+class ScreenTrack(MediaStreamTrack):
+    """A WebRTC video track feeding one monitor's frames (from CaptureManager) to
+    the encoder. Paced at the configured --fps; carries its monitor index (`mi`)
+    so the offer can tell the viewer which track is which monitor."""
+
+    kind = "video"
+    _CLOCK = 90000
+
+    def __init__(self, client, i):
+        super().__init__()
+        self.client = client
+        self.mi = i
+        self._interval = 1.0 / max(1, int(client.args.fps))
+        self._pts = 0
+        self._next = None
+
+    async def recv(self):
+        if self.readyState != "live":
+            raise MediaStreamError
+        now = time.time()
+        if self._next is None:
+            self._next = now
+        delay = self._next - now
+        if delay > 0:
+            await asyncio.sleep(delay)
+        self._next += self._interval
+        arr = await self._current()
+        frame = av.VideoFrame.from_ndarray(arr, format="rgb24")
+        self._pts += int(self._interval * self._CLOCK)
+        frame.pts = self._pts
+        frame.time_base = fractions.Fraction(1, self._CLOCK)
+        return frame
+
+    async def _current(self):
+        cap = self.client.capture
+        arr = cap.latest(self.mi) if cap else None
+        if arr is None:
+            for _ in range(200):  # wait up to ~2s for the first grab
+                await asyncio.sleep(0.01)
+                cap = self.client.capture
+                arr = cap.latest(self.mi) if cap else None
+                if arr is not None:
+                    break
+        if arr is None:
+            arr = np.zeros((2, 2, 3), dtype=np.uint8)  # keep the track alive
+        return arr
 
 
 def _compute_blockrects(client):
@@ -476,39 +631,21 @@ async def _maybe_send_blockrects(ws, client):
         await ws.send(json.dumps({"type": "blockrects", "rects": rects}))
 
 
-async def capture_loop(ws, client):
-    interval = 1.0 / client.args.fps
-    with ScreenGrabber() as sct:
+async def blockrects_loop(ws, client):
+    """Keep the viewer's 'blocked cursor' regions (where the agent's own windows
+    are) up to date over the WebSocket, for as long as a session is live. Sends
+    only when the rects change (see _maybe_send_blockrects)."""
+    try:
         while client.streaming:
-            start = time.time()
-            # Stream only the monitors the viewer currently wants; if none are
-            # wanted (or the set is empty), stream all of them.
-            wanted = list(client.wanted) or [m["i"] for m in client.monitors]
             try:
-                for i in wanted:
-                    if not (0 <= i < len(client.monitors)):
-                        continue
-                    mon = client.monitors[i]
-                    grab = {
-                        "left": mon["left"], "top": mon["top"],
-                        "width": mon["width"], "height": mon["height"],
-                    }
-                    scale = client.scale_for(mon["width"])
-                    out_w = max(1, int(mon["width"] * scale))
-                    out_h = max(1, int(mon["height"] * scale))
-                    jpeg = _grab_and_encode(
-                        sct, grab, out_w, out_h, client.args.quality
-                    )
-                    # BINARY frame: byte 0 = 0-based monitor index, rest = JPEG.
-                    await ws.send(bytes([i]) + jpeg)
-                # Tell the viewer where our own windows are (for the "blocked" cursor).
                 await _maybe_send_blockrects(ws, client)
             except asyncio.CancelledError:
                 break
             except Exception:
                 break
-            # One interval per full cycle keeps ~fps per monitor.
-            await asyncio.sleep(max(0.0, interval - (time.time() - start)))
+            await asyncio.sleep(0.4)
+    except asyncio.CancelledError:
+        pass
 
 
 # --------------------------------------------------------------------------- #
@@ -535,6 +672,28 @@ def request_session(http_base, ctx):
         return json.loads(resp.read().decode("utf-8"))["code"]
 
 
+STUN_FALLBACK = [{"urls": ["stun:stun.cloudflare.com:3478"]}]
+
+
+def request_ice_servers(http_base, ctx, code):
+    """Fetch ICE servers (STUN + minted TURN when configured) from the Worker.
+    Falls back to STUN-only so a peer connection can still be attempted."""
+    try:
+        req = urllib.request.Request(
+            f"{http_base}/api/ice-servers?code={code}",
+            method="GET",
+            headers={"User-Agent": USER_AGENT},
+        )
+        with urllib.request.urlopen(req, timeout=15, context=ctx) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+        servers = data.get("iceServers")
+        if isinstance(servers, list) and servers:
+            return servers
+    except Exception:
+        pass
+    return STUN_FALLBACK
+
+
 # --------------------------------------------------------------------------- #
 # Network client (runs its own asyncio loop on a background thread)
 # --------------------------------------------------------------------------- #
@@ -548,11 +707,15 @@ class NetClient:
         self.stop_event = None
         self.ws = None
         self.streaming = False
-        self.capture_task = None
+        self.pc = None              # RTCPeerConnection carrying the video tracks
+        self.capture = None         # CaptureManager (screen grab -> frame slots)
+        self.blockrects_task = None # keeps the viewer's blocked-cursor regions fresh
         self.monitors = []          # list of {"i","left","top","width","height"}
         self.primary = None         # convenience handle to monitors[0]
         self.wanted = []            # 0-based indices the viewer wants streamed
         self.code = None
+        self._http_base = None      # https base, for the ICE-servers request
+        self._left_reported = False # viewer-gone reported once per session (dedup)
         self._blocked_btns = set()  # buttons whose press was suppressed over our window
         self._pressed_btns = set()  # buttons we actually injected a press for (to release)
         self._last_blockrects = None  # last blockrects JSON sent to the viewer (dedup)
@@ -629,6 +792,7 @@ class NetClient:
         self.wanted = [m["i"] for m in self.monitors]
 
         http_base, ws_base = normalize_server(self.args.server)
+        self._http_base = http_base
         self.app.post(lambda: self.app.set_status(tr("agent.status.requesting"), MUTED))
         try:
             code = await self.loop.run_in_executor(
@@ -643,10 +807,13 @@ class NetClient:
         self.app.post(lambda: self.app.on_code(code, http_base))
 
         ws_url = f"{ws_base}/ws/agent?code={code}"
+        # Only use TLS for wss:// (a plaintext ws:// server — e.g. a local dev
+        # worker — rejects an ssl context).
+        ws_ssl = self.ssl_ctx if ws_url.startswith("wss://") else None
         try:
             async with websockets.connect(
                 ws_url,
-                ssl=self.ssl_ctx,
+                ssl=ws_ssl,
                 max_size=None,
                 ping_interval=20,
                 user_agent_header=USER_AGENT,
@@ -690,19 +857,54 @@ class NetClient:
             mtype = msg.get("type")
             if mtype == "want":
                 self._set_wanted(msg.get("monitors"))
+            elif mtype == "webrtc-answer":
+                if self.pc:
+                    try:
+                        await self.pc.setRemoteDescription(
+                            RTCSessionDescription(sdp=msg.get("sdp", ""), type="answer")
+                        )
+                    except Exception:
+                        pass
+            elif mtype == "webrtc-ice":
+                await self._add_remote_candidate(msg.get("candidate"))
             elif mtype == "viewer-joined":
                 asyncio.create_task(self._on_viewer(ws))
             elif mtype == "peer-left" and msg.get("who") == "viewer":
                 await self._stop_stream()
                 local = self.ended_locally
                 self.ended_locally = False
-                self.app.post(lambda: self.app.on_peer_left(local))
+                self._report_peer_left(local)
+
+    def _report_peer_left(self, local):
+        """Report the viewer gone to the UI exactly once per session. Two paths can
+        detect it (the relayed WS peer-left and the WebRTC connectionstatechange),
+        and they can race; this dedups so the banner/stop teardown runs once."""
+        if self._left_reported:
+            return
+        self._left_reported = True
+        self.app.post(lambda: self.app.on_peer_left(local))
+
+    async def _on_capture_stalled(self):
+        """Screen capture stopped producing frames (lock screen, UAC/secure desktop,
+        a display change, ...). End the session so the viewer drops out instead of
+        sitting on a frozen frame while input still reaches this machine."""
+        if not self.streaming:
+            return
+        ws = self.ws
+        await self._stop_stream()
+        if ws:
+            try:
+                await ws.send(json.dumps({"type": "session-ended"}))
+            except Exception:
+                pass
+        self._report_peer_left(False)
 
     async def _on_viewer(self, ws):
         if self.streaming:
             return
         # A fresh viewer: clear any leftover per-session input state.
         self.ended_locally = False
+        self._left_reported = False
         self._blocked_btns.clear()
         self._pressed_btns.clear()
         self._last_blockrects = None  # force a fresh blockrects send to this viewer
@@ -717,6 +919,7 @@ class NetClient:
                 pass
             self.app.post(self.app.on_denied)
             return
+        # Tell the viewer the monitor list so it can build its <video> elements.
         try:
             await ws.send(json.dumps({
                 "type": "monitors",
@@ -728,8 +931,102 @@ class NetClient:
         except Exception:
             return
         self.streaming = True
-        self.capture_task = asyncio.create_task(capture_loop(ws, self))
+        # Start grabbing the screen and open the WebRTC video connection.
+        self.capture = CaptureManager(self)
+        self.capture.start()
+        ok = await self._start_webrtc(ws)
+        if not ok:
+            await self._stop_stream()
+            self._report_peer_left(False)
+            return
+        # Blockrects used to piggyback on the capture loop; now its own task.
+        self.blockrects_task = asyncio.create_task(blockrects_loop(ws, self))
         self.app.post(self.app.on_connected)
+
+    async def _start_webrtc(self, ws):
+        """Build the peer connection: one send-only video track per monitor, create
+        the offer (aiortc gathers ICE non-trickle, so candidates ride in the SDP),
+        and send it with a mid->monitor map. Returns False on failure."""
+        try:
+            ice = await self.loop.run_in_executor(
+                None,
+                lambda: request_ice_servers(self._http_base, self.ssl_ctx, self.code),
+            )
+            servers = [
+                RTCIceServer(
+                    urls=s.get("urls"),
+                    username=s.get("username"),
+                    credential=s.get("credential"),
+                )
+                for s in ice
+                if s.get("urls")
+            ]
+            self.pc = RTCPeerConnection(RTCConfiguration(iceServers=servers))
+
+            @self.pc.on("connectionstatechange")
+            async def _on_conn_state():
+                pc = self.pc
+                if not pc or not self.streaming:
+                    return
+                if pc.connectionState in ("failed", "closed"):
+                    # The media path died; fall back to waiting for a new viewer.
+                    await self._stop_stream()
+                    self._report_peer_left(False)
+
+            for m in self.monitors:
+                self.pc.addTrack(ScreenTrack(self, m["i"]))
+
+            await self.pc.setLocalDescription(await self.pc.createOffer())
+            self._apply_bitrate()
+
+            mids = {}
+            for tcv in self.pc.getTransceivers():
+                track = tcv.sender.track if tcv.sender else None
+                mi = getattr(track, "mi", None)
+                if mi is not None and tcv.mid is not None:
+                    mids[tcv.mid] = mi
+
+            await ws.send(json.dumps({
+                "type": "webrtc-offer",
+                "sdp": self.pc.localDescription.sdp,
+                "mids": mids,
+            }))
+            return True
+        except Exception:
+            return False
+
+    def _apply_bitrate(self):
+        """Best-effort per-sender max bitrate from --bitrate (kbps). aiortc may not
+        honor it on every version; failures are harmless (congestion control still
+        adapts)."""
+        if not self.args.bitrate or not self.pc:
+            return
+        for sender in self.pc.getSenders():
+            try:
+                params = sender.getParameters()
+                if params and params.encodings:
+                    for enc in params.encodings:
+                        enc.maxBitrate = int(self.args.bitrate) * 1000
+                    asyncio.ensure_future(sender.setParameters(params))
+            except Exception:
+                pass
+
+    async def _add_remote_candidate(self, c):
+        """Add a trickled ICE candidate from the viewer (the browser trickles its
+        own; the agent gathered non-trickle, so this is the only trickle path)."""
+        if not self.pc or not c:
+            return
+        cand = c.get("candidate")
+        if not cand:
+            return  # end-of-candidates marker
+        try:
+            sdp = cand.split(":", 1)[1] if cand.startswith("candidate:") else cand
+            ice = candidate_from_sdp(sdp)
+            ice.sdpMid = c.get("sdpMid")
+            ice.sdpMLineIndex = c.get("sdpMLineIndex")
+            await self.pc.addIceCandidate(ice)
+        except Exception:
+            pass
 
     def _ask_approval(self):
         ev = threading.Event()
@@ -763,16 +1060,30 @@ class NetClient:
     async def _stop_stream(self):
         self.streaming = False
         self._release_held_buttons()
-        if self.capture_task:
-            self.capture_task.cancel()
+        if self.blockrects_task:
+            self.blockrects_task.cancel()
             try:
-                await self.capture_task
+                await self.blockrects_task
             except (asyncio.CancelledError, Exception):
                 # Awaiting a cancelled task re-raises CancelledError, which is a
                 # BaseException and would otherwise escape "except Exception",
                 # skipping on_peer_left and leaving the UI stuck on "Connected".
                 pass
-            self.capture_task = None
+            self.blockrects_task = None
+        if self.pc:
+            pc = self.pc
+            self.pc = None
+            try:
+                await pc.close()
+            except Exception:
+                pass
+        if self.capture:
+            cap = self.capture
+            self.capture = None
+            try:
+                await self.loop.run_in_executor(None, cap.stop)
+            except Exception:
+                pass
 
     def _release_held_buttons(self):
         """Release any mouse button the remote pressed but didn't release (e.g. the
@@ -1774,10 +2085,11 @@ def parse_args(argv):
         default=os.environ.get("AUDIOBUS_SERVER", DEFAULT_SERVER),
         help="Audiobus server URL (default: %(default)s or $AUDIOBUS_SERVER).",
     )
-    p.add_argument("--fps", type=int, default=12, help="Target frames per second.")
-    p.add_argument("--quality", type=int, default=55, help="JPEG quality 1-95.")
+    p.add_argument("--fps", type=int, default=20, help="Target frames per second.")
+    p.add_argument("--bitrate", type=int, default=None,
+                   help="Best-effort max video bitrate in kbps (default: adaptive).")
     p.add_argument("--scale", type=float, default=None, help="Fixed downscale (0-1).")
-    p.add_argument("--max-width", type=int, default=1600,
+    p.add_argument("--max-width", type=int, default=1920,
                    help="Auto-downscale so frames are at most this wide.")
     p.add_argument("--monitor", type=int, default=1,
                    help="Monitor index (1 = primary, 0 = all).")

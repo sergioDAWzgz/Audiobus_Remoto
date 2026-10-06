@@ -1,9 +1,14 @@
 // Audiobus Remote — browser controller (viewer side).
-// Protocol v2 (multi-monitor): the agent sends a one-time "monitors" message,
-// then one BINARY WebSocket message per captured frame where byte 0 is the
-// 0-based monitor index and the remaining bytes are that monitor's JPEG. The
-// viewer tells the agent which monitors to stream with a "want" message, and
-// sends input tagged with the target monitor index "m".
+// Protocol v3 (WebRTC): after consent the agent sends a one-time "monitors"
+// message, then a "webrtc-offer" carrying one send-only VP8 video track per
+// monitor. The viewer answers and attaches each incoming track to that monitor's
+// <video>. Everything else — consent, the "want" monitor selection, input
+// (mouse/keyboard), "blockrects", and session control — still travels over the
+// WebSocket (relayed by the Durable Object); WebRTC carries video only.
+//
+// Input coordinates are sent in each monitor's FULL pixel space (from "monitors"),
+// independent of the encoded video resolution, so the agent's input handler is
+// unchanged from the JPEG protocol.
 
 const $ = (id) => document.getElementById(id);
 const statusEl = $("status");
@@ -31,18 +36,19 @@ const t = (k) => (window.I18N ? window.I18N.t(k) : k);
 
 let ws = null;
 let monitors = []; // [{ i, w, h }, ...] in the order the agent sent them
-let screens = new Map(); // monitor index -> { canvas, ctx, handlers, mon }
+let screens = new Map(); // monitor index -> { el, handlers, mon }
 let inSession = false;
 let viewMode = "grid"; // "grid" | "single"
 let selectedIndex = 0; // monitor index shown in single mode
-let activeDown = null; // { canvas, mon } held between mousedown and mouseup
+let activeDown = null; // { el, mon } held between mousedown and mouseup
 let windowBound = false;
 let fsActive = false; // the fullscreen hover-bar is live
 let modalOpen = false; // a confirmation dialog is open (suppresses remote input)
 let dismissModal = null; // close() of the open confirmation dialog, or null
-let lastFrameAt = 0; // performance.now() of the last frame/activity
-let watchdog = null; // interval that detects a dead/stopped agent
-const STALE_MS = 4000; // no frames for this long -> treat the session as gone
+let currentCode = null; // the session code (needed to fetch ICE servers)
+let pc = null; // RTCPeerConnection carrying the per-monitor video tracks
+let trackMids = {}; // offer m-line "mid" -> monitor index (from the agent)
+let connWatch = null; // timer giving a transient "disconnected" time to recover
 
 function setStatus(text, kind) {
   statusEl.textContent = text;
@@ -77,9 +83,9 @@ $("joinForm").addEventListener("submit", (e) => {
 });
 
 function connect(code) {
+  currentCode = code;
   const proto = location.protocol === "https:" ? "wss" : "ws";
   ws = new WebSocket(`${proto}://${location.host}/ws/viewer?code=${code}`);
-  ws.binaryType = "arraybuffer";
   setStatus(t("connect.status.connecting"));
   ws.onopen = () => setStatus(t("connect.status.waitingAccept"), "warn");
   ws.onmessage = onMessage;
@@ -94,10 +100,7 @@ function send(obj) {
 // ---------------- Messages ----------------
 
 async function onMessage(ev) {
-  if (typeof ev.data !== "string") {
-    await drawFrame(ev.data);
-    return;
-  }
+  if (typeof ev.data !== "string") return; // video now travels over WebRTC
   let msg;
   try {
     msg = JSON.parse(ev.data);
@@ -109,6 +112,12 @@ async function onMessage(ev) {
       break;
     case "monitors":
       startSession(Array.isArray(msg.monitors) ? msg.monitors : []);
+      break;
+    case "webrtc-offer":
+      await handleOffer(msg);
+      break;
+    case "webrtc-ice":
+      await handleRemoteIce(msg);
       break;
     case "denied":
       setStatus(t("connect.status.declined"), "bad");
@@ -156,20 +165,142 @@ function inBlockRect(m, x, y) {
   return false;
 }
 
-async function drawFrame(buf) {
-  lastFrameAt = performance.now(); // liveness: a frame just arrived
+// ---------------- WebRTC ----------------
+
+// Fetch STUN (+ TURN when configured) from the Worker. Falls back to public-ish
+// STUN so a peer connection can still be attempted if the endpoint fails.
+async function fetchIceServers() {
   try {
-    const bytes = new Uint8Array(buf);
-    if (bytes.length < 2) return; // need an index byte plus at least some JPEG
-    const idx = bytes[0];
-    const s = screens.get(idx);
-    if (!s) return; // frame for a monitor we have no canvas for — ignore
-    const bmp = await createImageBitmap(new Blob([buf.slice(1)]));
-    s.ctx.drawImage(bmp, 0, 0, s.canvas.width, s.canvas.height);
-    bmp.close();
+    const r = await fetch(`/api/ice-servers?code=${encodeURIComponent(currentCode || "")}`);
+    if (r.ok) {
+      const data = await r.json();
+      if (Array.isArray(data.iceServers) && data.iceServers.length) {
+        return data.iceServers;
+      }
+    }
   } catch {
-    /* skip a bad frame */
+    /* fall through to STUN-only */
   }
+  return [{ urls: ["stun:stun.cloudflare.com:3478"] }];
+}
+
+async function handleOffer(msg) {
+  const iceServers = await fetchIceServers();
+  if (!inSession) return; // the session ended while we were fetching
+  closePeer(); // never keep a stale connection (this also resets trackMids)
+  // Map each media section (its SDP "mid") to the monitor it carries. Set AFTER
+  // closePeer(), which clears trackMids, so the map is live when ontrack fires.
+  trackMids = msg && msg.mids ? msg.mids : {};
+
+  pc = new RTCPeerConnection({ iceServers });
+
+  pc.ontrack = (e) => {
+    const mid = e.transceiver && e.transceiver.mid;
+    let idx =
+      mid != null && trackMids[mid] != null ? Number(trackMids[mid]) : NaN;
+    if (!Number.isInteger(idx)) idx = firstUnassignedMonitor();
+    const s = screens.get(idx);
+    if (!s) return;
+    // One track per monitor: wrap THIS track alone (the agent groups all tracks
+    // into one stream, so e.streams[0] would put every monitor on every <video>).
+    s.el.srcObject = new MediaStream([e.track]);
+    if (s.el.play) s.el.play().catch(() => {});
+  };
+
+  pc.onicecandidate = (e) => {
+    if (e.candidate) send({ type: "webrtc-ice", candidate: e.candidate });
+  };
+
+  pc.onconnectionstatechange = () => {
+    if (!inSession || !pc) return;
+    const st = pc.connectionState;
+    if (st === "connected") {
+      clearConnWatch();
+    } else if (st === "failed" || st === "closed") {
+      connLost();
+    } else if (st === "disconnected") {
+      scheduleConnWatch(); // may recover; give ICE a few seconds
+    }
+  };
+
+  try {
+    await pc.setRemoteDescription({ type: "offer", sdp: msg.sdp });
+    const answer = await pc.createAnswer();
+    await pc.setLocalDescription(answer);
+    send({ type: "webrtc-answer", sdp: pc.localDescription.sdp });
+  } catch {
+    if (inSession) {
+      setStatus(t("connect.status.lost"), "bad");
+      endSession(true);
+    }
+  }
+}
+
+async function handleRemoteIce(msg) {
+  // The agent gathers ICE non-trickle (candidates ride in its offer), so this is
+  // mostly defensive, but honor any trickled candidate it does send.
+  if (!pc || !msg.candidate) return;
+  try {
+    await pc.addIceCandidate(msg.candidate);
+  } catch {
+    /* ignore a candidate we can't add */
+  }
+}
+
+// First monitor whose <video> has no stream yet — a fallback when a track's mid
+// isn't in the offer map (keeps a single-monitor session working regardless).
+function firstUnassignedMonitor() {
+  for (const m of monitors) {
+    const s = screens.get(m.i);
+    if (s && !s.el.srcObject) return m.i;
+  }
+  return monitors.length ? monitors[0].i : 0;
+}
+
+function scheduleConnWatch() {
+  if (connWatch) return;
+  connWatch = setTimeout(() => {
+    connWatch = null;
+    if (
+      inSession &&
+      pc &&
+      (pc.connectionState === "disconnected" || pc.connectionState === "failed")
+    ) {
+      connLost();
+    }
+  }, 6000);
+}
+function clearConnWatch() {
+  if (connWatch) {
+    clearTimeout(connWatch);
+    connWatch = null;
+  }
+}
+function connLost() {
+  clearConnWatch();
+  if (!inSession) return;
+  setStatus(t("connect.status.lost"), "bad");
+  endSession(true);
+}
+
+function closePeer() {
+  clearConnWatch();
+  if (pc) {
+    try {
+      pc.ontrack = null;
+      pc.onicecandidate = null;
+      pc.onconnectionstatechange = null;
+    } catch {
+      /* ignore */
+    }
+    try {
+      pc.close();
+    } catch {
+      /* ignore */
+    }
+    pc = null;
+  }
+  trackMids = {};
 }
 
 // ---------------- Session lifecycle ----------------
@@ -197,34 +328,16 @@ function startSession(mons) {
 
   setStatus(t("connect.status.connected"), "good");
   const first = screens.get(selectedIndex);
-  if (first) first.canvas.focus();
-
-  // Watchdog: the agent streams continuously while connected, so a gap in frames
-  // means it stopped/crashed/dropped. This catches cases where no explicit
-  // disconnect ever arrives (half-open socket), including while in fullscreen.
-  lastFrameAt = performance.now();
-  if (watchdog) clearInterval(watchdog);
-  watchdog = setInterval(checkStale, 1000);
+  if (first) first.el.focus();
 
   sendWant();
-}
-
-function checkStale() {
-  if (!inSession) return;
-  if (performance.now() - lastFrameAt > STALE_MS) {
-    setStatus(t("connect.status.lost"), "bad");
-    endSession(true);
-  }
 }
 
 function endSession(keepStatus) {
   inSession = false;
   blockRects = [];
   if (dismissModal) dismissModal(); // force-close a confirmation modal if one is open
-  if (watchdog) {
-    clearInterval(watchdog);
-    watchdog = null;
-  }
+  closePeer();
   if (fsActive) exitFsBar();
   if (document.fullscreenElement) {
     try {
@@ -262,31 +375,37 @@ function onClose() {
   endSession(true);
 }
 
-// ---------------- Canvases ----------------
+// ---------------- Screens (one <video> per monitor) ----------------
 
 function buildScreens() {
   clearScreens();
   for (const m of monitors) {
-    const canvas = document.createElement("canvas");
-    canvas.className = "screen";
-    canvas.width = m.w; // intrinsic pixel size of this monitor
-    canvas.height = m.h;
-    canvas.tabIndex = 0;
-    canvas.dataset.index = String(m.i);
-    const ctx = canvas.getContext("2d", { alpha: false });
-    const handlers = attachInput(canvas, m);
-    screensEl.appendChild(canvas);
-    screens.set(m.i, { canvas, ctx, handlers, mon: m });
+    const el = document.createElement("video");
+    el.className = "screen";
+    el.autoplay = true;
+    el.muted = true;
+    el.playsInline = true;
+    el.setAttribute("playsinline", ""); // iOS Safari needs the attribute too
+    el.tabIndex = 0;
+    el.dataset.index = String(m.i);
+    const handlers = attachInput(el, m);
+    screensEl.appendChild(el);
+    screens.set(m.i, { el, handlers, mon: m });
   }
 }
 
 function clearScreens() {
   for (const [, s] of screens) {
     const h = s.handlers;
-    s.canvas.removeEventListener("mousemove", h.onMove);
-    s.canvas.removeEventListener("mousedown", h.onDown);
-    s.canvas.removeEventListener("wheel", h.onWheel);
-    s.canvas.removeEventListener("contextmenu", h.onCtx);
+    s.el.removeEventListener("mousemove", h.onMove);
+    s.el.removeEventListener("mousedown", h.onDown);
+    s.el.removeEventListener("wheel", h.onWheel);
+    s.el.removeEventListener("contextmenu", h.onCtx);
+    try {
+      s.el.srcObject = null;
+    } catch {
+      /* ignore */
+    }
   }
   screens.clear();
   screensEl.innerHTML = "";
@@ -302,7 +421,6 @@ function currentWant() {
 
 function sendWant() {
   send({ type: "want", monitors: currentWant() });
-  lastFrameAt = performance.now(); // grace while the agent switches monitors
 }
 
 function buildMonitorPicker() {
@@ -333,7 +451,7 @@ function applyView() {
   screensEl.classList.toggle("single", viewMode === "single");
 
   for (const [idx, s] of screens) {
-    s.canvas.hidden = !(viewMode === "grid" || idx === selectedIndex);
+    s.el.hidden = !(viewMode === "grid" || idx === selectedIndex);
   }
 
   gridBtn.classList.toggle("active", viewMode === "grid");
@@ -352,7 +470,7 @@ function setMode(mode) {
   applyView();
   if (mode === "single") {
     const s = screens.get(selectedIndex);
-    if (s) s.canvas.focus();
+    if (s) s.el.focus();
   }
   sendWant();
 }
@@ -364,7 +482,7 @@ function selectMonitor(idx) {
   selectedIndex = idx;
   applyView();
   const s = screens.get(idx);
-  if (s) s.canvas.focus();
+  if (s) s.el.focus();
   if (changed) sendWant();
 }
 
@@ -467,25 +585,26 @@ document.addEventListener("fullscreenchange", () => {
 
 // ---------------- Input ----------------
 
-// Map an event to this canvas's own pixel coordinate space.
-function canvasXY(canvas, e) {
-  const r = canvas.getBoundingClientRect();
-  const x = r.width ? ((e.clientX - r.left) / r.width) * canvas.width : 0;
-  const y = r.height ? ((e.clientY - r.top) / r.height) * canvas.height : 0;
+// Map an event to the target monitor's FULL pixel coordinate space (mon.w/mon.h
+// from the "monitors" message), independent of the encoded video resolution.
+function mediaXY(el, mon, e) {
+  const r = el.getBoundingClientRect();
+  const x = r.width ? ((e.clientX - r.left) / r.width) * mon.w : 0;
+  const y = r.height ? ((e.clientY - r.top) / r.height) * mon.h : 0;
   return {
-    x: Math.max(0, Math.min(canvas.width - 1, Math.round(x))),
-    y: Math.max(0, Math.min(canvas.height - 1, Math.round(y))),
+    x: Math.max(0, Math.min(mon.w - 1, Math.round(x))),
+    y: Math.max(0, Math.min(mon.h - 1, Math.round(y))),
   };
 }
 
-function attachInput(canvas, mon) {
+function attachInput(el, mon) {
   let lastMove = 0;
 
   const onMove = (e) => {
-    const p = canvasXY(canvas, e);
+    const p = mediaXY(el, mon, e);
     // Over the agent's own window the agent ignores clicks, so hint with a
     // "not-allowed" cursor (updated every move; "" reverts to the CSS crosshair).
-    canvas.style.cursor = inBlockRect(mon.i, p.x, p.y) ? "not-allowed" : "";
+    el.style.cursor = inBlockRect(mon.i, p.x, p.y) ? "not-allowed" : "";
     const now = performance.now();
     if (now - lastMove < 25) return; // ~40 moves/sec max
     lastMove = now;
@@ -493,36 +612,36 @@ function attachInput(canvas, mon) {
   };
   const onDown = (e) => {
     e.preventDefault();
-    canvas.focus();
-    activeDown = { canvas, mon };
-    const p = canvasXY(canvas, e);
+    el.focus();
+    activeDown = { el, mon };
+    const p = mediaXY(el, mon, e);
     send({ t: "md", m: mon.i, x: p.x, y: p.y, b: e.button });
   };
   const onWheel = (e) => {
     e.preventDefault();
-    const p = canvasXY(canvas, e);
+    const p = mediaXY(el, mon, e);
     send({ t: "scroll", m: mon.i, x: p.x, y: p.y, dx: e.deltaX, dy: e.deltaY });
   };
   const onCtx = (e) => {
     e.preventDefault(); // let right-click flow through as md/mu instead
   };
 
-  canvas.addEventListener("mousemove", onMove);
-  canvas.addEventListener("mousedown", onDown);
-  canvas.addEventListener("wheel", onWheel, { passive: false });
-  canvas.addEventListener("contextmenu", onCtx);
+  el.addEventListener("mousemove", onMove);
+  el.addEventListener("mousedown", onDown);
+  el.addEventListener("wheel", onWheel, { passive: false });
+  el.addEventListener("contextmenu", onCtx);
   return { onMove, onDown, onWheel, onCtx };
 }
 
 // A single window-level mouseup pairs every mousedown with exactly one mouseup
 // on the monitor where the press began, even when the button is released off
-// the canvas (a grid gap, outside the stage, another monitor), so the remote
+// the video (a grid gap, outside the stage, another monitor), so the remote
 // button never gets stuck down.
 function onWindowMouseUp(e) {
   if (!activeDown) return;
-  const { canvas, mon } = activeDown;
+  const { el, mon } = activeDown;
   activeDown = null;
-  const p = canvasXY(canvas, e);
+  const p = mediaXY(el, mon, e);
   send({ t: "mu", m: mon.i, x: p.x, y: p.y, b: e.button });
 }
 
