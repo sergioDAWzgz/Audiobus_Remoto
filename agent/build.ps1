@@ -68,14 +68,16 @@ if (Test-Path $exe) {
     # The WebRTC exe is ~60MB (PyAV/ffmpeg), over the 25 MiB Workers static-asset
     # limit, so it is served from R2 instead of /public. Upload it to the bucket
     # (one-time: enable R2, then `wrangler r2 bucket create audiobus-remote-downloads`).
-    Write-Host "Uploading to R2 bucket 'audiobus-remote-downloads'..."
-    npx wrangler r2 object put audiobus-remote-downloads/audiobus-agent.exe --file $exe
+    # --remote is REQUIRED: wrangler's r2 object commands default to a LOCAL
+    # simulation, so without it the exe lands in .wrangler/state and the deployed
+    # Worker (which reads the real bucket) serves a 404.
+    Write-Host "Uploading to R2 bucket 'audiobus-remote-downloads' (remote)..."
+    npx wrangler r2 object put audiobus-remote-downloads/audiobus-agent.exe --file $exe --remote
     if ($LASTEXITCODE -eq 0) {
-        Write-Host "Uploaded. Served at /downloads/audiobus-agent.exe once the DOWNLOADS"
-        Write-Host "binding is uncommented in wrangler.jsonc and deployed."
+        Write-Host "Uploaded. Served at /downloads/audiobus-agent.exe (DOWNLOADS binding)."
     } else {
         Write-Warning "R2 upload failed (is R2 enabled and the bucket created?). Run manually:"
-        Write-Host "  npx wrangler r2 object put audiobus-remote-downloads/audiobus-agent.exe --file `"$exe`""
+        Write-Host "  npx wrangler r2 object put audiobus-remote-downloads/audiobus-agent.exe --file `"$exe`" --remote"
     }
 } else {
     Write-Error "Build failed: $exe not found."
