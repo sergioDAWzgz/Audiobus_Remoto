@@ -74,6 +74,14 @@ DEFAULT_SERVER = "https://audiobus-remote.soft-daf.workers.dev"
 # Cloudflare's bot filtering, so we must send our own on every request.
 USER_AGENT = "AudiobusRemoteAgent/0.1"
 
+# Connection heartbeat / reconnection tuning.
+HB_PING_SECS = 2.0          # send an app-level "ping" this often
+HB_INTERRUPT_SECS = 5.0     # no "pong" for this long -> the server link is interrupted
+HB_RECONNECT_SECS = 2.0     # wait between reconnect attempts (after the first, immediate one)
+HB_WARN_SECS = 5.0          # reconnect starts at once; warn only if still down this long
+HB_MAX_RECONNECT_SECS = 65.0  # > the DO's 60s grace: give up reconnecting after this
+INTERRUPT_REASK_MS = 10000  # re-ask the Wait/Cut dialog this long after "Wait"
+
 # --------------------------------------------------------------------------- #
 # Localization: show the UI in the user's OS language, falling back to English.
 # --------------------------------------------------------------------------- #
@@ -715,6 +723,8 @@ class NetClient:
         self.wanted = []            # 0-based indices the viewer wants streamed
         self.code = None
         self._http_base = None      # https base, for the ICE-servers request
+        self._last_pong = 0.0       # time.time() of the last heartbeat "pong"
+        self._viewer_approved = False  # the owner approved the currently-held viewer
         self._left_reported = False # viewer-gone reported once per session (dedup)
         self._blocked_btns = set()  # buttons whose press was suppressed over our window
         self._pressed_btns = set()  # buttons we actually injected a press for (to release)
@@ -750,6 +760,7 @@ class NetClient:
         # closing in response to "session-ended") is reported as us closing the
         # connection, not the viewer leaving.
         self.ended_locally = True
+        self._viewer_approved = False  # session ended by us; a new viewer must consent
         await self._stop_stream()
         if self.ws:
             try:
@@ -810,32 +821,126 @@ class NetClient:
         # Only use TLS for wss:// (a plaintext ws:// server — e.g. a local dev
         # worker — rejects an ssl context).
         ws_ssl = self.ssl_ctx if ws_url.startswith("wss://") else None
+
+        # Reconnect loop: once the first connection is ESTABLISHED, an unexpected
+        # drop no longer kills the agent — we reconnect IMMEDIATELY with the SAME code
+        # (the server holds the session briefly), warn with the Wait/Cut dialog only
+        # if we're still down after a grace, and give up after the grace window.
+        first = True
+        interrupted_since = None  # monotonic time the current interruption began
+        notified = False          # on_link_interrupted was posted for this interruption
+        gave_up = False           # reconnect deadline elapsed without recovery
+        while not self.stop_event.is_set():
+            try:
+                async with websockets.connect(
+                    ws_url,
+                    ssl=ws_ssl,
+                    max_size=None,
+                    ping_interval=20,
+                    user_agent_header=USER_AGENT,
+                ) as ws:
+                    self.ws = ws
+                    self._last_pong = time.time()
+                    if first:
+                        first = False
+                        self.app.post(
+                            lambda: self.app.set_status(tr("agent.status.waiting"), WARN)
+                        )
+                    elif notified:
+                        # Reconnected after we'd (scheduled/shown) the warning: dismiss
+                        # it and restore. The server replays viewer-joined, so a held
+                        # viewer is re-served through _on_viewer (resumed=True).
+                        self.app.post(self.app.on_reconnected)
+                    interrupted_since = None
+                    notified = False
+                    recv = asyncio.create_task(self._recv_loop(ws))
+                    hb = asyncio.create_task(self._heartbeat(ws))
+                    stop = asyncio.create_task(self.stop_event.wait())
+                    _, pending = await asyncio.wait(
+                        {recv, hb, stop}, return_when=asyncio.FIRST_COMPLETED
+                    )
+                    for task in pending:
+                        task.cancel()
+                    if self.stop_event.is_set():
+                        # Deliberate quit (window close / Cut): tell a connected viewer
+                        # so it ends promptly instead of waiting out the server's grace.
+                        try:
+                            await ws.send(json.dumps({"type": "session-ended"}))
+                        except Exception:
+                            pass
+                    await self._stop_stream()
+            except Exception:
+                pass  # connect failed / dropped; handled as an interruption below
+            if self.stop_event.is_set():
+                break
+            if first:
+                # Never established (the initial connect failed): keep today's
+                # behavior — report the server is unreachable and give up.
+                self.app.post(lambda: self.app.on_fatal(tr("agent.error.unreachable")))
+                return
+            now = time.monotonic()
+            if interrupted_since is None:
+                # Interruption just began: cancel any still-pending consent prompt
+                # (its viewer may be re-served after we reconnect, which must prompt
+                # again rather than inherit a half-answered decision), then reconnect
+                # IMMEDIATELY (no delay).
+                interrupted_since = now
+                self.app.post(self.app._close_approval_dialog)
+                continue
+            if now - interrupted_since > HB_MAX_RECONNECT_SECS:
+                # The server's grace has surely elapsed; stop trying.
+                gave_up = True
+                break
+            # Still within the window: warn once (the Tk side delays the actual dialog
+            # by HB_WARN_SECS), then wait a short, stop-interruptible delay before retry.
+            if not notified:
+                notified = True
+                self.app.post(self.app.on_link_interrupted)
+            try:
+                await asyncio.wait_for(self.stop_event.wait(), timeout=HB_RECONNECT_SECS)
+            except asyncio.TimeoutError:
+                pass
+        # Loop ended: either a deliberate stop (dismiss any dialog) or we gave up
+        # reconnecting (report the lost connection).
+        if gave_up:
+            self.app.post(self.app.on_link_failed)
+        else:
+            self.app.post(self.app.on_link_dismiss)
+
+    async def _heartbeat(self, ws):
+        """Ping the server over the WS and watch for the echoed pong. If none comes
+        back within HB_INTERRUPT_SECS, close the socket so the reconnect loop runs."""
+        self._last_pong = time.time()
+        last_tick = time.time()
         try:
-            async with websockets.connect(
-                ws_url,
-                ssl=ws_ssl,
-                max_size=None,
-                ping_interval=20,
-                user_agent_header=USER_AGENT,
-            ) as ws:
-                self.ws = ws
-                self.app.post(
-                    lambda: self.app.set_status(tr("agent.status.waiting"), WARN)
-                )
-                recv = asyncio.create_task(self._recv_loop(ws))
-                stop = asyncio.create_task(self.stop_event.wait())
-                _, pending = await asyncio.wait(
-                    {recv, stop}, return_when=asyncio.FIRST_COMPLETED
-                )
-                for task in pending:
-                    task.cancel()
-                await self._stop_stream()
-        except Exception as e:
-            self.app.post(lambda: self.app.set_status(f"Disconnected: {e}", BAD))
+            while True:
+                await asyncio.sleep(HB_PING_SECS)
+                now = time.time()
+                # If far more than the interval elapsed, the process was suspended
+                # (machine sleep): the pong is stale only because we weren't running,
+                # not because the link failed. Give it a fresh window + re-ping.
+                if now - last_tick > HB_INTERRUPT_SECS:
+                    self._last_pong = now
+                last_tick = now
+                try:
+                    await ws.send("ping")
+                except Exception:
+                    return  # socket is already dead
+                if time.time() - self._last_pong > HB_INTERRUPT_SECS:
+                    try:
+                        await ws.close()
+                    except Exception:
+                        pass
+                    return
+        except asyncio.CancelledError:
+            pass
 
     async def _recv_loop(self, ws):
         async for raw in ws:
             if isinstance(raw, (bytes, bytearray)):
+                continue
+            if raw == "pong":
+                self._last_pong = time.time()  # heartbeat: our link is alive
                 continue
             try:
                 msg = json.loads(raw)
@@ -868,9 +973,10 @@ class NetClient:
             elif mtype == "webrtc-ice":
                 await self._add_remote_candidate(msg.get("candidate"))
             elif mtype == "viewer-joined":
-                asyncio.create_task(self._on_viewer(ws))
+                asyncio.create_task(self._on_viewer(ws, bool(msg.get("resumed"))))
             elif mtype == "peer-left" and msg.get("who") == "viewer":
                 await self._stop_stream()
+                self._viewer_approved = False  # viewer relationship ended; re-consent next
                 local = self.ended_locally
                 self.ended_locally = False
                 self._report_peer_left(local)
@@ -891,6 +997,7 @@ class NetClient:
         if not self.streaming:
             return
         ws = self.ws
+        self._viewer_approved = False  # session ended; a new viewer must consent
         await self._stop_stream()
         if ws:
             try:
@@ -899,16 +1006,25 @@ class NetClient:
                 pass
         self._report_peer_left(False)
 
-    async def _on_viewer(self, ws):
+    async def _on_viewer(self, ws, resumed=False):
         if self.streaming:
             return
+        # A brand-new viewer relationship (not a re-serve of a held viewer) must earn
+        # consent afresh — forget any prior approval.
+        if not resumed:
+            self._viewer_approved = False
         # A fresh viewer: clear any leftover per-session input state.
         self.ended_locally = False
         self._left_reported = False
         self._blocked_btns.clear()
         self._pressed_btns.clear()
         self._last_blockrects = None  # force a fresh blockrects send to this viewer
-        if self.app.auto_accept:
+        # Auto-accept if the user set it, OR this is a viewer the owner ALREADY
+        # approved being re-served after the agent's OWN reconnect. `resumed` alone is
+        # NOT proof of consent — the server holds any still-connected viewer, including
+        # one whose approval was still pending when we dropped — so require our own
+        # approved flag too. Everyone else is prompted.
+        if self.app.auto_accept or (resumed and self._viewer_approved):
             allowed = True
         else:
             allowed = await self.loop.run_in_executor(None, self._ask_approval)
@@ -919,6 +1035,7 @@ class NetClient:
                 pass
             self.app.post(self.app.on_denied)
             return
+        self._viewer_approved = True  # admitted: re-serve silently across our reconnect
         # Tell the viewer the monitor list so it can build its <video> elements.
         try:
             await ws.send(json.dumps({
@@ -1538,6 +1655,9 @@ class App:
         self._status_role = "muted"
         self._connected = False      # a viewer is actively connected (streaming)
         self._approval_dialog = None
+        self._interrupt_dialog = None  # the "connection interrupted" Wait/Cut dialog
+        self._interrupt_grace = None   # after() id: delay before the dialog first shows
+        self._interrupt_reask = None   # after() id for re-asking 10s after "Wait"
         self._window_rects = ()      # our windows' screen rects (main + any dialog);
         #                              injected clicks on them are ignored.
         self._agent_foreground = False  # an agent window has OS focus -> drop injected keys
@@ -2005,6 +2125,101 @@ class App:
     def on_fatal(self, message):
         self.set_status(tr("agent.error.couldNotStart"), BAD)
         messagebox.showerror("Audiobus Remote", message)
+
+    # ---- Connection-interruption dialog (same prompt as the webapp) ----
+
+    def on_link_interrupted(self):
+        """Our established link to the server dropped. The net thread is already
+        reconnecting; show the Wait/Cut warning only if we're still down after a
+        short grace, so a quick reconnect stays invisible."""
+        self.set_status(tr("ui.interrupt.status"), BAD)
+        if self._interrupt_dialog is not None or self._interrupt_grace is not None:
+            return  # dialog already showing or already scheduled
+        self._interrupt_grace = self.root.after(
+            int(HB_WARN_SECS * 1000), self._interrupt_grace_fire)
+
+    def _interrupt_grace_fire(self):
+        self._interrupt_grace = None
+        self._show_interrupt_dialog()
+
+    def _show_interrupt_dialog(self):
+        dlg = self._interrupt_dialog
+        if dlg is not None:
+            try:
+                if dlg.winfo_exists() and not dlg._done:
+                    return  # already showing
+            except Exception:
+                pass
+        self._cancel_interrupt_reask()
+        self._interrupt_dialog = ActionDialog(
+            self.root, tr("ui.interrupt.msg"),
+            tr("ui.interrupt.cut"), STOP_BG, STOP_FG,
+            tr("ui.interrupt.wait"), NEUTRAL_BG, NEUTRAL_FG,
+            on_pos=self._interrupt_cut, on_neg=self._interrupt_wait,
+        )
+
+    def _interrupt_cut(self):
+        # Cut: the agent can't run without the server, so close it.
+        self._interrupt_dialog = None
+        self._cancel_interrupt_timers()
+        self._quit()
+
+    def _interrupt_wait(self):
+        # Wait: keep reconnecting; re-ask after 10s if still down (on_reconnected
+        # cancels this).
+        self._interrupt_dialog = None
+        self._interrupt_reask = self.root.after(
+            INTERRUPT_REASK_MS, self._interrupt_reask_fire)
+
+    def _interrupt_reask_fire(self):
+        self._interrupt_reask = None
+        self._show_interrupt_dialog()
+
+    def _cancel_interrupt_reask(self):
+        if self._interrupt_reask is not None:
+            try:
+                self.root.after_cancel(self._interrupt_reask)
+            except Exception:
+                pass
+            self._interrupt_reask = None
+
+    def _cancel_interrupt_timers(self):
+        self._cancel_interrupt_reask()
+        if self._interrupt_grace is not None:
+            try:
+                self.root.after_cancel(self._interrupt_grace)
+            except Exception:
+                pass
+            self._interrupt_grace = None
+
+    def on_link_dismiss(self):
+        """Close the interruption dialog and cancel its timers (teardown/recovery)."""
+        self._cancel_interrupt_timers()
+        dlg = self._interrupt_dialog
+        if dlg is not None:
+            self._interrupt_dialog = None
+            try:
+                if dlg.winfo_exists() and not dlg._done:
+                    dlg._finish(None)  # close WITHOUT firing the Wait callback
+            except Exception:
+                pass
+
+    def on_reconnected(self):
+        """The link came back: dismiss the dialog/timers and restore the status."""
+        self.on_link_dismiss()
+        self.set_status(
+            tr("agent.status.connected") if self._connected else tr("agent.status.waiting"),
+            GOOD if self._connected else WARN,
+        )
+
+    def on_link_failed(self):
+        """Reconnection gave up (the server's grace elapsed without recovery): close
+        the dialog and show a terminal 'connection lost' status."""
+        self.on_link_dismiss()
+        self._connected = False
+        self._fade_banner(False)
+        self._fade_stop(False)
+        self.set_status(tr("ui.interrupt.failed"), BAD)
 
     def copy_code(self):
         code = self.code_panel.get_text()

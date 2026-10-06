@@ -48,7 +48,25 @@ let dismissModal = null; // close() of the open confirmation dialog, or null
 let currentCode = null; // the session code (needed to fetch ICE servers)
 let pc = null; // RTCPeerConnection carrying the per-monitor video tracks
 let trackMids = {}; // offer m-line "mid" -> monitor index (from the agent)
-let connWatch = null; // timer giving a transient "disconnected" time to recover
+// ---- Connection heartbeat + interruption / active reconnection ----
+const PING_MS = 2000; // send a heartbeat ping this often
+const INTERRUPT_MS = 5000; // no pong for this long -> the server link is interrupted
+const WARN_DELAY_MS = 5000; // reconnect starts immediately; warn only if still down this long
+const REASK_MS = 10000; // after "Wait", re-ask this long later if still interrupted
+const MAX_RECONNECT_MS = 65000; // > the DO's agent grace (60s): give up after this, end cleanly
+let live = false; // true from connect() until endSession()
+let lastPong = 0; // performance.now() of the last "pong" from the server
+let lastTick = 0; // performance.now() of the previous heartbeat tick (to spot suspensions)
+let hbTimer = null; // heartbeat interval id
+let agentDown = false; // the AGENT's link to the server dropped (relayed by the DO)
+let interruptionActive = false; // an interruption (reconnecting; maybe dialog) is in progress
+let interruptStart = 0; // performance.now() when the current interruption began
+let dialogTimer = null; // delay before the warning dialog first appears
+let reaskTimer = null; // delay before re-asking after "Keep waiting"
+let mediaFailTimer = null; // confirms a media-only WebRTC failure before ending
+let reconnecting = false; // actively trying to reopen our WS
+let reconnectTimer = null;
+let intentionalClose = false; // we closed the WS on purpose (reconnect / endSession)
 
 function setStatus(text, kind) {
   statusEl.textContent = text;
@@ -84,12 +102,28 @@ $("joinForm").addEventListener("submit", (e) => {
 
 function connect(code) {
   currentCode = code;
-  const proto = location.protocol === "https:" ? "wss" : "ws";
-  ws = new WebSocket(`${proto}://${location.host}/ws/viewer?code=${code}`);
+  live = true;
   setStatus(t("connect.status.connecting"));
-  ws.onopen = () => setStatus(t("connect.status.waitingAccept"), "warn");
+  openWs(code);
+  startHeartbeat();
+}
+
+// (Re)open the viewer WebSocket. Used by connect() and by the reconnection loop.
+function openWs(code) {
+  const proto = location.protocol === "https:" ? "wss" : "ws";
+  intentionalClose = false;
+  ws = new WebSocket(`${proto}://${location.host}/ws/viewer?code=${code}`);
+  ws.onopen = () => {
+    lastPong = performance.now();
+    if (!interruptionActive) {
+      setStatus(
+        inSession ? t("connect.status.connected") : t("connect.status.waitingAccept"),
+        inSession ? "good" : "warn",
+      );
+    }
+  };
   ws.onmessage = onMessage;
-  ws.onclose = onClose;
+  ws.onclose = onWsClosed;
   ws.onerror = () => {};
 }
 
@@ -101,6 +135,10 @@ function send(obj) {
 
 async function onMessage(ev) {
   if (typeof ev.data !== "string") return; // video now travels over WebRTC
+  if (ev.data === "pong") {
+    lastPong = performance.now(); // heartbeat: our link to the server is alive
+    return;
+  }
   let msg;
   try {
     msg = JSON.parse(ev.data);
@@ -111,7 +149,18 @@ async function onMessage(ev) {
     case "connected":
       break;
     case "monitors":
+      // A fresh monitor list means the agent (re)served us: the link is healthy.
+      agentDown = false;
       startSession(Array.isArray(msg.monitors) ? msg.monitors : []);
+      break;
+    case "agent-interrupted":
+      // The agent's own link to the server dropped; our link is fine. Warn + wait
+      // for the agent to reconnect (the DO holds the session during its grace).
+      agentDown = true;
+      onInterruption();
+      break;
+    case "agent-restored":
+      agentDown = false; // the agent reconnected; a fresh offer will follow
       break;
     case "webrtc-offer":
       await handleOffer(msg);
@@ -124,6 +173,10 @@ async function onMessage(ev) {
       endSession(true);
       break;
     case "error": {
+      // During a reconnection the agent may not be back yet (no-agent / busy): keep
+      // retrying instead of giving up. The DO closes this socket; tryReconnect opens
+      // another, and once the agent returns the re-serve completes recovery.
+      if (interruptionActive) break;
       setStatus(t("connect.status.couldNotConnect"), "bad");
       // Prefer a translated message by the error's code; fall back to the
       // server-provided English text.
@@ -136,6 +189,9 @@ async function onMessage(ev) {
       if (!joinEl.hidden) {
         showJoinError(byCode || msg.message || t("connect.status.couldNotConnect"));
       }
+      // Terminal join failure (no-agent / busy): stop cleanly so the DO's follow-up
+      // close isn't mistaken for an interruption (which would pop the reconnect dialog).
+      abortConnect();
       break;
     }
     case "peer-left":
@@ -211,15 +267,33 @@ async function handleOffer(msg) {
     if (e.candidate) send({ type: "webrtc-ice", candidate: e.candidate });
   };
 
+  // The WebSocket heartbeat is the primary liveness signal (a network drop stalls it
+  // and drives reconnection). But a MEDIA-ONLY failure (UDP/TURN dies while the WS
+  // stays healthy) wouldn't stall the heartbeat, so catch a terminal pc "failed"
+  // here — delayed briefly and guarded so it doesn't fight a WS reconnect already in
+  // flight, and so a transient ICE "disconnected" that recovers won't nag.
   pc.onconnectionstatechange = () => {
     if (!inSession || !pc) return;
     const st = pc.connectionState;
     if (st === "connected") {
-      clearConnWatch();
-    } else if (st === "failed" || st === "closed") {
-      connLost();
-    } else if (st === "disconnected") {
-      scheduleConnWatch(); // may recover; give ICE a few seconds
+      if (mediaFailTimer) {
+        clearTimeout(mediaFailTimer);
+        mediaFailTimer = null;
+      }
+    } else if (st === "failed") {
+      if (mediaFailTimer) clearTimeout(mediaFailTimer);
+      mediaFailTimer = setTimeout(() => {
+        mediaFailTimer = null;
+        // End only on a true media-ONLY failure (WS healthy, no interruption in
+        // flight); a full network drop is the heartbeat/reconnect flow's job.
+        if (
+          inSession && pc && pc.connectionState === "failed" &&
+          !interruptionActive && !isDown()
+        ) {
+          setStatus(t("connect.status.lost"), "bad");
+          endSession(true);
+        }
+      }, WARN_DELAY_MS);
     }
   };
 
@@ -257,34 +331,11 @@ function firstUnassignedMonitor() {
   return monitors.length ? monitors[0].i : 0;
 }
 
-function scheduleConnWatch() {
-  if (connWatch) return;
-  connWatch = setTimeout(() => {
-    connWatch = null;
-    if (
-      inSession &&
-      pc &&
-      (pc.connectionState === "disconnected" || pc.connectionState === "failed")
-    ) {
-      connLost();
-    }
-  }, 6000);
-}
-function clearConnWatch() {
-  if (connWatch) {
-    clearTimeout(connWatch);
-    connWatch = null;
-  }
-}
-function connLost() {
-  clearConnWatch();
-  if (!inSession) return;
-  setStatus(t("connect.status.lost"), "bad");
-  endSession(true);
-}
-
 function closePeer() {
-  clearConnWatch();
+  if (mediaFailTimer) {
+    clearTimeout(mediaFailTimer);
+    mediaFailTimer = null;
+  }
   if (pc) {
     try {
       pc.ontrack = null;
@@ -301,6 +352,190 @@ function closePeer() {
     pc = null;
   }
   trackMids = {};
+}
+
+// ------------- Connection heartbeat + interruption / reconnection -------------
+// Each tick pings the server over the WS; the server echoes "pong". If no pong
+// arrives for INTERRUPT_MS (or the WS drops, or the agent's own link drops), we
+// warn the user (Wait/Cut) and actively reconnect while they wait.
+
+function startHeartbeat() {
+  lastPong = performance.now();
+  lastTick = performance.now();
+  if (hbTimer) clearInterval(hbTimer);
+  hbTimer = setInterval(heartbeatTick, 1000);
+}
+function stopHeartbeat() {
+  if (hbTimer) {
+    clearInterval(hbTimer);
+    hbTimer = null;
+  }
+}
+
+// Our link to the server is unusable right now (closed, or no pong in time, or the
+// agent's side dropped). A CONNECTING socket is neither down nor up yet — we hold.
+function isDown() {
+  if (agentDown) return true;
+  if (!ws) return true;
+  if (ws.readyState === 0) return false; // opening: onclose/onerror catches failures
+  if (ws.readyState !== 1) return true; // closing / closed
+  return performance.now() - lastPong > INTERRUPT_MS;
+}
+// Our link is confirmed healthy again (used to detect recovery).
+function isUp() {
+  if (agentDown) return false;
+  return !!ws && ws.readyState === 1 && performance.now() - lastPong <= INTERRUPT_MS;
+}
+
+function heartbeatTick() {
+  if (!live) return;
+  const now = performance.now();
+  // If far more than the 1s interval elapsed, this timer was suspended (backgrounded
+  // tab, device sleep, long main-thread stall). lastPong is stale only because JS
+  // wasn't running, not because the link dropped — refresh the window and re-ping
+  // rather than firing a false interruption (a truly dead socket is still caught:
+  // readyState in isDown(), or no pong next cycle).
+  const suspended = now - lastTick > INTERRUPT_MS;
+  lastTick = now;
+  if (suspended && !interruptionActive && ws && ws.readyState === 1) {
+    lastPong = now;
+    try {
+      ws.send("ping");
+    } catch {
+      /* ignore */
+    }
+    return;
+  }
+  if (ws && ws.readyState === 1) {
+    try {
+      ws.send("ping");
+    } catch {
+      /* ignore */
+    }
+  }
+  if (!interruptionActive) {
+    if (isDown()) onInterruption();
+  } else if (isUp()) {
+    onRecovered();
+  } else if (now - interruptStart > MAX_RECONNECT_MS) {
+    // Reconnection never succeeded within the server's grace window: end cleanly so
+    // the viewer isn't stuck re-asking forever on a permanently-dead session.
+    interruptionActive = false; // endSession() dismisses the dialog + clears timers
+    endSession(true);
+    setStatus(t("connect.status.disconnected"), "bad");
+  }
+}
+
+// Interruption begins: start reconnecting IMMEDIATELY, and show the warning only if
+// we're still down after WARN_DELAY_MS — so a quick reconnect is invisible.
+function onInterruption() {
+  if (interruptionActive || !live) return;
+  interruptionActive = true;
+  interruptStart = performance.now();
+  setStatus(t("ui.interrupt.status"), "bad");
+  startReconnecting();
+  if (dialogTimer) clearTimeout(dialogTimer);
+  dialogTimer = setTimeout(showInterruptDialog, WARN_DELAY_MS);
+}
+
+function showInterruptDialog() {
+  dialogTimer = null;
+  if (!interruptionActive || !live || modalOpen) return;
+  confirmDialog(
+    t("ui.interrupt.msg"),
+    t("ui.interrupt.cut"),
+    t("ui.interrupt.wait"),
+  ).then((cut) => {
+    if (!interruptionActive || !live) return; // recovered (auto-dismissed) or ended
+    if (cut === true) {
+      // Cut: end the session for good.
+      interruptionActive = false;
+      stopReconnecting();
+      endSession(true);
+      setStatus(t("connect.status.disconnectedAgain"), "warn");
+      return;
+    }
+    // "Keep waiting": re-ask after REASK_MS if still interrupted.
+    if (reaskTimer) clearTimeout(reaskTimer);
+    reaskTimer = setTimeout(showInterruptDialog, REASK_MS);
+  });
+}
+
+function onRecovered() {
+  interruptionActive = false;
+  stopReconnecting();
+  if (dialogTimer) {
+    clearTimeout(dialogTimer);
+    dialogTimer = null;
+  }
+  if (reaskTimer) {
+    clearTimeout(reaskTimer);
+    reaskTimer = null;
+  }
+  if (mediaFailTimer) {
+    // A media-fail timer armed against the OLD (failed) pc must not fire after the
+    // WS link has recovered and end the session we just got back.
+    clearTimeout(mediaFailTimer);
+    mediaFailTimer = null;
+  }
+  if (dismissModal) dismissModal(); // close the warning dialog if it's open
+  setStatus(
+    inSession ? t("connect.status.connected") : t("connect.status.waitingAccept"),
+    inSession ? "good" : "warn",
+  );
+}
+
+function startReconnecting() {
+  if (reconnecting) return;
+  reconnecting = true;
+  tryReconnect();
+}
+function stopReconnecting() {
+  reconnecting = false;
+  if (reconnectTimer) {
+    clearTimeout(reconnectTimer);
+    reconnectTimer = null;
+  }
+}
+function tryReconnect() {
+  if (!reconnecting || !interruptionActive || !live) return;
+  const ourSocketOpen = !!ws && ws.readyState === 1;
+  // Reopen OUR WS whenever our own socket is down (even if agentDown — our link may
+  // have dropped too, which would otherwise strand us). If ONLY the agent dropped
+  // and our socket is fine, just wait for it to reconnect and re-serve (reopening
+  // would hit the DO's "busy" check).
+  if (!agentDown || !ourSocketOpen) {
+    if (ws && ws.readyState === 1) {
+      // Stall on a still-"open" socket: close it first, else the DO sees two viewers.
+      intentionalClose = true;
+      try {
+        ws.close();
+      } catch {
+        /* ignore */
+      }
+      ws = null;
+    }
+    if ((!ws || ws.readyState > 1) && currentCode) openWs(currentCode);
+  }
+  reconnectTimer = setTimeout(tryReconnect, PING_MS);
+}
+
+// A terminal failure while establishing (no-agent / busy): not an interruption —
+// stop cleanly so the later WS close doesn't pop the reconnect dialog.
+function abortConnect() {
+  live = false;
+  interruptionActive = false;
+  stopHeartbeat();
+  stopReconnecting();
+  intentionalClose = true;
+  if (ws) {
+    try {
+      ws.close();
+    } catch {
+      /* ignore */
+    }
+    ws = null;
+  }
 }
 
 // ---------------- Session lifecycle ----------------
@@ -335,6 +570,19 @@ function startSession(mons) {
 
 function endSession(keepStatus) {
   inSession = false;
+  live = false;
+  interruptionActive = false;
+  agentDown = false;
+  stopHeartbeat();
+  stopReconnecting();
+  if (dialogTimer) {
+    clearTimeout(dialogTimer);
+    dialogTimer = null;
+  }
+  if (reaskTimer) {
+    clearTimeout(reaskTimer);
+    reaskTimer = null;
+  }
   blockRects = [];
   if (dismissModal) dismissModal(); // force-close a confirmation modal if one is open
   closePeer();
@@ -349,6 +597,7 @@ function endSession(keepStatus) {
   unbindWindowListeners();
   clearScreens();
   if (ws) {
+    intentionalClose = true;
     try {
       ws.close();
     } catch {
@@ -370,9 +619,19 @@ function endSession(keepStatus) {
   if (!keepStatus) setStatus("Enter a session code");
 }
 
-function onClose() {
-  if (inSession) setStatus(t("connect.status.disconnected"), "bad");
-  endSession(true);
+// The WebSocket closed. If we closed it on purpose (reconnect / endSession / an
+// abort), ignore. Otherwise it's an interruption: warn + reconnect, don't end.
+function onWsClosed(ev) {
+  if (intentionalClose || !live) return;
+  // The DO's grace alarm closes sockets with code 1001 ("session expired") once the
+  // agent never returns — terminal, so end cleanly rather than reconnecting forever.
+  if (ev && ev.code === 1001) {
+    interruptionActive = false;
+    endSession(true);
+    setStatus(t("connect.status.disconnected"), "bad");
+    return;
+  }
+  onInterruption();
 }
 
 // ---------------- Screens (one <video> per monitor) ----------------
