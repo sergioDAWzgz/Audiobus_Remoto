@@ -2095,11 +2095,93 @@ def parse_args(argv):
                    help="Monitor index (1 = primary, 0 = all).")
     p.add_argument("--auto-accept", action="store_true",
                    help="Start with the approval prompt disabled.")
+    # Hidden diagnostic: validate this (possibly frozen) build's capture + VP8
+    # encode/decode stack headlessly, writing the result to the given file.
+    p.add_argument("--selfcheck", default=None, help=argparse.SUPPRESS)
     return p.parse_args(argv)
+
+
+def run_selfcheck(out_path):
+    """Headless check that this build can grab the screen and run the full
+    capture -> VP8 encode -> decode path over a loopback peer connection (no GUI).
+    Writes 'OK ...' or 'FAIL ...' to out_path and returns it. Used to validate the
+    frozen .exe's bundled native libraries (aiortc / PyAV / pylibsrtp)."""
+
+    class _Args:
+        fps = 10
+        scale = 0.5
+        max_width = 1920
+        bitrate = None
+
+    class _Client:
+        def __init__(self):
+            with ScreenGrabber() as sct:
+                mons = [dict(m) for m in sct.monitors]
+            phys = mons[1:] if len(mons) > 1 else mons[:1]
+            m = phys[0]
+            self.monitors = [{"i": 0, "left": m["left"], "top": m["top"],
+                              "width": m["width"], "height": m["height"]}]
+            self.wanted = [0]
+            self.args = _Args()
+            self.capture = None
+
+        def scale_for(self, w):
+            if self.args.scale:
+                return self.args.scale
+            return min(1.0, self.args.max_width / w) if w > 0 else 1.0
+
+    async def _run():
+        c = _Client()
+        c.capture = CaptureManager(c)
+        c.capture.start()
+        sender = RTCPeerConnection()
+        receiver = RTCPeerConnection()
+        frames = []
+
+        @receiver.on("track")
+        def _on_track(track):
+            async def _read():
+                try:
+                    for _ in range(3):
+                        f = await track.recv()
+                        frames.append((f.width, f.height))
+                except Exception:
+                    pass
+            asyncio.ensure_future(_read())
+
+        sender.addTrack(ScreenTrack(c, 0))
+        await sender.setLocalDescription(await sender.createOffer())
+        await receiver.setRemoteDescription(sender.localDescription)
+        await receiver.setLocalDescription(await receiver.createAnswer())
+        await sender.setRemoteDescription(receiver.localDescription)
+        for _ in range(120):
+            await asyncio.sleep(0.1)
+            if len(frames) >= 2:
+                break
+        await sender.close()
+        await receiver.close()
+        c.capture.stop()
+        return frames
+
+    try:
+        frames = asyncio.run(_run())
+        result = ("OK frames=%s" % (frames[:2],)) if len(frames) >= 2 \
+            else "FAIL no frames decoded"
+    except Exception as e:
+        result = "FAIL %r" % (e,)
+    try:
+        with open(out_path, "w", encoding="utf-8") as f:
+            f.write(result)
+    except Exception:
+        pass
+    return result
 
 
 def main(argv=None):
     args = parse_args(argv if argv is not None else sys.argv[1:])
+    if getattr(args, "selfcheck", None):
+        print(run_selfcheck(args.selfcheck))
+        return
     try:
         App(args).run()
     except Exception as e:

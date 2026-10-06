@@ -16,14 +16,12 @@
   "vars": {
     "TURN_KEY_ID": ""
   },
-  // R2 bucket serving the agent .exe (too large for Workers static assets). Enable
-  // R2 on the account, then: `wrangler r2 bucket create audiobus-remote-downloads`
-  // and `wrangler r2 object put audiobus-remote-downloads/audiobus-agent.exe
-  // --file agent/dist/audiobus-agent.exe`. Then UNCOMMENT the binding below and
-  // deploy; the /downloads/audiobus-agent.exe route serves from it.
-  // "r2_buckets": [
-  //   { "binding": "DOWNLOADS", "bucket_name": "audiobus-remote-downloads" }
-  // ],
+  // R2 bucket serving the agent .exe (too large for Workers static assets). The
+  // exe is uploaded by agent/build.ps1; the /downloads/audiobus-agent.exe route
+  // serves from this bucket.
+  "r2_buckets": [
+    { "binding": "DOWNLOADS", "bucket_name": "audiobus-remote-downloads" }
+  ],
   "durable_objects": {
     "bindings": [
       { "name": "SESSIONS", "class_name": "SessionDO" }
