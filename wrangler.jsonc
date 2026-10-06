@@ -10,12 +10,12 @@
     "directory": "./public",
     "binding": "ASSETS"
   },
-  // Cloudflare Realtime TURN key id (not secret). Paste the TURN app's Key ID here.
-  // The matching API token is a secret: `wrangler secret put TURN_API_TOKEN`.
-  // While this is empty the Worker serves STUN-only ICE servers.
-  "vars": {
-    "TURN_KEY_ID": ""
-  },
+  // Cloudflare Realtime TURN. Both values are set as SECRETS (this repo is public,
+  // so neither is committed here):
+  //   wrangler secret put TURN_KEY_ID      (the TURN app's Token ID)
+  //   wrangler secret put TURN_API_TOKEN   (the TURN app's API token)
+  // Until both are set, the Worker serves STUN-only ICE servers.
+  //
   // R2 bucket serving the agent .exe (too large for Workers static assets). The
   // exe is uploaded by agent/build.ps1; the /downloads/audiobus-agent.exe route
   // serves from this bucket.

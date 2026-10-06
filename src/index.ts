@@ -5,9 +5,9 @@ export { SessionDO };
 export interface Env {
   SESSIONS: DurableObjectNamespace<SessionDO>;
   ASSETS: Fetcher;
-  // Cloudflare Realtime TURN. TURN_KEY_ID is a plain var (wrangler.jsonc);
-  // TURN_API_TOKEN is a secret (`wrangler secret put TURN_API_TOKEN`). When either
-  // is missing the app falls back to STUN-only (works on permissive networks).
+  // Cloudflare Realtime TURN. Both are secrets (`wrangler secret put TURN_KEY_ID`
+  // and `... TURN_API_TOKEN`); when either is missing the app falls back to
+  // STUN-only (works on permissive networks).
   TURN_KEY_ID?: string;
   TURN_API_TOKEN?: string;
   // R2 bucket holding the agent binary (it exceeds the 25 MiB Workers static-asset
