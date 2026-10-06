@@ -1481,8 +1481,20 @@ class RoundedBanner(tk.Canvas):
         self._cur_fg = fg
         self.bind("<Configure>", lambda e: self._redraw())
 
+    @staticmethod
+    def _two_lines(text):
+        """Split one line into two balanced lines at the space nearest the middle,
+        keeping any leading bullet on the first line. Unchanged if it has no space."""
+        s = text.strip()
+        spaces = [i for i, c in enumerate(s) if c == " " and i > 0]
+        if not spaces:
+            return s
+        mid = len(s) / 2
+        best = min(spaces, key=lambda i: abs(i - mid))
+        return s[:best] + "\n" + s[best + 1:]
+
     def set_text(self, text):
-        self._text = text
+        self._text = self._two_lines(text)
         self._redraw()
 
     def set_fade_colors(self, fill, fg):
@@ -1509,7 +1521,7 @@ class RoundedBanner(tk.Canvas):
         self.create_polygon(pts, smooth=True, fill=self._cur_fill,
                             outline=self._cur_fill)
         self.create_text(w / 2, h / 2, text=self._text, fill=self._cur_fg,
-                         font=self._font)
+                         font=self._font, justify="center")
 
 
 class App:
