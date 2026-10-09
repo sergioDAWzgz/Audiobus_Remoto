@@ -1,6 +1,10 @@
 import { DurableObject } from "cloudflare:workers";
 
 const SESSION_TTL_MS = 15 * 60 * 1000; // reservation / idle lifetime
+// After the agent's socket drops, hold the session (reservation + viewers) this
+// long so the agent can reconnect with the SAME code before the session is torn
+// down. Must comfortably exceed the client's 5s interrupt + reconnect attempts.
+const AGENT_GRACE_MS = 60 * 1000;
 
 /**
  * One SessionDO instance per session code. It is the meeting point between the
@@ -46,9 +50,46 @@ export class SessionDO extends DurableObject {
         return new Response("An agent is already connected.", { status: 409 });
       }
       this.ctx.acceptWebSocket(server, ["agent"]);
-      // Keep the session alive while the agent is connected.
+      // Keep the session alive while the agent is connected (this also cancels any
+      // short grace timer set when a previous agent socket dropped).
       await this.ctx.storage.setAlarm(Date.now() + SESSION_TTL_MS);
+      // Did the controlling viewer leave while we were in the grace window? Consume
+      // that flag (set by the viewer's own close while no agent was connected).
+      const viewerLeftInGrace = await this.ctx.storage.get<boolean>("viewerLeftInGrace");
+      if (viewerLeftInGrace) await this.ctx.storage.delete("viewerLeftInGrace");
       server.send(JSON.stringify({ type: "registered" }));
+      // Reconnect: if a viewer is still connected (held through the agent's grace
+      // window), re-serve it via the agent's normal viewer-joined path and tell the
+      // viewer the agent is back. On a first-ever connect there is no viewer yet.
+      const heldViewers = this.ctx.getWebSockets("viewer");
+      if (heldViewers.length > 0) {
+        try {
+          // resumed:true tells the agent this is the SAME held viewer it was already
+          // serving (re-serve after the agent's own reconnect) — safe to re-admit
+          // without a fresh consent prompt. A normal viewer-joined has no flag.
+          server.send(JSON.stringify({ type: "viewer-joined", resumed: true }));
+        } catch {
+          /* ignore */
+        }
+        for (const viewer of heldViewers) {
+          try {
+            viewer.send(JSON.stringify({ type: "agent-restored" }));
+          } catch {
+            /* ignore */
+          }
+        }
+      } else if (viewerLeftInGrace) {
+        // The viewer we were controlling for departed while we were away: tell the
+        // reconnecting agent so it clears its now-stale "controlling" banner/status
+        // instead of restoring a session with no viewer. This fires ONLY when a viewer
+        // actually left during the grace — never on a first connect or on an idle blip
+        // with no viewer, which would otherwise show a false "viewer disconnected".
+        try {
+          server.send(JSON.stringify({ type: "peer-left", who: "viewer" }));
+        } catch {
+          /* ignore */
+        }
+      }
       return new Response(null, { status: 101, webSocket: client });
     }
 
@@ -93,6 +134,18 @@ export class SessionDO extends DurableObject {
   }
 
   async webSocketMessage(ws: WebSocket, message: string | ArrayBuffer) {
+    // Heartbeat: echo a bare "ping" straight back as "pong" to the SAME socket
+    // (never relayed), so each side can measure its own round-trip to the server.
+    // A plain-string compare can't collide with JSON control/input (objects) or
+    // binary frames.
+    if (message === "ping") {
+      try {
+        ws.send("pong");
+      } catch {
+        /* ignore */
+      }
+      return;
+    }
     const role = this.ctx.getTags(ws)[0];
     const targets =
       role === "agent"
@@ -110,24 +163,34 @@ export class SessionDO extends DurableObject {
   async webSocketClose(ws: WebSocket, code: number, reason: string) {
     const role = this.ctx.getTags(ws)[0];
     if (role === "agent") {
-      // The shared computer is gone: end the session for everyone.
+      // The agent's link dropped. Hold the session for a grace window so the agent
+      // can reconnect with the same code; tell viewers so they can warn + wait. If
+      // the agent never returns, alarm() tears the session down at the deadline.
       for (const viewer of this.ctx.getWebSockets("viewer")) {
         try {
-          viewer.send(JSON.stringify({ type: "peer-left", who: "agent" }));
-          viewer.close(1000, "agent disconnected");
+          viewer.send(JSON.stringify({ type: "agent-interrupted" }));
         } catch {
           /* ignore */
         }
       }
-      await this.teardown();
+      await this.ctx.storage.setAlarm(Date.now() + AGENT_GRACE_MS);
     } else {
-      // A viewer left: tell the agent so it can stop capturing and wait again.
-      for (const agent of this.ctx.getWebSockets("agent")) {
-        try {
-          agent.send(JSON.stringify({ type: "peer-left", who: "viewer" }));
-        } catch {
-          /* ignore */
+      const agents = this.ctx.getWebSockets("agent");
+      if (agents.length > 0) {
+        // A viewer left while the agent is connected: tell it so it stops capturing
+        // and waits again.
+        for (const agent of agents) {
+          try {
+            agent.send(JSON.stringify({ type: "peer-left", who: "viewer" }));
+          } catch {
+            /* ignore */
+          }
         }
+      } else {
+        // The viewer left while the agent itself is mid-grace (dropped, reconnecting).
+        // No agent socket to notify now, so remember it: when the agent reconnects it
+        // is told the viewer is gone, so it won't restore a stale "controlling" state.
+        await this.ctx.storage.put("viewerLeftInGrace", true);
       }
     }
     try {
@@ -140,14 +203,16 @@ export class SessionDO extends DurableObject {
   async webSocketError(ws: WebSocket) {
     const role = this.ctx.getTags(ws)[0];
     if (role === "agent") {
+      // Same as a close: hold the session for the grace window and let viewers warn
+      // rather than ending immediately.
       for (const viewer of this.ctx.getWebSockets("viewer")) {
         try {
-          viewer.close(1011, "agent error");
+          viewer.send(JSON.stringify({ type: "agent-interrupted" }));
         } catch {
           /* ignore */
         }
       }
-      await this.teardown();
+      await this.ctx.storage.setAlarm(Date.now() + AGENT_GRACE_MS);
     }
   }
 

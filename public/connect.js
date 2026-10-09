@@ -4,6 +4,11 @@
 // 0-based monitor index and the remaining bytes are that monitor's JPEG. The
 // viewer tells the agent which monitors to stream with a "want" message, and
 // sends input tagged with the target monitor index "m".
+//
+// A lightweight app-level heartbeat ("ping"/"pong" over the WS) detects when the
+// link to the server is interrupted: the viewer then warns the user (Keep waiting
+// / Disconnect) and actively tries to reconnect, resuming the session if the link
+// comes back within the server's grace window.
 
 const $ = (id) => document.getElementById(id);
 const statusEl = $("status");
@@ -40,9 +45,27 @@ let windowBound = false;
 let fsActive = false; // the fullscreen hover-bar is live
 let modalOpen = false; // a confirmation dialog is open (suppresses remote input)
 let dismissModal = null; // close() of the open confirmation dialog, or null
+let currentCode = null; // the session code (needed to reconnect)
 let lastFrameAt = 0; // performance.now() of the last frame/activity
-let watchdog = null; // interval that detects a dead/stopped agent
-const STALE_MS = 4000; // no frames for this long -> treat the session as gone
+// ---- Connection heartbeat + interruption / active reconnection ----
+const PING_MS = 2000; // send a heartbeat ping this often
+const INTERRUPT_MS = 5000; // no pong for this long -> the server link is interrupted
+const WARN_DELAY_MS = 5000; // reconnect starts immediately; warn only if still down this long
+const REASK_MS = 10000; // after "Wait", re-ask this long later if still interrupted
+const MAX_RECONNECT_MS = 65000; // > the DO's agent grace (60s): give up after this, end cleanly
+const STALE_MS = 4000; // no frames for this long while connected -> the stream stalled
+let live = false; // true from connect() until endSession()
+let lastPong = 0; // performance.now() of the last "pong" from the server
+let lastTick = 0; // performance.now() of the previous heartbeat tick (to spot suspensions)
+let hbTimer = null; // heartbeat interval id
+let agentDown = false; // the AGENT's link to the server dropped (relayed by the DO)
+let interruptionActive = false; // an interruption (reconnecting; maybe dialog) is in progress
+let interruptStart = 0; // performance.now() when the current interruption began
+let dialogTimer = null; // delay before the warning dialog first appears
+let reaskTimer = null; // delay before re-asking after "Keep waiting"
+let reconnecting = false; // actively trying to reopen our WS
+let reconnectTimer = null;
+let intentionalClose = false; // we closed the WS on purpose (reconnect / endSession)
 
 function setStatus(text, kind) {
   statusEl.textContent = text;
@@ -77,13 +100,30 @@ $("joinForm").addEventListener("submit", (e) => {
 });
 
 function connect(code) {
+  currentCode = code;
+  live = true;
+  setStatus(t("connect.status.connecting"));
+  openWs(code);
+  startHeartbeat();
+}
+
+// (Re)open the viewer WebSocket. Used by connect() and by the reconnection loop.
+function openWs(code) {
   const proto = location.protocol === "https:" ? "wss" : "ws";
+  intentionalClose = false;
   ws = new WebSocket(`${proto}://${location.host}/ws/viewer?code=${code}`);
   ws.binaryType = "arraybuffer";
-  setStatus(t("connect.status.connecting"));
-  ws.onopen = () => setStatus(t("connect.status.waitingAccept"), "warn");
+  ws.onopen = () => {
+    lastPong = performance.now();
+    if (!interruptionActive) {
+      setStatus(
+        inSession ? t("connect.status.connected") : t("connect.status.waitingAccept"),
+        inSession ? "good" : "warn",
+      );
+    }
+  };
   ws.onmessage = onMessage;
-  ws.onclose = onClose;
+  ws.onclose = onWsClosed;
   ws.onerror = () => {};
 }
 
@@ -98,6 +138,10 @@ async function onMessage(ev) {
     await drawFrame(ev.data);
     return;
   }
+  if (ev.data === "pong") {
+    lastPong = performance.now(); // heartbeat: our link to the server is alive
+    return;
+  }
   let msg;
   try {
     msg = JSON.parse(ev.data);
@@ -108,13 +152,28 @@ async function onMessage(ev) {
     case "connected":
       break;
     case "monitors":
+      // A fresh monitor list means the agent (re)served us: the link is healthy.
+      agentDown = false;
       startSession(Array.isArray(msg.monitors) ? msg.monitors : []);
+      break;
+    case "agent-interrupted":
+      // The agent's own link to the server dropped; our link is fine. Warn + wait
+      // for the agent to reconnect (the DO holds the session during its grace).
+      agentDown = true;
+      onInterruption();
+      break;
+    case "agent-restored":
+      agentDown = false; // the agent reconnected; fresh frames will follow
       break;
     case "denied":
       setStatus(t("connect.status.declined"), "bad");
       endSession(true);
       break;
     case "error": {
+      // During a reconnection the agent may not be back yet (no-agent / busy): keep
+      // retrying instead of giving up. The DO closes this socket; tryReconnect opens
+      // another, and once the agent returns the re-serve completes recovery.
+      if (interruptionActive) break;
       setStatus(t("connect.status.couldNotConnect"), "bad");
       // Prefer a translated message by the error's code; fall back to the
       // server-provided English text.
@@ -127,6 +186,9 @@ async function onMessage(ev) {
       if (!joinEl.hidden) {
         showJoinError(byCode || msg.message || t("connect.status.couldNotConnect"));
       }
+      // Terminal join failure (no-agent / busy): stop cleanly so the DO's follow-up
+      // close isn't mistaken for an interruption (which would pop the reconnect dialog).
+      abortConnect();
       break;
     }
     case "peer-left":
@@ -172,6 +234,208 @@ async function drawFrame(buf) {
   }
 }
 
+// ------------- Connection heartbeat + interruption / reconnection -------------
+// Each tick pings the server over the WS; the server echoes "pong". If no pong
+// arrives for INTERRUPT_MS (or the WS drops, or the agent's own link drops, or the
+// stream stalls), we warn the user (Wait/Cut) and actively reconnect while waiting.
+
+function startHeartbeat() {
+  lastPong = performance.now();
+  lastTick = performance.now();
+  if (hbTimer) clearInterval(hbTimer);
+  hbTimer = setInterval(heartbeatTick, 1000);
+}
+function stopHeartbeat() {
+  if (hbTimer) {
+    clearInterval(hbTimer);
+    hbTimer = null;
+  }
+}
+
+// The agent streams continuously while connected, so a gap in frames means it
+// stopped/crashed/dropped even if our own WS looks fine (half-open agent socket).
+function framesStale() {
+  return inSession && performance.now() - lastFrameAt > STALE_MS;
+}
+
+// Our link to the server is unusable right now (closed, or no pong in time, or the
+// agent's side dropped, or the stream stalled). A CONNECTING socket is neither down
+// nor up yet — we hold.
+function isDown() {
+  if (agentDown) return true;
+  if (!ws) return true;
+  if (ws.readyState === 0) return false; // opening: onclose/onerror catches failures
+  if (ws.readyState !== 1) return true; // closing / closed
+  if (performance.now() - lastPong > INTERRUPT_MS) return true;
+  return framesStale();
+}
+// Our link is confirmed healthy again (used to detect recovery): WS open, a recent
+// pong, the agent up, and — once streaming — frames actually flowing again.
+function isUp() {
+  if (agentDown) return false;
+  if (!ws || ws.readyState !== 1) return false;
+  if (performance.now() - lastPong > INTERRUPT_MS) return false;
+  return !framesStale();
+}
+
+// Is our OWN socket+link to the server healthy (independent of the agent/stream)?
+// Drives whether reconnection should reopen the WS or just wait for a re-serve.
+function ourLinkHealthy() {
+  return !!ws && ws.readyState === 1 && performance.now() - lastPong <= INTERRUPT_MS;
+}
+
+function heartbeatTick() {
+  if (!live) return;
+  const now = performance.now();
+  // If far more than the 1s interval elapsed, this timer was suspended (backgrounded
+  // tab, device sleep, long main-thread stall). lastPong/lastFrameAt are stale only
+  // because JS wasn't running, not because the link dropped — refresh the window and
+  // re-ping rather than firing a false interruption (a truly dead socket is still
+  // caught: readyState in isDown(), or no pong/frame next cycle).
+  const suspended = now - lastTick > INTERRUPT_MS;
+  lastTick = now;
+  if (suspended && !interruptionActive && ws && ws.readyState === 1) {
+    lastPong = now;
+    lastFrameAt = now;
+    try {
+      ws.send("ping");
+    } catch {
+      /* ignore */
+    }
+    return;
+  }
+  if (ws && ws.readyState === 1) {
+    try {
+      ws.send("ping");
+    } catch {
+      /* ignore */
+    }
+  }
+  if (!interruptionActive) {
+    if (isDown()) onInterruption();
+  } else if (isUp()) {
+    onRecovered();
+  } else if (now - interruptStart > MAX_RECONNECT_MS) {
+    // Reconnection never succeeded within the server's grace window: end cleanly so
+    // the viewer isn't stuck re-asking forever on a permanently-dead session.
+    interruptionActive = false; // endSession() dismisses the dialog + clears timers
+    endSession(true);
+    setStatus(t("connect.status.disconnected"), "bad");
+  }
+}
+
+// Interruption begins: start reconnecting IMMEDIATELY, and show the warning only if
+// we're still down after WARN_DELAY_MS — so a quick reconnect is invisible.
+function onInterruption() {
+  if (interruptionActive || !live) return;
+  interruptionActive = true;
+  interruptStart = performance.now();
+  setStatus(t("ui.interrupt.status"), "bad");
+  startReconnecting();
+  if (dialogTimer) clearTimeout(dialogTimer);
+  dialogTimer = setTimeout(showInterruptDialog, WARN_DELAY_MS);
+}
+
+function showInterruptDialog() {
+  dialogTimer = null;
+  if (!interruptionActive || !live) return;
+  if (modalOpen) {
+    // Another modal is up (e.g. the Disconnect confirmation). We can't stack dialogs,
+    // so retry shortly: once it closes and we're still interrupted, the Wait/Cut
+    // warning appears rather than being lost for this whole interruption.
+    if (reaskTimer) clearTimeout(reaskTimer);
+    reaskTimer = setTimeout(showInterruptDialog, PING_MS);
+    return;
+  }
+  confirmDialog(
+    t("ui.interrupt.msg"),
+    t("ui.interrupt.cut"),
+    t("ui.interrupt.wait"),
+  ).then((cut) => {
+    if (!interruptionActive || !live) return; // recovered (auto-dismissed) or ended
+    if (cut === true) {
+      // Cut: end the session for good.
+      interruptionActive = false;
+      stopReconnecting();
+      endSession(true);
+      setStatus(t("connect.status.disconnectedAgain"), "warn");
+      return;
+    }
+    // "Keep waiting": re-ask after REASK_MS if still interrupted.
+    if (reaskTimer) clearTimeout(reaskTimer);
+    reaskTimer = setTimeout(showInterruptDialog, REASK_MS);
+  });
+}
+
+function onRecovered() {
+  interruptionActive = false;
+  stopReconnecting();
+  if (dialogTimer) {
+    clearTimeout(dialogTimer);
+    dialogTimer = null;
+  }
+  if (reaskTimer) {
+    clearTimeout(reaskTimer);
+    reaskTimer = null;
+  }
+  if (dismissModal) dismissModal(); // close the warning dialog if it's open
+  setStatus(
+    inSession ? t("connect.status.connected") : t("connect.status.waitingAccept"),
+    inSession ? "good" : "warn",
+  );
+}
+
+function startReconnecting() {
+  if (reconnecting) return;
+  reconnecting = true;
+  tryReconnect();
+}
+function stopReconnecting() {
+  reconnecting = false;
+  if (reconnectTimer) {
+    clearTimeout(reconnectTimer);
+    reconnectTimer = null;
+  }
+}
+function tryReconnect() {
+  if (!reconnecting || !interruptionActive || !live) return;
+  // Reopen OUR WS only when our own link to the server is down. If our link is
+  // healthy — the agent dropped, or the stream merely stalled — just wait for the
+  // agent to re-serve; reopening a healthy socket would hit the DO's "busy" check.
+  if (!ourLinkHealthy()) {
+    if (ws && ws.readyState === 1) {
+      // Stall on a still-"open" socket: close it first, else the DO sees two viewers.
+      intentionalClose = true;
+      try {
+        ws.close();
+      } catch {
+        /* ignore */
+      }
+      ws = null;
+    }
+    if ((!ws || ws.readyState > 1) && currentCode) openWs(currentCode);
+  }
+  reconnectTimer = setTimeout(tryReconnect, PING_MS);
+}
+
+// A terminal failure while establishing (no-agent / busy): not an interruption —
+// stop cleanly so the later WS close doesn't pop the reconnect dialog.
+function abortConnect() {
+  live = false;
+  interruptionActive = false;
+  stopHeartbeat();
+  stopReconnecting();
+  intentionalClose = true;
+  if (ws) {
+    try {
+      ws.close();
+    } catch {
+      /* ignore */
+    }
+    ws = null;
+  }
+}
+
 // ---------------- Session lifecycle ----------------
 
 function startSession(mons) {
@@ -199,32 +463,30 @@ function startSession(mons) {
   const first = screens.get(selectedIndex);
   if (first) first.canvas.focus();
 
-  // Watchdog: the agent streams continuously while connected, so a gap in frames
-  // means it stopped/crashed/dropped. This catches cases where no explicit
-  // disconnect ever arrives (half-open socket), including while in fullscreen.
+  // Give the stream a fresh grace before the frame-stall check can fire (frames
+  // start arriving a beat after the agent begins streaming / re-serving).
   lastFrameAt = performance.now();
-  if (watchdog) clearInterval(watchdog);
-  watchdog = setInterval(checkStale, 1000);
 
   sendWant();
 }
 
-function checkStale() {
-  if (!inSession) return;
-  if (performance.now() - lastFrameAt > STALE_MS) {
-    setStatus(t("connect.status.lost"), "bad");
-    endSession(true);
-  }
-}
-
 function endSession(keepStatus) {
   inSession = false;
+  live = false;
+  interruptionActive = false;
+  agentDown = false;
+  stopHeartbeat();
+  stopReconnecting();
+  if (dialogTimer) {
+    clearTimeout(dialogTimer);
+    dialogTimer = null;
+  }
+  if (reaskTimer) {
+    clearTimeout(reaskTimer);
+    reaskTimer = null;
+  }
   blockRects = [];
   if (dismissModal) dismissModal(); // force-close a confirmation modal if one is open
-  if (watchdog) {
-    clearInterval(watchdog);
-    watchdog = null;
-  }
   if (fsActive) exitFsBar();
   if (document.fullscreenElement) {
     try {
@@ -236,6 +498,7 @@ function endSession(keepStatus) {
   unbindWindowListeners();
   clearScreens();
   if (ws) {
+    intentionalClose = true;
     try {
       ws.close();
     } catch {
@@ -257,9 +520,19 @@ function endSession(keepStatus) {
   if (!keepStatus) setStatus("Enter a session code");
 }
 
-function onClose() {
-  if (inSession) setStatus(t("connect.status.disconnected"), "bad");
-  endSession(true);
+// The WebSocket closed. If we closed it on purpose (reconnect / endSession / an
+// abort), ignore. Otherwise it's an interruption: warn + reconnect, don't end.
+function onWsClosed(ev) {
+  if (intentionalClose || !live) return;
+  // The DO's grace alarm closes sockets with code 1001 ("session expired") once the
+  // agent never returns — terminal, so end cleanly rather than reconnecting forever.
+  if (ev && ev.code === 1001) {
+    interruptionActive = false;
+    endSession(true);
+    setStatus(t("connect.status.disconnected"), "bad");
+    return;
+  }
+  onInterruption();
 }
 
 // ---------------- Canvases ----------------
@@ -302,7 +575,12 @@ function currentWant() {
 
 function sendWant() {
   send({ type: "want", monitors: currentWant() });
-  lastFrameAt = performance.now(); // grace while the agent switches monitors
+  // Grace while the agent switches monitors — but NOT during an interruption. There,
+  // faking frame liveness would make isUp() flip true on the next heartbeat tick and
+  // trigger a false onRecovered() (status "Connected", dialog auto-dismissed) while
+  // the stream is actually dead, and would reset the MAX_RECONNECT_MS give-up clock.
+  // Only a genuinely received frame (drawFrame) may clear a frame-stall interruption.
+  if (!interruptionActive) lastFrameAt = performance.now();
 }
 
 function buildMonitorPicker() {
