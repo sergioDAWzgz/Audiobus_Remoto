@@ -725,6 +725,11 @@ class NetClient:
         self._http_base = None      # https base, for the ICE-servers request
         self._last_pong = 0.0       # time.time() of the last heartbeat "pong"
         self._viewer_approved = False  # the owner approved the currently-held viewer
+        self._ended = False         # owner ended the session locally; a held viewer the
+        #                             server re-serves on reconnect must be dismissed,
+        #                             not resumed (survives a dead-socket send failure)
+        self._link_down = False     # our link to the server is currently interrupted,
+        #                             so a pending approval is for a connection that's gone
         self._left_reported = False # viewer-gone reported once per session (dedup)
         self._blocked_btns = set()  # buttons whose press was suppressed over our window
         self._pressed_btns = set()  # buttons we actually injected a press for (to release)
@@ -760,6 +765,9 @@ class NetClient:
         # closing in response to "session-ended") is reported as us closing the
         # connection, not the viewer leaving.
         self.ended_locally = True
+        self._ended = True             # authoritative across a reconnect (see _on_viewer):
+        #                                even if the send below fails on a dead socket, a
+        #                                held viewer re-served later must NOT be resumed
         self._viewer_approved = False  # session ended by us; a new viewer must consent
         await self._stop_stream()
         if self.ws:
@@ -841,6 +849,7 @@ class NetClient:
                 ) as ws:
                     self.ws = ws
                     self._last_pong = time.time()
+                    self._link_down = False  # (re)connected: our link is live again
                     if first:
                         first = False
                         self.app.post(
@@ -880,11 +889,13 @@ class NetClient:
                 return
             now = time.monotonic()
             if interrupted_since is None:
-                # Interruption just began: cancel any still-pending consent prompt
-                # (its viewer may be re-served after we reconnect, which must prompt
-                # again rather than inherit a half-answered decision), then reconnect
-                # IMMEDIATELY (no delay).
+                # Interruption just began: mark the link down (so a pending approval
+                # that unblocks when we cancel its dialog won't post a stale 'denied'),
+                # cancel any still-pending consent prompt (its viewer may be re-served
+                # after we reconnect, which must prompt again rather than inherit a
+                # half-answered decision), then reconnect IMMEDIATELY (no delay).
                 interrupted_since = now
+                self._link_down = True
                 self.app.post(self.app._close_approval_dialog)
                 continue
             if now - interrupted_since > HB_MAX_RECONNECT_SECS:
@@ -1009,10 +1020,21 @@ class NetClient:
     async def _on_viewer(self, ws, resumed=False):
         if self.streaming:
             return
+        # The owner ended this session locally while we were disconnected. A held viewer
+        # the server re-serves on our reconnect must be dismissed (told to close), not
+        # re-admitted — otherwise the explicit Stop is silently reversed (and, under
+        # auto-accept, screen sharing would resume with no consent).
+        if resumed and self._ended:
+            try:
+                await ws.send(json.dumps({"type": "session-ended"}))
+            except Exception:
+                pass
+            return
         # A brand-new viewer relationship (not a re-serve of a held viewer) must earn
-        # consent afresh — forget any prior approval.
+        # consent afresh — forget any prior approval and clear a stale local-end.
         if not resumed:
             self._viewer_approved = False
+            self._ended = False
         # A fresh viewer: clear any leftover per-session input state.
         self.ended_locally = False
         self._left_reported = False
@@ -1029,11 +1051,17 @@ class NetClient:
         else:
             allowed = await self.loop.run_in_executor(None, self._ask_approval)
         if not allowed:
-            try:
-                await ws.send(json.dumps({"type": "denied"}))
-            except Exception:
-                pass
-            self.app.post(self.app.on_denied)
+            # If our link dropped (or this is no longer the current socket) while the
+            # owner was deciding, the approval unblocked because the drop force-closed
+            # the dialog — not because the owner denied. The connection is gone, so
+            # don't send 'denied' or flash a spurious 'Denied' status over the
+            # reconnection (the re-served viewer is re-prompted afresh anyway).
+            if ws is self.ws and not self._link_down:
+                try:
+                    await ws.send(json.dumps({"type": "denied"}))
+                except Exception:
+                    pass
+                self.app.post(self.app.on_denied)
             return
         self._viewer_approved = True  # admitted: re-serve silently across our reconnect
         # Tell the viewer the monitor list so it can build its <video> elements.

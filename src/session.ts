@@ -60,6 +60,10 @@ export class SessionDO extends DurableObject {
       // Keep the session alive while the agent is connected (this also cancels any
       // short grace timer set when a previous agent socket dropped).
       await this.ctx.storage.setAlarm(Date.now() + SESSION_TTL_MS);
+      // Did the controlling viewer leave while we were in the grace window? Consume
+      // that flag (set by the viewer's own close while no agent was connected).
+      const viewerLeftInGrace = await this.ctx.storage.get<boolean>("viewerLeftInGrace");
+      if (viewerLeftInGrace) await this.ctx.storage.delete("viewerLeftInGrace");
       server.send(JSON.stringify({ type: "registered" }));
       // Reconnect: if a viewer is still connected (held through the agent's grace
       // window), re-serve it via the agent's normal viewer-joined path and tell the
@@ -80,6 +84,17 @@ export class SessionDO extends DurableObject {
           } catch {
             /* ignore */
           }
+        }
+      } else if (viewerLeftInGrace) {
+        // The viewer we were controlling for departed while we were away: tell the
+        // reconnecting agent so it clears its now-stale "controlling" banner/status
+        // instead of restoring a session with no viewer. This fires ONLY when a viewer
+        // actually left during the grace — never on a first connect or on an idle blip
+        // with no viewer, which would otherwise show a false "viewer disconnected".
+        try {
+          server.send(JSON.stringify({ type: "peer-left", who: "viewer" }));
+        } catch {
+          /* ignore */
         }
       }
       return new Response(null, { status: 101, webSocket: client });
@@ -167,13 +182,22 @@ export class SessionDO extends DurableObject {
       }
       await this.ctx.storage.setAlarm(Date.now() + AGENT_GRACE_MS);
     } else {
-      // A viewer left: tell the agent so it can stop capturing and wait again.
-      for (const agent of this.ctx.getWebSockets("agent")) {
-        try {
-          agent.send(JSON.stringify({ type: "peer-left", who: "viewer" }));
-        } catch {
-          /* ignore */
+      const agents = this.ctx.getWebSockets("agent");
+      if (agents.length > 0) {
+        // A viewer left while the agent is connected: tell it so it stops capturing
+        // and waits again.
+        for (const agent of agents) {
+          try {
+            agent.send(JSON.stringify({ type: "peer-left", who: "viewer" }));
+          } catch {
+            /* ignore */
+          }
         }
+      } else {
+        // The viewer left while the agent itself is mid-grace (dropped, reconnecting).
+        // No agent socket to notify now, so remember it: when the agent reconnects it
+        // is told the viewer is gone, so it won't restore a stale "controlling" state.
+        await this.ctx.storage.put("viewerLeftInGrace", true);
       }
     }
     try {

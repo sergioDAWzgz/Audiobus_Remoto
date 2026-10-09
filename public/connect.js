@@ -440,7 +440,15 @@ function onInterruption() {
 
 function showInterruptDialog() {
   dialogTimer = null;
-  if (!interruptionActive || !live || modalOpen) return;
+  if (!interruptionActive || !live) return;
+  if (modalOpen) {
+    // Another modal is up (e.g. the Disconnect confirmation). We can't stack dialogs,
+    // so retry shortly: once it closes and we're still interrupted, the Wait/Cut
+    // warning appears rather than being lost for this whole interruption.
+    if (reaskTimer) clearTimeout(reaskTimer);
+    reaskTimer = setTimeout(showInterruptDialog, PING_MS);
+    return;
+  }
   confirmDialog(
     t("ui.interrupt.msg"),
     t("ui.interrupt.cut"),
