@@ -64,6 +64,8 @@ USER_AGENT = "AudiobusRemoteAgent/0.1"
 HB_PING_SECS = 2.0          # send an app-level "ping" this often
 HB_INTERRUPT_SECS = 5.0     # no "pong" for this long -> the server link is interrupted
 HB_RECONNECT_SECS = 2.0     # wait between reconnect attempts (after the first, immediate one)
+HB_CONNECT_TIMEOUT_SECS = 6.0  # cap each (re)connect handshake so a half-open/unreachable
+#                                server fails fast instead of hanging ~10s per attempt
 HB_WARN_SECS = 5.0          # reconnect starts at once; warn only if still down this long
 HB_MAX_RECONNECT_SECS = 65.0  # > the DO's 60s grace: give up reconnecting after this
 INTERRUPT_REASK_MS = 10000  # re-ask the Wait/Cut dialog this long after "Wait"
@@ -681,6 +683,7 @@ class NetClient:
                     ssl=ws_ssl,
                     max_size=None,
                     ping_interval=20,
+                    open_timeout=HB_CONNECT_TIMEOUT_SECS,
                     user_agent_header=USER_AGENT,
                 ) as ws:
                     self.ws = ws
@@ -725,24 +728,27 @@ class NetClient:
                 return
             now = time.monotonic()
             if interrupted_since is None:
-                # Interruption just began: mark the link down (so a pending approval
-                # that unblocks when we cancel its dialog won't post a stale 'denied'),
-                # cancel any still-pending consent prompt (its viewer may be re-served
-                # after we reconnect, which must prompt again rather than inherit a
-                # half-answered decision), then reconnect IMMEDIATELY (no delay).
+                # Interruption just began. Surface the warning RIGHT NOW (the Tk side
+                # sets the "interrupted" status immediately and schedules the Wait/Cut
+                # dialog after HB_WARN_SECS) and reconnect immediately. We must NOT wait
+                # for a reconnect attempt to fail first: a real half-open drop (Wi-Fi
+                # off, cable pulled, server unreachable) makes the next connect block for
+                # its whole handshake timeout, which would otherwise leave the window
+                # stale on "connected"/"waiting" with no popup for many seconds. Also
+                # mark the link down (so a pending approval that unblocks when we cancel
+                # its dialog won't post a stale 'denied') and cancel any pending prompt.
                 interrupted_since = now
                 self._link_down = True
+                notified = True
                 self.app.post(self.app._close_approval_dialog)
+                self.app.post(self.app.on_link_interrupted)
                 continue
             if now - interrupted_since > HB_MAX_RECONNECT_SECS:
                 # The server's grace has surely elapsed; stop trying.
                 gave_up = True
                 break
-            # Still within the window: warn once (the Tk side delays the actual dialog
-            # by HB_WARN_SECS), then wait a short, stop-interruptible delay before retry.
-            if not notified:
-                notified = True
-                self.app.post(self.app.on_link_interrupted)
+            # Already warned on the first drop; just wait a short, stop-interruptible
+            # delay before the next reconnect attempt.
             try:
                 await asyncio.wait_for(self.stop_event.wait(), timeout=HB_RECONNECT_SECS)
             except asyncio.TimeoutError:
