@@ -49,14 +49,19 @@ let currentCode = null; // the session code (needed to fetch ICE servers)
 let pc = null; // RTCPeerConnection carrying the per-monitor video tracks
 let trackMids = {}; // offer m-line "mid" -> monitor index (from the agent)
 // ---- Connection heartbeat + interruption / active reconnection ----
-const PING_MS = 2000; // send a heartbeat ping this often
-const INTERRUPT_MS = 5000; // no pong for this long -> the server link is interrupted
-const WARN_DELAY_MS = 5000; // reconnect starts immediately; warn only if still down this long
+const PING_MS = 1000; // send a heartbeat ping this often
+const INTERRUPT_MS = 3000; // no pong for this long -> the server link is interrupted
+const WARN_DELAY_MS = 2000; // reconnect starts immediately; show the Wait/Cut dialog this
+//                             long after the drop is detected -> ~5s total (3s + 2s)
+const STALE_MS = 3000; // video not advancing for this long (agent-side drop) -> interrupted
 const REASK_MS = 10000; // after "Wait", re-ask this long later if still interrupted
 const MAX_RECONNECT_MS = 65000; // > the DO's agent grace (60s): give up after this, end cleanly
 let live = false; // true from connect() until endSession()
 let lastPong = 0; // performance.now() of the last "pong" from the server
 let lastTick = 0; // performance.now() of the previous heartbeat tick (to spot suspensions)
+let lastVideoAdvance = 0; // performance.now() when any monitor's <video> last advanced
+let videoEverPlayed = false; // a frame has actually played this session (so a stall is a
+//                              real stop, not just slow initial WebRTC setup)
 let hbTimer = null; // heartbeat interval id
 let agentDown = false; // the AGENT's link to the server dropped (relayed by the DO)
 let interruptionActive = false; // an interruption (reconnecting; maybe dialog) is in progress
@@ -263,6 +268,7 @@ async function handleOffer(msg) {
     // into one stream, so e.streams[0] would put every monitor on every <video>).
     s.el.srcObject = new MediaStream([e.track]);
     if (s.el.play) s.el.play().catch(() => {});
+    lastVideoAdvance = performance.now(); // fresh stream: reset the stall grace
   };
 
   pc.onicecandidate = (e) => {
@@ -283,6 +289,7 @@ async function handleOffer(msg) {
     const st = pc.connectionState;
     if (st === "connected") {
       mediaDown = false; // media is flowing again
+      lastVideoAdvance = performance.now(); // media path up: grace until frames play
       if (mediaFailTimer) {
         clearTimeout(mediaFailTimer);
         mediaFailTimer = null;
@@ -379,20 +386,33 @@ function stopHeartbeat() {
   }
 }
 
+// The video stopped advancing while we're streaming: the agent's frames stopped
+// arriving (an agent-side drop), even though our own WS + pong can still be healthy
+// (the DO is slow to notice a half-open agent). This is the fast signal for an
+// agent-side drop — far quicker than waiting for WebRTC ICE to reach "failed".
+function videoStalled() {
+  return (
+    inSession && videoEverPlayed && screens.size > 0 &&
+    performance.now() - lastVideoAdvance > STALE_MS
+  );
+}
 // Our link to the server is unusable right now (closed, or no pong in time, or the
-// agent's side dropped). A CONNECTING socket is neither down nor up yet — we hold.
+// agent's side dropped, or the video stalled). A CONNECTING socket is neither down nor
+// up yet — we hold.
 function isDown() {
   if (agentDown) return true;
   if (mediaDown) return true; // the WebRTC media failed (agent likely gone)
+  if (videoStalled()) return true; // frames stopped arriving (agent-side drop)
   if (!ws) return true;
   if (ws.readyState === 0) return false; // opening: onclose/onerror catches failures
   if (ws.readyState !== 1) return true; // closing / closed
   return performance.now() - lastPong > INTERRUPT_MS;
 }
 // Our link is confirmed healthy again (used to detect recovery): WS open with a recent
-// pong, the agent up, and — once media was lost — the video flowing again.
+// pong, the agent up, and — once lost — the video flowing again.
 function isUp() {
   if (agentDown || mediaDown) return false;
+  if (videoStalled()) return false;
   return !!ws && ws.readyState === 1 && performance.now() - lastPong <= INTERRUPT_MS;
 }
 
@@ -414,6 +434,7 @@ function heartbeatTick() {
   lastTick = now;
   if (suspended && !interruptionActive && ws && ws.readyState === 1) {
     lastPong = now;
+    lastVideoAdvance = now; // video "stalled" only because JS wasn't running
     try {
       ws.send("ping");
     } catch {
@@ -587,6 +608,11 @@ function startSession(mons) {
   const first = screens.get(selectedIndex);
   if (first) first.el.focus();
 
+  // The new session's <video>s haven't played yet; the stall check stays off until the
+  // first real frame (videoEverPlayed) so slow WebRTC setup can't look like a stall.
+  videoEverPlayed = false;
+  lastVideoAdvance = performance.now();
+
   sendWant();
 }
 
@@ -596,6 +622,7 @@ function endSession(keepStatus) {
   interruptionActive = false;
   agentDown = false;
   mediaDown = false;
+  videoEverPlayed = false;
   stopHeartbeat();
   stopReconnecting();
   if (dialogTimer) {
@@ -670,9 +697,35 @@ function buildScreens() {
     el.setAttribute("playsinline", ""); // iOS Safari needs the attribute too
     el.tabIndex = 0;
     el.dataset.index = String(m.i);
+    // Liveness: requestVideoFrameCallback fires once per RENDERED frame and stops when
+    // frames stop arriving (an agent-side drop). timeupdate is NOT usable here — a
+    // MediaStream <video>'s currentTime keeps advancing on the element's own clock even
+    // when no frames come in. Browsers without rVFC (Firefox) fall back to the slower
+    // WebRTC-"failed" (mediaDown) signal; videoEverPlayed simply stays false there.
+    trackVideoFrames(el);
     const handlers = attachInput(el, m);
     screensEl.appendChild(el);
     screens.set(m.i, { el, handlers, mon: m });
+  }
+}
+
+function trackVideoFrames(el) {
+  if (typeof el.requestVideoFrameCallback !== "function") return;
+  const cb = () => {
+    lastVideoAdvance = performance.now();
+    videoEverPlayed = true;
+    if (el.isConnected) {
+      try {
+        el.requestVideoFrameCallback(cb);
+      } catch {
+        /* ignore */
+      }
+    }
+  };
+  try {
+    el.requestVideoFrameCallback(cb);
+  } catch {
+    /* ignore */
   }
 }
 
