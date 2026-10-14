@@ -96,11 +96,21 @@ function showJoinError(msg) {
   e.hidden = false;
 }
 
+// Session-code alphabet (must match the Worker's CODE_ALPHABET): uppercase letters +
+// digits minus the visually ambiguous 0/O/1/I/L. Validated client-side so a malformed
+// code shows a clear "invalid code" instead of failing the WS upgrade (a generic close
+// the viewer would otherwise mistake for an interruption).
+const CODE_ALPHABET = "23456789ABCDEFGHJKMNPQRSTUVWXYZ";
+
 $("joinForm").addEventListener("submit", (e) => {
   e.preventDefault();
   const code = $("codeInput").value.trim().toUpperCase();
   if (code.length !== 10) {
     showJoinError(t("connect.err.codeLen"));
+    return;
+  }
+  if (![...code].every((c) => CODE_ALPHABET.includes(c))) {
+    showJoinError(t("connect.err.codeInvalid"));
     return;
   }
   $("joinError").hidden = true;
@@ -689,6 +699,20 @@ function onWsClosed(ev) {
     interruptionActive = false;
     endSession(true);
     setStatus(t("connect.status.disconnected"), "bad");
+    return;
+  }
+  // Terminal JOIN failures the DO signals by close code: no-agent (4404) / busy (4409).
+  // The DO sends an {error} message then closes, but if the close races the message the
+  // message can be dropped — so handle the code here too, otherwise a bad/unknown code
+  // would fall through to onInterruption() and wrongly read as "connection interrupted".
+  // Only on the INITIAL join, though: a RECONNECTING viewer can legitimately get 4409
+  // ("busy") from its own not-yet-reaped socket, and must keep retrying, not give up.
+  if (ev && (ev.code === 4404 || ev.code === 4409) && !interruptionActive) {
+    abortConnect();
+    setStatus(t("connect.status.couldNotConnect"), "bad");
+    showJoinError(
+      ev.code === 4409 ? t("connect.err.busy") : t("connect.err.noAgent"),
+    );
     return;
   }
   onInterruption();
