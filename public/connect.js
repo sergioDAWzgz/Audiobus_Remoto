@@ -391,11 +391,21 @@ function stopHeartbeat() {
 // (the DO is slow to notice a half-open agent). This is the fast signal for an
 // agent-side drop — far quicker than waiting for WebRTC ICE to reach "failed".
 function videoStalled() {
+  // Only trust the frame signal while the page is visible: requestVideoFrameCallback
+  // is driven by the compositor, which PAUSES for a hidden tab even though the WS/pong
+  // stay alive — so a backgrounded tab must NOT read a frozen rVFC as a real stall.
   return (
-    inSession && videoEverPlayed && screens.size > 0 &&
+    inSession && videoEverPlayed && screens.size > 0 && !document.hidden &&
     performance.now() - lastVideoAdvance > STALE_MS
   );
 }
+
+// Returning to the foreground: rVFC was paused while hidden, so lastVideoAdvance is
+// stale. Refresh the grace so the first tick back doesn't flash a false stall (rVFC
+// resumes within a frame). The pong path keeps working while hidden, so leave it.
+document.addEventListener("visibilitychange", () => {
+  if (!document.hidden) lastVideoAdvance = performance.now();
+});
 // Our link to the server is unusable right now (closed, or no pong in time, or the
 // agent's side dropped, or the video stalled). A CONNECTING socket is neither down nor
 // up yet — we hold.
@@ -716,14 +726,14 @@ function trackVideoFrames(el) {
     videoEverPlayed = true;
     if (el.isConnected) {
       try {
-        el.requestVideoFrameCallback(cb);
+        el._rvfc = el.requestVideoFrameCallback(cb);
       } catch {
         /* ignore */
       }
     }
   };
   try {
-    el.requestVideoFrameCallback(cb);
+    el._rvfc = el.requestVideoFrameCallback(cb);
   } catch {
     /* ignore */
   }
@@ -736,6 +746,15 @@ function clearScreens() {
     s.el.removeEventListener("mousedown", h.onDown);
     s.el.removeEventListener("wheel", h.onWheel);
     s.el.removeEventListener("contextmenu", h.onCtx);
+    // Cancel the pending rVFC so the orphaned (detached, stream-less) <video> — which
+    // would never fire its callback again — doesn't keep its closure (and itself) alive.
+    if (s.el._rvfc != null && typeof s.el.cancelVideoFrameCallback === "function") {
+      try {
+        s.el.cancelVideoFrameCallback(s.el._rvfc);
+      } catch {
+        /* ignore */
+      }
+    }
     try {
       s.el.srcObject = null;
     } catch {
