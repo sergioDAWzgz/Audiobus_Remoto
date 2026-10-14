@@ -566,6 +566,10 @@ class NetClient:
         self.code = None
         self._last_pong = 0.0       # time.time() of the last heartbeat "pong"
         self._viewer_approved = False  # the owner approved the currently-held viewer
+        self._approved_vid = None   # the server's id for the viewer socket the owner
+        #                             approved; a resumed re-serve is auto-admitted only
+        #                             if its vid matches, so a different code-holder who
+        #                             took over the slot can't inherit the approval
         self._ended = False         # owner ended the session locally; a held viewer the
         #                             server re-serves on reconnect must be dismissed,
         #                             not resumed (survives a dead-socket send failure)
@@ -843,7 +847,9 @@ class NetClient:
             if mtype == "want":
                 self._set_wanted(msg.get("monitors"))
             elif mtype == "viewer-joined":
-                asyncio.create_task(self._on_viewer(ws, bool(msg.get("resumed"))))
+                asyncio.create_task(
+                    self._on_viewer(ws, bool(msg.get("resumed")), msg.get("vid"))
+                )
             elif mtype == "peer-left" and msg.get("who") == "viewer":
                 await self._stop_stream()
                 self._viewer_approved = False  # viewer relationship ended; re-consent next
@@ -861,7 +867,7 @@ class NetClient:
                 # The viewer's link went quiet but it is pinging again: clear the warning.
                 self.app.post(self.app.on_viewer_restored)
 
-    async def _on_viewer(self, ws, resumed=False):
+    async def _on_viewer(self, ws, resumed=False, vid=None):
         # Serialize viewer admission. Each viewer-joined spawns its own task; without a
         # lock two could interleave their teardown + re-serve and corrupt the capture
         # task / streaming flag (and, with auto-accept, start a stream the other then
@@ -872,9 +878,9 @@ class NetClient:
         async with self._viewer_lock:
             if gen != self._viewer_gen:
                 return
-            await self._serve_viewer(ws, resumed)
+            await self._serve_viewer(ws, resumed, vid)
 
-    async def _serve_viewer(self, ws, resumed=False):
+    async def _serve_viewer(self, ws, resumed=False, vid=None):
         if self.streaming:
             # A viewer-joined arrived while we're still streaming to the previous socket.
             # The server only sends one for a genuine new / replacement / held re-serve
@@ -905,12 +911,16 @@ class NetClient:
         self._blocked_btns.clear()
         self._pressed_btns.clear()
         self._last_blockrects = None  # force a fresh blockrects send to this viewer
-        # Auto-accept if the user set it, OR this is a viewer the owner ALREADY
+        # Auto-accept if the user set it, OR this is the SAME viewer the owner already
         # approved being re-served after the agent's OWN reconnect. `resumed` alone is
-        # NOT proof of consent — the server holds any still-connected viewer, including
-        # one whose approval was still pending when we dropped — so require our own
-        # approved flag too. Everyone else is prompted.
-        if self.app.auto_accept or (resumed and self._viewer_approved):
+        # NOT proof of consent: the server holds any still-connected viewer (including
+        # one whose approval was still pending when we dropped) AND the held slot may
+        # have been taken over by a different code-holder while we were away. So require
+        # our own approved flag AND a vid that matches the exact socket we approved —
+        # a replacement viewer carries a new vid and is prompted. Everyone else prompts.
+        if self.app.auto_accept or (
+            resumed and self._viewer_approved and vid is not None and vid == self._approved_vid
+        ):
             allowed = True
         else:
             allowed = await self.loop.run_in_executor(None, self._ask_approval)
@@ -931,6 +941,7 @@ class NetClient:
                 self.app.post(self.app.on_denied)
             return
         self._viewer_approved = True  # admitted: re-serve silently across our reconnect
+        self._approved_vid = vid      # ...but only this exact viewer socket (vid)
         try:
             await ws.send(json.dumps({
                 "type": "monitors",

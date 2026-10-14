@@ -113,18 +113,27 @@ export class SessionDO extends DurableObject {
       // only hold as "viewer gone" (peer-left), so any later reconnect re-earns consent.
       const now = Date.now();
       const heldViewers = this.ctx.getWebSockets("viewer");
+      let heldVid: string | undefined;
       const liveHeld = heldViewers.filter((v) => {
-        let last: number | undefined;
+        let att: { lastPing?: number; vid?: string } | null = null;
         try {
-          last = (v.deserializeAttachment() as { lastPing?: number } | null)?.lastPing;
+          att = v.deserializeAttachment() as { lastPing?: number; vid?: string } | null;
         } catch {
           /* ignore */
         }
-        return last !== undefined && now - last <= SILENCE_MS;
+        const last = att?.lastPing;
+        const live = last !== undefined && now - last <= SILENCE_MS;
+        if (live && heldVid === undefined) heldVid = att?.vid;
+        return live;
       });
       if (liveHeld.length > 0) {
         try {
-          server.send(JSON.stringify({ type: "viewer-joined", resumed: true }));
+          // vid names WHICH viewer this resumes. The agent auto-re-admits on resumed
+          // only if this vid matches the one it approved — so a live held viewer that is
+          // live because it REPLACED a ghost (a different code-holder, while the agent
+          // was also away and never saw the plain viewer-joined that would reset consent)
+          // carries a NEW vid and is re-prompted, not silently inherited.
+          server.send(JSON.stringify({ type: "viewer-joined", resumed: true, vid: heldVid }));
         } catch {
           /* ignore */
         }
@@ -155,8 +164,13 @@ export class SessionDO extends DurableObject {
     // so the browser can show a friendly message (a 4xx to an upgrade request is
     // invisible to the WebSocket client).
     this.ctx.acceptWebSocket(server, ["viewer"]);
+    // Tag this viewer socket with a unique id. It is server-side only (never sent to
+    // the viewer) and travels to the agent in viewer-joined, so the agent can tell
+    // whether a resumed re-serve is the SAME viewer it approved or a different one that
+    // took over the slot. crypto.randomUUID is available in the Workers runtime.
+    const vid = crypto.randomUUID();
     try {
-      server.serializeAttachment({ lastPing: Date.now() });
+      server.serializeAttachment({ lastPing: Date.now(), vid });
     } catch {
       /* ignore */
     }
@@ -216,14 +230,15 @@ export class SessionDO extends DurableObject {
     this.viewerSilentSince = undefined;
 
     server.send(JSON.stringify({ type: "connected" }));
-    // Always a PLAIN viewer-joined — never resumed. This viewer arrived on a NEW socket
-    // (a first connect or a reconnect/takeover of a ghost), and anyone holding the code
-    // could be on the other end, so it must re-earn consent. Only the agent's OWN
-    // reconnect re-serves a still-held viewer silently (resumed), because the server
-    // kept that exact socket — see the agent branch above.
+    // Always a PLAIN viewer-joined (never resumed) carrying this viewer's vid. This
+    // viewer arrived on a NEW socket (a first connect or a reconnect/takeover of a
+    // ghost), and anyone holding the code could be on the other end, so it must re-earn
+    // consent; the agent records this vid as the approved one iff the owner accepts.
+    // Only the agent's OWN reconnect re-serves a still-held viewer silently (resumed),
+    // and only when the resumed vid matches — see the agent branch above.
     for (const agent of this.ctx.getWebSockets("agent")) {
       try {
-        agent.send(JSON.stringify({ type: "viewer-joined" }));
+        agent.send(JSON.stringify({ type: "viewer-joined", vid }));
       } catch {
         /* ignore */
       }
@@ -250,14 +265,16 @@ export class SessionDO extends DurableObject {
       // suspension (device sleep, tab freeze) and must not judge the peer this round:
       // the peer may simply not have had a chance to re-ping yet (a shared suspension
       // would otherwise have the first waker kill the still-recovering other side).
-      let prevOwn: number | undefined;
+      let ownAtt: { lastPing?: number; vid?: string } | null = null;
       try {
-        prevOwn = (ws.deserializeAttachment() as { lastPing?: number } | null)?.lastPing;
+        ownAtt = ws.deserializeAttachment() as { lastPing?: number; vid?: string } | null;
       } catch {
         /* no attachment yet */
       }
+      const prevOwn = ownAtt?.lastPing;
       try {
-        ws.serializeAttachment({ lastPing: now });
+        // Preserve the rest of the attachment (notably a viewer's vid) across the stamp.
+        ws.serializeAttachment({ ...(ownAtt || {}), lastPing: now });
       } catch {
         /* ignore */
       }
