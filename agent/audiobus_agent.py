@@ -1943,12 +1943,18 @@ class App:
                 pass
 
     def on_reconnected(self):
-        """The link came back: dismiss the dialog/timers and restore the status."""
+        """The link came back: dismiss the dialog/timers and reset to the WAITING state.
+        We must NOT restore 'connected' from the pre-drop flag: the viewer may have left
+        while we were away, and the server can't always tell us (it can't reliably
+        distinguish a half-open agent socket from a live one). If a viewer is still held,
+        the server re-serves it (viewer-joined resumed -> _on_viewer -> on_connected),
+        which restores the 'controlling' banner; otherwise we correctly fall back to
+        'waiting' instead of sitting on a stale 'Connected' with no viewer."""
         self.on_link_dismiss()
-        self.set_status(
-            tr("agent.status.connected") if self._connected else tr("agent.status.waiting"),
-            GOOD if self._connected else WARN,
-        )
+        self._connected = False
+        self._fade_banner(False)
+        self._fade_stop(False)
+        self.set_status(tr("agent.status.waiting"), WARN)
 
     def on_link_failed(self):
         """Reconnection gave up (the server's grace elapsed without recovery): close
