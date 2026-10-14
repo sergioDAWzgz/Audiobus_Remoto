@@ -683,7 +683,13 @@ class NetClient:
                     ssl=ws_ssl,
                     max_size=None,
                     ping_interval=20,
-                    open_timeout=HB_CONNECT_TIMEOUT_SECS,
+                    # First connect gets the library default (10s) so a slow-but-valid
+                    # initial handshake isn't aborted; reconnect attempts fail fast so a
+                    # half-open/unreachable server doesn't hang each retry ~10s.
+                    open_timeout=(10.0 if first else HB_CONNECT_TIMEOUT_SECS),
+                    # Force a half-open socket closed quickly instead of waiting the ~10s
+                    # default for a graceful-close handshake that will never arrive.
+                    close_timeout=HB_RECONNECT_SECS,
                     user_agent_header=USER_AGENT,
                 ) as ws:
                     self.ws = ws
@@ -762,7 +768,12 @@ class NetClient:
 
     async def _heartbeat(self, ws):
         """Ping the server over the WS and watch for the echoed pong. If none comes
-        back within HB_INTERRUPT_SECS, close the socket so the reconnect loop runs."""
+        back within HB_INTERRUPT_SECS the link is dead: surface the interruption
+        warning RIGHT HERE (at detection) and then close the socket so the reconnect
+        loop runs. The warning must be posted BEFORE ws.close(): on a half-open socket
+        (Wi-Fi off, cable pulled) close() blocks for close_timeout and the async-with
+        teardown that follows is where _run would otherwise post it — so posting only
+        from there leaves the window stale on 'connected' for several seconds."""
         self._last_pong = time.time()
         last_tick = time.time()
         try:
@@ -778,8 +789,10 @@ class NetClient:
                 try:
                     await ws.send("ping")
                 except Exception:
-                    return  # socket is already dead
+                    return  # socket is already dead (recv/_run will handle it)
                 if time.time() - self._last_pong > HB_INTERRUPT_SECS:
+                    self._link_down = True
+                    self.app.post(self.app.on_link_interrupted)
                     try:
                         await ws.close()
                     except Exception:
