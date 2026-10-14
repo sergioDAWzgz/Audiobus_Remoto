@@ -5,6 +5,11 @@ const SESSION_TTL_MS = 15 * 60 * 1000; // reservation / idle lifetime
 // long so the agent can reconnect with the SAME code before the session is torn
 // down. Must comfortably exceed the client's 5s interrupt + reconnect attempts.
 const AGENT_GRACE_MS = 60 * 1000;
+// Each side app-pings ~once a second. If a side goes silent for this long it has
+// half-open dropped (no close reached us) — the OTHER side's next ping notices and
+// closes it, so webSocketClose can notify the survivor (agent-interrupted / peer-left).
+// Comfortably above the 1s ping interval and the client's own 3s interrupt window.
+const SILENCE_MS = 5000;
 
 /**
  * One SessionDO instance per session code. It is the meeting point between the
@@ -156,6 +161,35 @@ export class SessionDO extends DurableObject {
         ws.send("pong");
       } catch {
         /* ignore */
+      }
+      // Liveness tracking: stamp this socket's last ping, then check whether the OTHER
+      // role's socket(s) have gone silent (a half-open drop the runtime hasn't reaped —
+      // the client can't tell us it's gone because its link is dead). Closing a silent
+      // socket makes its webSocketClose notify the surviving side (the viewer gets
+      // agent-interrupted + grace; the agent gets peer-left so it stops "controlling").
+      const pingRole = this.ctx.getTags(ws)[0];
+      try {
+        ws.serializeAttachment({ lastPing: Date.now() });
+      } catch {
+        /* ignore */
+      }
+      const now = Date.now();
+      const others = this.ctx.getWebSockets(pingRole === "agent" ? "viewer" : "agent");
+      for (const other of others) {
+        let last: number | undefined;
+        try {
+          const att = other.deserializeAttachment() as { lastPing?: number } | null;
+          last = att?.lastPing;
+        } catch {
+          /* no attachment yet */
+        }
+        if (last !== undefined && now - last > SILENCE_MS) {
+          try {
+            other.close(4001, "peer silent");
+          } catch {
+            /* ignore */
+          }
+        }
       }
       return;
     }
