@@ -63,7 +63,9 @@ let interruptionActive = false; // an interruption (reconnecting; maybe dialog) 
 let interruptStart = 0; // performance.now() when the current interruption began
 let dialogTimer = null; // delay before the warning dialog first appears
 let reaskTimer = null; // delay before re-asking after "Keep waiting"
-let mediaFailTimer = null; // confirms a media-only WebRTC failure before ending
+let mediaFailTimer = null; // confirms a sustained media (WebRTC) failure before acting
+let mediaDown = false; // the WebRTC media path has failed (agent likely dropped) — folded
+//                        into isDown()/isUp() so it drives the warn+reconnect flow, not an end
 let reconnecting = false; // actively trying to reopen our WS
 let reconnectTimer = null;
 let intentionalClose = false; // we closed the WS on purpose (reconnect / endSession)
@@ -267,33 +269,38 @@ async function handleOffer(msg) {
     if (e.candidate) send({ type: "webrtc-ice", candidate: e.candidate });
   };
 
-  // The WebSocket heartbeat is the primary liveness signal (a network drop stalls it
-  // and drives reconnection). But a MEDIA-ONLY failure (UDP/TURN dies while the WS
-  // stays healthy) wouldn't stall the heartbeat, so catch a terminal pc "failed"
-  // here — delayed briefly and guarded so it doesn't fight a WS reconnect already in
-  // flight, and so a transient ICE "disconnected" that recovers won't nag.
+  // The WebSocket heartbeat is the primary liveness signal for OUR link to the server.
+  // But when the AGENT's link drops (half-open), our WS + pong stay healthy, so the
+  // heartbeat can't see it — only the video stalls. The DO eventually relays
+  // "agent-interrupted", but that can be slow on a half-open agent drop, so we also
+  // watch the peer connection: a sustained "failed"/"disconnected" means the media is
+  // gone. We treat that as an INTERRUPTION (warn + wait for the agent to re-serve),
+  // NOT an immediate disconnect — mediaDown is folded into isDown()/isUp(), and a new
+  // offer that reconnects the media clears it. A brief, self-recovering ICE blip
+  // (back to "connected" within the grace) is ignored.
   pc.onconnectionstatechange = () => {
     if (!inSession || !pc) return;
     const st = pc.connectionState;
     if (st === "connected") {
+      mediaDown = false; // media is flowing again
       if (mediaFailTimer) {
         clearTimeout(mediaFailTimer);
         mediaFailTimer = null;
       }
-    } else if (st === "failed") {
-      if (mediaFailTimer) clearTimeout(mediaFailTimer);
-      mediaFailTimer = setTimeout(() => {
-        mediaFailTimer = null;
-        // End only on a true media-ONLY failure (WS healthy, no interruption in
-        // flight); a full network drop is the heartbeat/reconnect flow's job.
-        if (
-          inSession && pc && pc.connectionState === "failed" &&
-          !interruptionActive && !isDown()
-        ) {
-          setStatus(t("connect.status.lost"), "bad");
-          endSession(true);
-        }
-      }, WARN_DELAY_MS);
+    } else if (st === "failed" || st === "disconnected") {
+      if (!mediaFailTimer && !mediaDown) {
+        mediaFailTimer = setTimeout(() => {
+          mediaFailTimer = null;
+          // Still down after the grace: mark the media down so the heartbeat tick
+          // treats it as an interruption (onInterruption -> warn + wait for re-serve).
+          if (
+            inSession && pc &&
+            (pc.connectionState === "failed" || pc.connectionState === "disconnected")
+          ) {
+            mediaDown = true;
+          }
+        }, WARN_DELAY_MS);
+      }
     }
   };
 
@@ -376,14 +383,22 @@ function stopHeartbeat() {
 // agent's side dropped). A CONNECTING socket is neither down nor up yet — we hold.
 function isDown() {
   if (agentDown) return true;
+  if (mediaDown) return true; // the WebRTC media failed (agent likely gone)
   if (!ws) return true;
   if (ws.readyState === 0) return false; // opening: onclose/onerror catches failures
   if (ws.readyState !== 1) return true; // closing / closed
   return performance.now() - lastPong > INTERRUPT_MS;
 }
-// Our link is confirmed healthy again (used to detect recovery).
+// Our link is confirmed healthy again (used to detect recovery): WS open with a recent
+// pong, the agent up, and — once media was lost — the video flowing again.
 function isUp() {
-  if (agentDown) return false;
+  if (agentDown || mediaDown) return false;
+  return !!ws && ws.readyState === 1 && performance.now() - lastPong <= INTERRUPT_MS;
+}
+
+// Is our OWN socket+link to the server healthy (independent of the agent/media)?
+// Drives whether reconnection should reopen the WS or just wait for the agent.
+function ourLinkHealthy() {
   return !!ws && ws.readyState === 1 && performance.now() - lastPong <= INTERRUPT_MS;
 }
 
@@ -471,6 +486,7 @@ function showInterruptDialog() {
 
 function onRecovered() {
   interruptionActive = false;
+  mediaDown = false;
   stopReconnecting();
   if (dialogTimer) {
     clearTimeout(dialogTimer);
@@ -482,7 +498,7 @@ function onRecovered() {
   }
   if (mediaFailTimer) {
     // A media-fail timer armed against the OLD (failed) pc must not fire after the
-    // WS link has recovered and end the session we just got back.
+    // link has recovered and re-interrupt the session we just got back.
     clearTimeout(mediaFailTimer);
     mediaFailTimer = null;
   }
@@ -507,12 +523,10 @@ function stopReconnecting() {
 }
 function tryReconnect() {
   if (!reconnecting || !interruptionActive || !live) return;
-  const ourSocketOpen = !!ws && ws.readyState === 1;
-  // Reopen OUR WS whenever our own socket is down (even if agentDown — our link may
-  // have dropped too, which would otherwise strand us). If ONLY the agent dropped
-  // and our socket is fine, just wait for it to reconnect and re-serve (reopening
-  // would hit the DO's "busy" check).
-  if (!agentDown || !ourSocketOpen) {
+  // Reopen OUR WS only when our own link to the server is down. If the agent dropped
+  // or only the media failed (our WS is fine), just wait for the agent to re-serve;
+  // reopening a healthy socket would hit the DO's "busy" check.
+  if (!ourLinkHealthy()) {
     if (ws && ws.readyState === 1) {
       // Stall on a still-"open" socket: close it first, else the DO sees two viewers.
       intentionalClose = true;
@@ -581,6 +595,7 @@ function endSession(keepStatus) {
   live = false;
   interruptionActive = false;
   agentDown = false;
+  mediaDown = false;
   stopHeartbeat();
   stopReconnecting();
   if (dialogTimer) {
