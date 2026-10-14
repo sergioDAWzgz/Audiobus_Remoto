@@ -61,12 +61,13 @@ DEFAULT_SERVER = "https://audiobus-remote.soft-daf.workers.dev"
 USER_AGENT = "AudiobusRemoteAgent/0.1"
 
 # Connection heartbeat / reconnection tuning.
-HB_PING_SECS = 2.0          # send an app-level "ping" this often
-HB_INTERRUPT_SECS = 5.0     # no "pong" for this long -> the server link is interrupted
+HB_PING_SECS = 1.0          # send an app-level "ping" this often
+HB_INTERRUPT_SECS = 3.0     # no "pong" for this long -> the server link is interrupted
 HB_RECONNECT_SECS = 2.0     # wait between reconnect attempts (after the first, immediate one)
 HB_CONNECT_TIMEOUT_SECS = 6.0  # cap each (re)connect handshake so a half-open/unreachable
 #                                server fails fast instead of hanging ~10s per attempt
-HB_WARN_SECS = 5.0          # reconnect starts at once; warn only if still down this long
+HB_WARN_SECS = 2.0          # reconnect starts at once; show the Wait/Cut dialog this long
+#                            after the drop is detected -> ~5s total (3s detect + 2s)
 HB_MAX_RECONNECT_SECS = 65.0  # > the DO's 60s grace: give up reconnecting after this
 INTERRUPT_REASK_MS = 10000  # re-ask the Wait/Cut dialog this long after "Wait"
 
@@ -789,7 +790,11 @@ class NetClient:
                 try:
                     await ws.send("ping")
                 except Exception:
-                    return  # socket is already dead (recv/_run will handle it)
+                    # The send itself failed: the socket is dead. Warn now rather than
+                    # leaving the window stale while the teardown runs.
+                    self._link_down = True
+                    self.app.post(self.app.on_link_interrupted)
+                    return
                 if time.time() - self._last_pong > HB_INTERRUPT_SECS:
                     self._link_down = True
                     self.app.post(self.app.on_link_interrupted)

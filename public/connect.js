@@ -48,12 +48,13 @@ let dismissModal = null; // close() of the open confirmation dialog, or null
 let currentCode = null; // the session code (needed to reconnect)
 let lastFrameAt = 0; // performance.now() of the last frame/activity
 // ---- Connection heartbeat + interruption / active reconnection ----
-const PING_MS = 2000; // send a heartbeat ping this often
-const INTERRUPT_MS = 5000; // no pong for this long -> the server link is interrupted
-const WARN_DELAY_MS = 5000; // reconnect starts immediately; warn only if still down this long
+const PING_MS = 1000; // send a heartbeat ping this often
+const INTERRUPT_MS = 3000; // no pong for this long -> the server link is interrupted
+const WARN_DELAY_MS = 2000; // reconnect starts immediately; show the Wait/Cut dialog this
+//                             long after the drop is detected -> ~5s total (3s + 2s)
 const REASK_MS = 10000; // after "Wait", re-ask this long later if still interrupted
 const MAX_RECONNECT_MS = 65000; // > the DO's agent grace (60s): give up after this, end cleanly
-const STALE_MS = 4000; // no frames for this long while connected -> the stream stalled
+const STALE_MS = 3000; // no frames for this long while connected -> the stream stalled
 let live = false; // true from connect() until endSession()
 let lastPong = 0; // performance.now() of the last "pong" from the server
 let lastTick = 0; // performance.now() of the previous heartbeat tick (to spot suspensions)

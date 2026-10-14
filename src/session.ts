@@ -46,8 +46,21 @@ export class SessionDO extends DurableObject {
       if (!reserved) {
         return new Response("Session not found or expired.", { status: 404 });
       }
-      if (this.ctx.getWebSockets("agent").length > 0) {
-        return new Response("An agent is already connected.", { status: 409 });
+      // Replace any still-registered agent socket instead of rejecting with 409. After
+      // a half-open drop (Wi-Fi off, cable pulled) the runtime hasn't reaped the dead
+      // socket yet, so it still shows as "connected"; a 409 would strand the agent —
+      // unable to reconnect — until that ghost times out, which can outlast the whole
+      // session. Only the code's owner connects (the code is a per-session secret), so
+      // a new agent connection is the SAME agent reconnecting: let it take over. The
+      // old socket's webSocketClose sees the replacement and skips the drop teardown.
+      for (const stale of this.ctx.getWebSockets("agent")) {
+        try {
+          // 4000 (not a reserved 1xxx code — ws.close only allows 1000 or 3000-4999)
+          // so the close actually succeeds and the stale socket leaves the registry.
+          stale.close(4000, "replaced by reconnect");
+        } catch {
+          /* ignore */
+        }
       }
       this.ctx.acceptWebSocket(server, ["agent"]);
       // Keep the session alive while the agent is connected (this also cancels any
@@ -163,17 +176,23 @@ export class SessionDO extends DurableObject {
   async webSocketClose(ws: WebSocket, code: number, reason: string) {
     const role = this.ctx.getTags(ws)[0];
     if (role === "agent") {
-      // The agent's link dropped. Hold the session for a grace window so the agent
-      // can reconnect with the same code; tell viewers so they can warn + wait. If
-      // the agent never returns, alarm() tears the session down at the deadline.
-      for (const viewer of this.ctx.getWebSockets("viewer")) {
-        try {
-          viewer.send(JSON.stringify({ type: "agent-interrupted" }));
-        } catch {
-          /* ignore */
+      // If another agent socket is already registered, this close is a STALE socket
+      // being replaced by a reconnect (see the fetch() agent path) — not a real drop.
+      // Don't warn viewers or start the grace; the new socket is already serving.
+      const liveAgents = this.ctx.getWebSockets("agent").filter((s) => s !== ws);
+      if (liveAgents.length === 0) {
+        // The agent's link dropped. Hold the session for a grace window so the agent
+        // can reconnect with the same code; tell viewers so they can warn + wait. If
+        // the agent never returns, alarm() tears the session down at the deadline.
+        for (const viewer of this.ctx.getWebSockets("viewer")) {
+          try {
+            viewer.send(JSON.stringify({ type: "agent-interrupted" }));
+          } catch {
+            /* ignore */
+          }
         }
+        await this.ctx.storage.setAlarm(Date.now() + AGENT_GRACE_MS);
       }
-      await this.ctx.storage.setAlarm(Date.now() + AGENT_GRACE_MS);
     } else {
       const agents = this.ctx.getWebSockets("agent");
       if (agents.length > 0) {
@@ -203,6 +222,10 @@ export class SessionDO extends DurableObject {
   async webSocketError(ws: WebSocket) {
     const role = this.ctx.getTags(ws)[0];
     if (role === "agent") {
+      // Skip when this is a stale socket being replaced by a reconnect (see
+      // webSocketClose) — another agent socket is already live and serving.
+      const liveAgents = this.ctx.getWebSockets("agent").filter((s) => s !== ws);
+      if (liveAgents.length > 0) return;
       // Same as a close: hold the session for the grace window and let viewers warn
       // rather than ending immediately.
       for (const viewer of this.ctx.getWebSockets("viewer")) {
