@@ -111,6 +111,40 @@ $("joinForm").addEventListener("submit", (e) => {
 });
 
 function connect(code) {
+  // A fresh, user-initiated join is NOT a reconnection. Clear any in-flight
+  // interruption state first, so THIS attempt's own outcome (no-agent / busy) surfaces
+  // as a join error instead of being swallowed by the reconnect machinery. Without
+  // this, submitting a new or mistyped code while a pre-session interruption is active
+  // (the join form stays live until a session is established) would be mis-read as a
+  // "connection interrupted" and spin on reconnect until the timeout.
+  interruptionActive = false;
+  stopReconnecting();
+  if (dialogTimer) {
+    clearTimeout(dialogTimer);
+    dialogTimer = null;
+  }
+  if (reaskTimer) {
+    clearTimeout(reaskTimer);
+    reaskTimer = null;
+  }
+  if (dismissModal) dismissModal();
+  // Tear down any socket from a previous attempt before opening a new one. Leaving it
+  // open orphans it on the server: a same-code re-submit would see its own still-live
+  // socket and be refused "busy", and its later onclose (intentionalClose was false)
+  // would spuriously interrupt or end this fresh attempt.
+  if (ws) {
+    intentionalClose = true;
+    try {
+      ws.close();
+    } catch {
+      /* ignore */
+    }
+    ws = null;
+  }
+  // Start this attempt's liveness flag clean, so a leftover agent-down from a
+  // pre-session interruption can't make the first heartbeat tick re-enter an
+  // interruption and swallow this attempt's no-agent/busy error.
+  agentDown = false;
   currentCode = code;
   live = true;
   setStatus(t("connect.status.connecting"));
