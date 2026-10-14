@@ -734,6 +734,13 @@ class NetClient:
         self._link_down = False     # our link to the server is currently interrupted,
         #                             so a pending approval is for a connection that's gone
         self._left_reported = False # viewer-gone reported once per session (dedup)
+        # Serialize _on_viewer: each viewer-joined spawns a task, and two can arrive
+        # close together (a flapping viewer the server replaces twice). The lock (created
+        # on the net-thread loop in _run) keeps their teardown + re-serve from
+        # interleaving and corrupting pc/capture/streaming; the generation counter lets a
+        # newer join supersede an older one still queued.
+        self._viewer_lock = None
+        self._viewer_gen = 0
         self._blocked_btns = set()  # buttons whose press was suppressed over our window
         self._pressed_btns = set()  # buttons we actually injected a press for (to release)
         self._last_blockrects = None  # last blockrects JSON sent to the viewer (dedup)
@@ -790,6 +797,8 @@ class NetClient:
     async def _run(self):
         self.loop = asyncio.get_event_loop()
         self.stop_event = asyncio.Event()
+        # Create the viewer-admission lock on THIS (net-thread) loop, like stop_event.
+        self._viewer_lock = asyncio.Lock()
 
         # NOTE on coordinates: instantiating mss (ScreenGrabber) makes the PROCESS
         # per-monitor DPI-aware as a side effect, so from here on screen capture,
@@ -1015,6 +1024,17 @@ class NetClient:
                 local = self.ended_locally
                 self.ended_locally = False
                 self._report_peer_left(local)
+            elif mtype == "viewer-interrupted":
+                # The server noticed the viewer's link went quiet — its browser tab may
+                # be frozen/backgrounded, or its connection briefly dropped. Advisory
+                # only: we keep the session and consent intact (the WebRTC media keeps
+                # flowing; a frozen tab catches up on unfreeze) and just warn the owner.
+                # A genuine departure still arrives as peer-left (relayed or via the
+                # media connectionstatechange); a reconnect as viewer-joined.
+                self.app.post(self.app.on_viewer_interrupted)
+            elif mtype == "viewer-restored":
+                # The viewer's link went quiet but it is pinging again: clear the warning.
+                self.app.post(self.app.on_viewer_restored)
 
     def _report_peer_left(self, local):
         """Report the viewer gone to the UI exactly once per session. Two paths can
@@ -1042,8 +1062,31 @@ class NetClient:
         self._report_peer_left(False)
 
     async def _on_viewer(self, ws, resumed=False):
+        # Serialize viewer admission. Each viewer-joined spawns its own task; without a
+        # lock two could interleave their teardown + re-serve and corrupt pc/capture/
+        # streaming (and, with auto-accept, start a stream the other then tears down).
+        # The generation guard drops a join that a newer one superseded while it waited,
+        # so a flapping viewer collapses to a single (latest) admit instead of a backlog
+        # of prompts.
+        self._viewer_gen += 1
+        gen = self._viewer_gen
+        async with self._viewer_lock:
+            if gen != self._viewer_gen:
+                return
+            await self._serve_viewer(ws, resumed)
+
+    async def _serve_viewer(self, ws, resumed=False):
         if self.streaming:
-            return
+            # A viewer-joined arrived while we're still streaming to the previous socket.
+            # The server only sends one for a genuine new / replacement / held re-serve
+            # (a second LIVE viewer is refused busy), so the current stream is stale:
+            # tear it down (streaming=False first, so the pc-close doesn't fire
+            # _report_peer_left). Then fall through to normal consent below — `resumed`
+            # (our OWN reconnect re-serving a still-held viewer, same socket) re-admits
+            # silently; a fresh viewer socket (a reconnect/takeover after the old one
+            # dropped) is re-prompted, so a different person who has the code cannot
+            # silently inherit the previous viewer's approval.
+            await self._stop_stream()
         # The owner ended this session locally while we were disconnected. A held viewer
         # the server re-serves on our reconnect must be dismissed (told to close), not
         # re-admitted — otherwise the explicit Stop is silently reversed (and, under
@@ -1075,6 +1118,9 @@ class NetClient:
         else:
             allowed = await self.loop.run_in_executor(None, self._ask_approval)
         if not allowed:
+            # Make sure no stream survives a denial (defense in depth: the lock already
+            # prevents a concurrent task from starting one under us).
+            await self._stop_stream()
             # If our link dropped (or this is no longer the current socket) while the
             # owner was deciding, the approval unblocked because the drop force-closed
             # the dialog — not because the owner denied. The connection is gone, so
@@ -2166,6 +2212,11 @@ class App:
 
     def on_denied(self):
         self._connected = False
+        # A denial can now land AFTER a session was established (a reconnecting viewer is
+        # re-prompted), so tear the controlling UI down like on_peer_left — otherwise the
+        # 'controlling' banner + Stop button linger over a 'Denied' status.
+        self._fade_banner(False)
+        self._fade_stop(False)
         self.set_status(tr("agent.status.denied"), WARN)
 
     def on_peer_left(self, local=False):
@@ -2179,6 +2230,23 @@ class App:
             tr("agent.status.ended") if local else tr("agent.status.viewerLeft"),
             WARN,
         )
+
+    def on_viewer_interrupted(self):
+        """Advisory: the viewer's link went quiet (its tab may be frozen/backgrounded,
+        or its connection briefly dropped). We keep streaming + consent; just warn the
+        owner. No-op if we aren't in a controlling session (e.g. the viewer already
+        left and a stale advisory arrived)."""
+        if not self._connected:
+            return
+        self.set_status(tr("agent.status.viewerInterrupted"), WARN)
+        self.banner.set_text(tr("agent.banner.viewerInterrupted"))
+
+    def on_viewer_restored(self):
+        """The viewer is reachable again: restore the controlling status/banner."""
+        if not self._connected:
+            return
+        self.set_status(tr("agent.status.connected"), GOOD)
+        self.banner.set_text(tr("agent.banner.controlling"))
 
     def on_fatal(self, message):
         self.set_status(tr("agent.error.couldNotStart"), BAD)

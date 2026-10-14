@@ -5,11 +5,25 @@ const SESSION_TTL_MS = 15 * 60 * 1000; // reservation / idle lifetime
 // long so the agent can reconnect with the SAME code before the session is torn
 // down. Must comfortably exceed the client's 5s interrupt + reconnect attempts.
 const AGENT_GRACE_MS = 60 * 1000;
-// Each side app-pings ~once a second. If a side goes silent for this long it has
-// half-open dropped (no close reached us) — the OTHER side's next ping notices and
-// closes it, so webSocketClose can notify the survivor (agent-interrupted / peer-left).
+// Each side app-pings ~once a second. If a side goes silent for this long its link
+// has gone quiet. The two directions are handled ASYMMETRICALLY:
+//   - A silent AGENT (native app, pings reliably) is a genuine half-open drop: the
+//     viewer's next ping closes it so webSocketClose warns the viewer (agent-
+//     interrupted + grace).
+//   - A silent VIEWER (browser) is NOT reaped: a tab's timers legitimately freeze
+//     for seconds-to-minutes (background tab, device sleep, intensive throttling) with
+//     the socket still open. Closing it would force a needless reconnect + fresh
+//     consent. Instead the agent is sent an advisory (viewer-interrupted) so it can
+//     warn its user, leaving stream + consent intact; a real departure still arrives
+//     as a webSocketClose (-> peer-left), and a dead viewer's reconnect is replaced.
 // Comfortably above the 1s ping interval and the client's own 3s interrupt window.
 const SILENCE_MS = 5000;
+// A silent viewer is advised, not reaped — but if it stays CONTINUOUSLY silent far
+// longer than any benign freeze (Chrome intensive throttling still pings ~1/min, so a
+// backgrounded-but-alive tab is never silent this long), give up: close its ghost so
+// webSocketClose reports a clean "viewer left" and the agent stops streaming to a
+// socket that will never read again. Long enough not to fire on a normal background tab.
+const VIEWER_GIVEUP_MS = 90 * 1000;
 
 /**
  * One SessionDO instance per session code. It is the meeting point between the
@@ -23,6 +37,11 @@ const SILENCE_MS = 5000;
  * All consent logic (approve/deny a connection) lives in the agent, not here.
  */
 export class SessionDO extends DurableObject {
+  /** When the viewer's link first went continuously silent (undefined = not silent),
+   *  so we can give up on a ghost that never comes back (VIEWER_GIVEUP_MS). In-memory:
+   *  reset on hibernation at worst restarts the give-up clock, which is harmless. */
+  private viewerSilentSince: number | undefined = undefined;
+
   /** Claim this code for a new session. Returns false if already claimed. */
   async reserve(): Promise<boolean> {
     const reserved = await this.ctx.storage.get<boolean>("reserved");
@@ -75,6 +94,13 @@ export class SessionDO extends DurableObject {
         }
       }
       this.ctx.acceptWebSocket(server, ["agent"]);
+      // Stamp a baseline lastPing so silence checks have a reference before the first
+      // real ping arrives (a freshly-accepted socket isn't mistaken for a ghost).
+      try {
+        server.serializeAttachment({ lastPing: Date.now() });
+      } catch {
+        /* ignore */
+      }
       // Keep the session alive while the agent is connected (this also cancels any
       // short grace timer set when a previous agent socket dropped).
       await this.ctx.storage.setAlarm(Date.now() + SESSION_TTL_MS);
@@ -83,32 +109,46 @@ export class SessionDO extends DurableObject {
       const viewerLeftInGrace = await this.ctx.storage.get<boolean>("viewerLeftInGrace");
       if (viewerLeftInGrace) await this.ctx.storage.delete("viewerLeftInGrace");
       server.send(JSON.stringify({ type: "registered" }));
-      // Reconnect: if a viewer is still connected (held through the agent's grace
-      // window), re-serve it via the agent's normal viewer-joined path and tell the
-      // viewer the agent is back. On a first-ever connect there is no viewer yet.
+      // Reconnect: if a viewer is still connected AND LIVE (held through the agent's
+      // grace window, still pinging), re-serve it as resumed and tell it the agent is
+      // back. resumed:true auto-re-admits WITHOUT a fresh prompt, so it must only ever
+      // name a viewer that is genuinely the same one: a LIVE viewer cannot have been
+      // taken over (a second viewer is refused busy while the incumbent is live), so
+      // resuming a live held viewer is safe. A held viewer that has gone silent (a dead
+      // ghost) is NOT resumed — a different code-holder could replace that ghost, and
+      // resuming it would hand them the previous viewer's approval. We treat a ghost-
+      // only hold as "viewer gone" (peer-left), so any later reconnect re-earns consent.
+      const now = Date.now();
       const heldViewers = this.ctx.getWebSockets("viewer");
-      if (heldViewers.length > 0) {
+      const liveHeld = heldViewers.filter((v) => {
+        let last: number | undefined;
         try {
-          // resumed:true tells the agent this is the SAME held viewer it was already
-          // serving (re-serve after the agent's own reconnect) — safe to re-admit
-          // without a fresh consent prompt. A normal viewer-joined has no flag.
+          last = (v.deserializeAttachment() as { lastPing?: number } | null)?.lastPing;
+        } catch {
+          /* ignore */
+        }
+        return last !== undefined && now - last <= SILENCE_MS;
+      });
+      if (liveHeld.length > 0) {
+        try {
           server.send(JSON.stringify({ type: "viewer-joined", resumed: true }));
         } catch {
           /* ignore */
         }
-        for (const viewer of heldViewers) {
+        for (const viewer of liveHeld) {
           try {
             viewer.send(JSON.stringify({ type: "agent-restored" }));
           } catch {
             /* ignore */
           }
         }
-      } else if (viewerLeftInGrace) {
-        // The viewer we were controlling for departed while we were away: tell the
-        // reconnecting agent so it clears its now-stale "controlling" banner/status
-        // instead of restoring a session with no viewer. This fires ONLY when a viewer
-        // actually left during the grace — never on a first connect or on an idle blip
-        // with no viewer, which would otherwise show a false "viewer disconnected".
+      } else if (viewerLeftInGrace || heldViewers.length > 0) {
+        // Either the viewer we were controlling for departed while we were away
+        // (viewerLeftInGrace), or the only held viewer(s) are dead ghosts (silent, not
+        // resumed above). Tell the reconnecting agent the viewer is gone so it clears
+        // its now-stale "controlling" state and re-earns consent for whoever reconnects
+        // next, rather than restoring a session with no (live) viewer. This never fires
+        // on a first connect or an idle blip with no viewer at all.
         try {
           server.send(JSON.stringify({ type: "peer-left", who: "viewer" }));
         } catch {
@@ -122,6 +162,11 @@ export class SessionDO extends DurableObject {
     // so the browser can show a friendly message (a 4xx to an upgrade request is
     // invisible to the WebSocket client).
     this.ctx.acceptWebSocket(server, ["viewer"]);
+    try {
+      server.serializeAttachment({ lastPing: Date.now() });
+    } catch {
+      /* ignore */
+    }
     if (this.ctx.getWebSockets("agent").length === 0) {
       server.send(
         JSON.stringify({
@@ -134,20 +179,55 @@ export class SessionDO extends DurableObject {
       server.close(4404, "no agent");
       return new Response(null, { status: 101, webSocket: client });
     }
-    // getWebSockets("viewer") already includes the socket we just accepted.
-    if (this.ctx.getWebSockets("viewer").length > 1) {
-      server.send(
-        JSON.stringify({
-          type: "error",
-          code: "busy",
-          message: "Someone else is already controlling this computer.",
-        }),
-      );
-      server.close(4409, "busy");
-      return new Response(null, { status: 101, webSocket: client });
+    // Is a viewer already here (besides the one we just accepted)? Distinguish a live
+    // controller from a dead ghost. A reconnecting viewer whose old socket half-open
+    // dropped takes over its OWN ghost (the code is a per-session secret); a genuinely
+    // second viewer (incumbent still pinging) is refused as busy, preserving the
+    // single-controller guarantee.
+    const incumbents = this.ctx.getWebSockets("viewer").filter((v) => v !== server);
+    if (incumbents.length > 0) {
+      const now = Date.now();
+      let incumbentLive = false;
+      for (const v of incumbents) {
+        let last: number | undefined;
+        try {
+          last = (v.deserializeAttachment() as { lastPing?: number } | null)?.lastPing;
+        } catch {
+          /* no attachment */
+        }
+        if (last === undefined || now - last <= SILENCE_MS) incumbentLive = true;
+      }
+      if (incumbentLive) {
+        server.send(
+          JSON.stringify({
+            type: "error",
+            code: "busy",
+            message: "Someone else is already controlling this computer.",
+          }),
+        );
+        server.close(4409, "busy");
+        return new Response(null, { status: 101, webSocket: client });
+      }
+      // All incumbents are silent ghosts (half-open dropped): replace them. Their
+      // webSocketClose skips the peer-left (another viewer is now live).
+      for (const v of incumbents) {
+        try {
+          v.close(4000, "replaced by reconnect");
+        } catch {
+          /* ignore */
+        }
+      }
     }
+    // A fresh or replacement viewer: clear any pending "viewer interrupted" advisory.
+    await this.ctx.storage.delete("viewerWarned");
+    this.viewerSilentSince = undefined;
 
     server.send(JSON.stringify({ type: "connected" }));
+    // Always a PLAIN viewer-joined — never resumed. This viewer arrived on a NEW socket
+    // (a first connect or a reconnect/takeover of a ghost), and anyone holding the code
+    // could be on the other end, so it must re-earn consent. Only the agent's OWN
+    // reconnect re-serves a still-held viewer silently (resumed), because the server
+    // kept that exact socket — see the agent branch above.
     for (const agent of this.ctx.getWebSockets("agent")) {
       try {
         agent.send(JSON.stringify({ type: "viewer-joined" }));
@@ -169,30 +249,105 @@ export class SessionDO extends DurableObject {
       } catch {
         /* ignore */
       }
-      // Liveness tracking: stamp this socket's last ping, then check whether the OTHER
-      // role's socket(s) have gone silent (a half-open drop the runtime hasn't reaped —
-      // the client can't tell us it's gone because its link is dead). Closing a silent
-      // socket makes its webSocketClose notify the surviving side (the viewer gets
-      // agent-interrupted + grace; the agent gets peer-left so it stops "controlling").
+      // Liveness tracking. Stamp this socket's last ping, then judge the peer — but
+      // handle the two directions asymmetrically (see SILENCE_MS).
       const pingRole = this.ctx.getTags(ws)[0];
+      const now = Date.now();
+      // Was THIS socket itself silent until just now? Then it just woke from its own
+      // suspension (device sleep, tab freeze) and must not judge the peer this round:
+      // the peer may simply not have had a chance to re-ping yet (a shared suspension
+      // would otherwise have the first waker kill the still-recovering other side).
+      let prevOwn: number | undefined;
       try {
-        ws.serializeAttachment({ lastPing: Date.now() });
+        prevOwn = (ws.deserializeAttachment() as { lastPing?: number } | null)?.lastPing;
+      } catch {
+        /* no attachment yet */
+      }
+      try {
+        ws.serializeAttachment({ lastPing: now });
       } catch {
         /* ignore */
       }
-      const now = Date.now();
-      const others = this.ctx.getWebSockets(pingRole === "agent" ? "viewer" : "agent");
-      for (const other of others) {
+      if (prevOwn !== undefined && now - prevOwn > SILENCE_MS) return;
+
+      if (pingRole === "viewer") {
+        // The viewer is checking the AGENT. The agent is the native app and pings
+        // reliably, so a silent agent is a genuine half-open drop (no close reached
+        // us): close it so webSocketClose warns the viewer (agent-interrupted + grace).
+        for (const agent of this.ctx.getWebSockets("agent")) {
+          let last: number | undefined;
+          try {
+            last = (agent.deserializeAttachment() as { lastPing?: number } | null)?.lastPing;
+          } catch {
+            /* ignore */
+          }
+          if (last !== undefined && now - last > SILENCE_MS) {
+            try {
+              agent.close(4001, "peer silent");
+            } catch {
+              /* ignore */
+            }
+          }
+        }
+        return;
+      }
+
+      // The agent is checking the VIEWER. A browser viewer's timers legitimately
+      // freeze for seconds-to-minutes with the socket still open, so a silent viewer
+      // is NOT proof it's gone and we must NOT close its socket (that would force a
+      // needless reconnect + fresh consent for a viewer that would have resumed on
+      // its own socket). Instead ADVISE the agent so it can warn its user, leaving
+      // the stream and consent intact. If the viewer pings again we clear the warning;
+      // a genuine departure still arrives as a webSocketClose (-> peer-left), and a
+      // truly-dead viewer's reconnect is taken over by replace.
+      const viewers = this.ctx.getWebSockets("viewer");
+      let anyLive = false;
+      const silent: WebSocket[] = [];
+      for (const v of viewers) {
         let last: number | undefined;
         try {
-          const att = other.deserializeAttachment() as { lastPing?: number } | null;
-          last = att?.lastPing;
+          last = (v.deserializeAttachment() as { lastPing?: number } | null)?.lastPing;
         } catch {
-          /* no attachment yet */
+          /* ignore */
         }
-        if (last !== undefined && now - last > SILENCE_MS) {
+        if (last !== undefined && now - last > SILENCE_MS) silent.push(v);
+        else anyLive = true;
+      }
+      // viewerWarned lives in storage (not an in-memory field) so a DO eviction /
+      // redeploy mid-interruption doesn't lose it and strand the agent on "interrupted"
+      // with no matching "restored". The give-up clock may stay in memory — losing it
+      // only restarts the (long) backstop, which is harmless.
+      const warned = (await this.ctx.storage.get<boolean>("viewerWarned")) === true;
+      if (silent.length > 0 && !anyLive) {
+        // The viewer's link is quiet. Advise the agent once (keep the socket — a frozen
+        // tab resumes on it), and remember when the silence began.
+        if (this.viewerSilentSince === undefined) this.viewerSilentSince = now;
+        if (!warned) {
+          await this.ctx.storage.put("viewerWarned", true);
           try {
-            other.close(4001, "peer silent");
+            ws.send(JSON.stringify({ type: "viewer-interrupted" }));
+          } catch {
+            /* ignore */
+          }
+        }
+        // Backstop: continuously silent far beyond any benign freeze → give up and
+        // close the ghost; its webSocketClose then reports a clean peer-left.
+        if (now - this.viewerSilentSince > VIEWER_GIVEUP_MS) {
+          this.viewerSilentSince = undefined;
+          for (const v of silent) {
+            try {
+              v.close(4001, "peer gone");
+            } catch {
+              /* ignore */
+            }
+          }
+        }
+      } else if (anyLive) {
+        this.viewerSilentSince = undefined;
+        if (warned) {
+          await this.ctx.storage.delete("viewerWarned");
+          try {
+            ws.send(JSON.stringify({ type: "viewer-restored" }));
           } catch {
             /* ignore */
           }
@@ -235,22 +390,33 @@ export class SessionDO extends DurableObject {
         await this.ctx.storage.setAlarm(Date.now() + AGENT_GRACE_MS);
       }
     } else {
-      const agents = this.ctx.getWebSockets("agent");
-      if (agents.length > 0) {
-        // A viewer left while the agent is connected: tell it so it stops capturing
-        // and waits again.
-        for (const agent of agents) {
-          try {
-            agent.send(JSON.stringify({ type: "peer-left", who: "viewer" }));
-          } catch {
-            /* ignore */
-          }
-        }
+      // The viewer set is changing — drop any pending "viewer interrupted" advisory.
+      await this.ctx.storage.delete("viewerWarned");
+      this.viewerSilentSince = undefined;
+      // If another viewer socket is already live, this close is a stale ghost being
+      // replaced by a reconnect (see the fetch viewer path) — the new socket is
+      // already serving, so don't tell the agent the viewer left.
+      const liveViewers = this.ctx.getWebSockets("viewer").filter((s) => s !== ws);
+      if (liveViewers.length > 0) {
+        /* replaced ghost: no notification */
       } else {
-        // The viewer left while the agent itself is mid-grace (dropped, reconnecting).
-        // No agent socket to notify now, so remember it: when the agent reconnects it
-        // is told the viewer is gone, so it won't restore a stale "controlling" state.
-        await this.ctx.storage.put("viewerLeftInGrace", true);
+        const agents = this.ctx.getWebSockets("agent");
+        if (agents.length > 0) {
+          // A viewer left while the agent is connected: tell it so it stops capturing
+          // and waits again.
+          for (const agent of agents) {
+            try {
+              agent.send(JSON.stringify({ type: "peer-left", who: "viewer" }));
+            } catch {
+              /* ignore */
+            }
+          }
+        } else {
+          // The viewer left while the agent itself is mid-grace (dropped, reconnecting).
+          // No agent socket to notify now, so remember it: when the agent reconnects it
+          // is told the viewer is gone, so it won't restore a stale "controlling" state.
+          await this.ctx.storage.put("viewerLeftInGrace", true);
+        }
       }
     }
     try {
