@@ -56,6 +56,12 @@ except ImportError as exc:  # pragma: no cover - dependency guard
 # Set to the deployed Worker URL. Override with --server or $AUDIOBUS_SERVER.
 DEFAULT_SERVER = "https://audiobus-remote.soft-daf.workers.dev"
 
+# Shown in place of the real session code while the agent has no link to the server
+# (e.g. internet lost) and no active session: it makes clear the code is not usable
+# right now. The real code is restored once the link comes back. Deliberately not a
+# valid code (session codes never contain "-").
+CODE_PLACEHOLDER = "-" * 10
+
 # A plain product User-Agent. The default "Python-urllib/..." UA is blocked by
 # Cloudflare's bot filtering, so we must send our own on every request.
 USER_AGENT = "AudiobusRemoteAgent/0.1"
@@ -670,8 +676,11 @@ class NetClient:
                 None, lambda: request_session(http_base, self.ssl_ctx)
             )
         except Exception as e:
+            # Capture the message NOW: `e` is cleared when this except block exits, so a
+            # lambda that referenced it would raise NameError when the GUI thread runs it.
+            detail = str(e)
             self.app.post(
-                lambda: self.app.on_fatal(tr("agent.error.unreachable") + "\n" + str(e))
+                lambda: self.app.on_fatal(tr("agent.error.unreachable") + "\n" + detail)
             )
             return
         self.code = code
@@ -691,6 +700,7 @@ class NetClient:
         notified = False          # on_link_interrupted was posted for this interruption
         gave_up = False           # reconnect deadline elapsed without recovery
         while not self.stop_event.is_set():
+            code_expired = False   # this attempt hit a 404 (our reservation is gone)
             try:
                 async with websockets.connect(
                     ws_url,
@@ -737,8 +747,16 @@ class NetClient:
                         except Exception:
                             pass
                     await self._stop_stream()
-            except Exception:
-                pass  # connect failed / dropped; handled as an interruption below
+            except Exception as e:
+                # A 404 means the server IS reachable but our reservation is gone (a long
+                # worker outage let it expire): note it so we re-reserve a fresh code
+                # below. Anything else is a transient drop / unreachable server, handled
+                # as an interruption (keep retrying the same code). The status lives at
+                # e.response.status_code (websockets >= 14) or e.status_code (older).
+                status = getattr(getattr(e, "response", None), "status_code", None)
+                if status is None:
+                    status = getattr(e, "status_code", None)
+                code_expired = status == 404
             if self.stop_event.is_set():
                 break
             if first:
@@ -746,6 +764,26 @@ class NetClient:
                 # behavior — report the server is unreachable and give up.
                 self.app.post(lambda: self.app.on_fatal(tr("agent.error.unreachable")))
                 return
+            if code_expired and not self.app._connected:
+                # Idle and our code expired (very long outage): request a fresh code and
+                # carry on with it, rather than retrying a dead code forever. (A short
+                # outage keeps the SAME code — the server holds the reservation.)
+                try:
+                    new_code = await self.loop.run_in_executor(
+                        None, lambda: request_session(http_base, self.ssl_ctx)
+                    )
+                except Exception:
+                    new_code = None
+                if new_code:
+                    self.code = new_code
+                    ws_url = f"{ws_base}/ws/agent?code={new_code}"
+                    ws_ssl = self.ssl_ctx if ws_url.startswith("wss://") else None
+                    interrupted_since = None
+                    notified = False
+                    self.app.post(lambda c=new_code: self.app.on_code(c, http_base))
+                    self.app.post(self.app.on_reconnected)
+                    continue
+                # Still unreachable: fall through and keep retrying.
             now = time.monotonic()
             if interrupted_since is None:
                 # Interruption just began. Surface the warning RIGHT NOW (the Tk side
@@ -763,8 +801,11 @@ class NetClient:
                 self.app.post(self.app._close_approval_dialog)
                 self.app.post(self.app.on_link_interrupted)
                 continue
-            if now - interrupted_since > HB_MAX_RECONNECT_SECS:
-                # The server's grace has surely elapsed; stop trying.
+            if now - interrupted_since > HB_MAX_RECONNECT_SECS and self.app._connected:
+                # An ACTIVE session couldn't be restored before the server's grace
+                # elapsed: give up (the viewer is gone). When IDLE we keep retrying the
+                # SAME code instead — so a longer internet outage shows the offline
+                # placeholder and restores the same code once the worker is reachable.
                 gave_up = True
                 break
             # Already warned on the first drop; just wait a short, stop-interruptible
@@ -1951,6 +1992,15 @@ class App:
         """Our established link to the server dropped. The net thread is already
         reconnecting; show the Wait/Cut warning only if we're still down after a
         short grace, so a quick reconnect stays invisible."""
+        if not self._connected:
+            # No active session to preserve — the worker link just went quiet (e.g. the
+            # internet dropped). There is nothing to "keep waiting" for, so DON'T show
+            # the Wait/Cut dialog. Instead show a placeholder code (this computer isn't
+            # reachable, so its code can't be used) + a quiet reconnecting status. The
+            # real code is restored on reconnect (on_reconnected).
+            self.code_panel.set_text(CODE_PLACEHOLDER)
+            self.set_status(tr("agent.status.offline"), WARN)
+            return
         self.set_status(tr("ui.interrupt.status"), BAD)
         if self._interrupt_dialog is not None or self._interrupt_grace is not None:
             return  # dialog already showing or already scheduled
@@ -2035,6 +2085,10 @@ class App:
         self._connected = False
         self._fade_banner(False)
         self._fade_stop(False)
+        # Restore the real code if a worker-link loss had replaced it with the
+        # offline placeholder.
+        if self._code:
+            self.code_panel.set_text(self._code)
         self.set_status(tr("agent.status.waiting"), WARN)
 
     def on_link_failed(self):
@@ -2048,7 +2102,7 @@ class App:
 
     def copy_code(self):
         code = self.code_panel.get_text()
-        if code and "·" not in code:
+        if code and "·" not in code and "-" not in code:
             self.root.clipboard_clear()
             self.root.clipboard_append(code)
             self.copy_btn.set_text(tr("agent.btn.copied"))
