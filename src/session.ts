@@ -397,14 +397,22 @@ export class SessionDO extends DurableObject {
         // The agent's link dropped. Hold the session for a grace window so the agent
         // can reconnect with the same code; tell viewers so they can warn + wait. If
         // the agent never returns, alarm() tears the session down at the deadline.
-        for (const viewer of this.ctx.getWebSockets("viewer")) {
+        const heldViewers = this.ctx.getWebSockets("viewer");
+        for (const viewer of heldViewers) {
           try {
             viewer.send(JSON.stringify({ type: "agent-interrupted" }));
           } catch {
             /* ignore */
           }
         }
-        await this.ctx.storage.setAlarm(Date.now() + AGENT_GRACE_MS);
+        // Hold the reservation so the agent can reconnect with the SAME code after a
+        // transient worker-link loss. With a viewer held, bound the hold to the short
+        // AGENT_GRACE (the viewer can't wait forever). Idle (no viewer) — e.g. the
+        // agent's internet dropped before anyone connected — keep the reservation for
+        // the full idle TTL so its code survives a longer outage.
+        await this.ctx.storage.setAlarm(
+          Date.now() + (heldViewers.length > 0 ? AGENT_GRACE_MS : SESSION_TTL_MS),
+        );
       }
     } else {
       // The viewer set is changing — drop any pending "viewer interrupted" advisory.
@@ -450,16 +458,20 @@ export class SessionDO extends DurableObject {
       // webSocketClose) — another agent socket is already live and serving.
       const liveAgents = this.ctx.getWebSockets("agent").filter((s) => s !== ws);
       if (liveAgents.length > 0) return;
-      // Same as a close: hold the session for the grace window and let viewers warn
-      // rather than ending immediately.
-      for (const viewer of this.ctx.getWebSockets("viewer")) {
+      // Same as a close: hold the session so the agent can reconnect with the same
+      // code, and let any viewer warn rather than ending immediately. Idle (no viewer)
+      // holds for the full idle TTL so the code survives a longer outage.
+      const heldViewers = this.ctx.getWebSockets("viewer");
+      for (const viewer of heldViewers) {
         try {
           viewer.send(JSON.stringify({ type: "agent-interrupted" }));
         } catch {
           /* ignore */
         }
       }
-      await this.ctx.storage.setAlarm(Date.now() + AGENT_GRACE_MS);
+      await this.ctx.storage.setAlarm(
+        Date.now() + (heldViewers.length > 0 ? AGENT_GRACE_MS : SESSION_TTL_MS),
+      );
     }
   }
 

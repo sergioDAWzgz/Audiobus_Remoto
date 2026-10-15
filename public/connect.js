@@ -207,9 +207,21 @@ async function onMessage(ev) {
       startSession(Array.isArray(msg.monitors) ? msg.monitors : []);
       break;
     case "agent-interrupted":
-      // The agent's own link to the server dropped; our link is fine. Warn + wait
-      // for the agent to reconnect (the DO holds the session during its grace).
+      // The agent's own link to the server dropped; our link is fine.
       agentDown = true;
+      if (!inSession) {
+        // We never got a session going — we're still waiting to be accepted and the
+        // agent already dropped. It isn't responding (it may have hung, or a previous
+        // session is stuck). There's nothing established to reconnect to, so DON'T sit
+        // on "waiting to be accepted" or pop the reconnect dialog: show a clear error
+        // and reset to the join form so the user can retry.
+        abortConnect();
+        setStatus(t("connect.status.couldNotConnect"), "bad");
+        showJoinError(t("connect.err.notResponding"));
+        break;
+      }
+      // An established session blipped: warn + wait for the agent to reconnect (the DO
+      // holds the session during its grace).
       onInterruption();
       break;
     case "agent-restored":
