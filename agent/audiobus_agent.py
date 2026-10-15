@@ -72,9 +72,9 @@ DEFAULT_SERVER = "https://audiobus-remote.soft-daf.workers.dev"
 
 # Shown in place of the real session code while the agent has no link to the server
 # (e.g. internet lost) and no active session: it makes clear the code is not usable
-# right now. The real code is restored once the link comes back. Deliberately not a
-# valid code (session codes never contain "-").
-CODE_PLACEHOLDER = "-" * 10
+# right now. The real code is restored once the link comes back. Uses the same dotted
+# placeholder the panel starts with before a code is assigned (never a valid code).
+CODE_PLACEHOLDER = "·" * 10
 
 # A plain product User-Agent. The default "Python-urllib/..." UA is blocked by
 # Cloudflare's bot filtering, so we must send our own on every request.
@@ -2346,10 +2346,22 @@ class App:
         )
 
     def _interrupt_cut(self):
-        # Cut: the agent can't run without the server, so close it.
+        # Cut: the owner chose to shut this session down during the interruption (the
+        # link is down, so we can't tell the viewer right now). END the session rather
+        # than quitting the agent: end_session() records it (_ended), so the moment we
+        # reconnect, the held viewer is re-served and told "session-ended" (connect page
+        # -> disconnected). The agent stays alive and keeps reconnecting; it is now idle
+        # + offline, so it shows the placeholder, and recovers to "waiting" (same code)
+        # once the worker is reachable again.
         self._interrupt_dialog = None
         self._cancel_interrupt_timers()
-        self._quit()
+        self._connected = False
+        if self.client:
+            self.client.end_session()
+        self._fade_banner(False)
+        self._fade_stop(False)
+        self.code_panel.set_text(CODE_PLACEHOLDER)
+        self.set_status(tr("agent.status.offline"), WARN)
 
     def _interrupt_wait(self):
         # Wait: keep reconnecting; re-ask after 10s if still down (on_reconnected
@@ -2420,7 +2432,7 @@ class App:
 
     def copy_code(self):
         code = self.code_panel.get_text()
-        if code and "·" not in code and "-" not in code:
+        if code and "·" not in code:
             self.root.clipboard_clear()
             self.root.clipboard_append(code)
             self.copy_btn.set_text(tr("agent.btn.copied"))
