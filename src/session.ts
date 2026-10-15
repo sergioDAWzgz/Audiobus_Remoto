@@ -366,15 +366,131 @@ export class SessionDO extends DurableObject {
       return;
     }
     const role = this.ctx.getTags(ws)[0];
-    const targets =
-      role === "agent"
-        ? this.ctx.getWebSockets("viewer")
-        : this.ctx.getWebSockets("agent");
-    for (const target of targets) {
+    if (role === "viewer") {
+      // Viewer -> agent (input events, "want", control): relay unchanged.
+      for (const agent of this.ctx.getWebSockets("agent")) {
+        try {
+          agent.send(message);
+        } catch {
+          /* peer went away mid-send */
+        }
+      }
+      return;
+    }
+
+    // role === "agent" -> viewer(s).
+    if (typeof message === "string") {
+      // `serving` is an agent->DO control assertion, never forwarded to a viewer:
+      // "I have approved the viewer whose server-side id is <vid> and am about to
+      // stream to it." It gates the binary (JPEG) relay below so in-flight frames
+      // cannot reach a viewer socket the agent has NOT (yet) approved — notably a
+      // different code-holder who just replaced a dropped viewer's ghost (the agent
+      // is still streaming for the brief window before it processes that viewer-
+      // joined and stops). We mark exactly the vid-matched viewer as "serving" (and
+      // every other viewer as not), and record that this agent speaks the protocol.
+      let parsed: { type?: string; vid?: string | null } | null = null;
       try {
-        target.send(message);
+        parsed = JSON.parse(message);
+      } catch {
+        /* not JSON control — just relay it below */
+      }
+      if (parsed && parsed.type === "serving") {
+        this.setAgentGates(ws);
+        this.markServing(parsed.vid ?? null);
+        return; // consume: the viewer never sees this internal assertion
+      }
+      // Any other agent control/meta (monitors, blockrects, denied, session-ended)
+      // carries no screen content; relay to all viewers. denied/session-ended must
+      // reach an as-yet-unapproved viewer, so agent control is never gated here.
+      for (const viewer of this.ctx.getWebSockets("viewer")) {
+        try {
+          viewer.send(message);
+        } catch {
+          /* peer went away mid-send */
+        }
+      }
+      return;
+    }
+
+    // Binary = a JPEG screen frame: the actual screen content. If the agent speaks
+    // the gating protocol, relay ONLY to viewer sockets it has asserted it is serving
+    // (serving === true). A freshly-accepted or replacement viewer socket is
+    // serving=false until the agent's next `serving` assertion names its vid, so
+    // frames in flight during a ghost takeover can't leak to the new viewer before it
+    // re-earns consent. Agents that predate the protocol never assert `serving`
+    // (gates=false): fall back to the original relay-to-all so they keep working.
+    const gates = this.agentGates(ws);
+    for (const viewer of this.ctx.getWebSockets("viewer")) {
+      if (gates && !this.viewerServing(viewer)) continue;
+      try {
+        viewer.send(message);
       } catch {
         /* peer went away mid-send */
+      }
+    }
+  }
+
+  /** Does this agent socket speak the binary-relay gating protocol (has it ever sent
+   *  a `serving` assertion)? Agents that predate it never do, and keep the legacy
+   *  relay-to-all behavior. Stored in the attachment so it survives hibernation. */
+  private agentGates(agent: WebSocket): boolean {
+    try {
+      return (
+        (agent.deserializeAttachment() as { gates?: boolean } | null)?.gates === true
+      );
+    } catch {
+      return false;
+    }
+  }
+
+  private setAgentGates(agent: WebSocket): void {
+    let att: { lastPing?: number; gates?: boolean } | null = null;
+    try {
+      att = agent.deserializeAttachment() as { lastPing?: number; gates?: boolean } | null;
+    } catch {
+      /* no attachment yet */
+    }
+    if (att?.gates === true) return; // already set
+    try {
+      agent.serializeAttachment({ ...(att || {}), gates: true });
+    } catch {
+      /* ignore */
+    }
+  }
+
+  /** Is the agent currently serving (streaming to) this viewer socket? */
+  private viewerServing(viewer: WebSocket): boolean {
+    try {
+      return (
+        (viewer.deserializeAttachment() as { serving?: boolean } | null)?.serving === true
+      );
+    } catch {
+      return false;
+    }
+  }
+
+  /** Mark the viewer socket whose server-side id matches `vid` as served (serving=true)
+   *  and every other viewer as not served. A null/unknown vid matches no socket, so a
+   *  `serving` assertion for a viewer that has since been replaced opens the gate for
+   *  nobody — frames stay suppressed to the replacement until the agent approves IT. */
+  private markServing(vid: string | null): void {
+    for (const v of this.ctx.getWebSockets("viewer")) {
+      let att: { lastPing?: number; vid?: string; serving?: boolean } | null = null;
+      try {
+        att = v.deserializeAttachment() as {
+          lastPing?: number;
+          vid?: string;
+          serving?: boolean;
+        } | null;
+      } catch {
+        /* no attachment */
+      }
+      const serve = vid !== null && att?.vid === vid;
+      if ((att?.serving === true) === serve) continue; // unchanged — skip the write
+      try {
+        v.serializeAttachment({ ...(att || {}), serving: serve });
+      } catch {
+        /* ignore */
       }
     }
   }
