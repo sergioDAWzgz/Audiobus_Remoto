@@ -942,6 +942,20 @@ class NetClient:
             return
         self._viewer_approved = True  # admitted: re-serve silently across our reconnect
         self._approved_vid = vid      # ...but only this exact viewer socket (vid)
+        # Tell the relay WHICH viewer we've approved, BEFORE any frame goes out, so it
+        # only forwards our JPEG frames to that exact viewer socket. Without this, frames
+        # already in flight when a different code-holder replaces a dropped viewer's ghost
+        # (the server hands us a plain viewer-joined, but for the brief window before we
+        # process it and stop streaming our capture loop keeps sending) would be relayed
+        # to the newcomer before it has consented. Keyed by the server's per-viewer id
+        # (vid) so a replacement carries a new vid and is never served until it, too,
+        # earns consent. Sent only when we have a vid (every current server provides one);
+        # a server that predates this gating simply ignores the message.
+        if vid is not None:
+            try:
+                await ws.send(json.dumps({"type": "serving", "vid": vid}))
+            except Exception:
+                return
         try:
             await ws.send(json.dumps({
                 "type": "monitors",
