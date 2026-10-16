@@ -82,9 +82,14 @@ USER_AGENT = "AudiobusRemoteAgent/0.1"
 
 # Connection heartbeat / reconnection tuning.
 HB_PING_SECS = 1.0          # send an app-level "ping" this often
+HB_WOBBLE_SECS = 1.5        # no "pong" for this long -> flag the link as interrupted
+#                            IMMEDIATELY (status goes yellow) from the first missed check,
+#                            before the full-drop handling; reverts if the pong resumes
 HB_INTERRUPT_SECS = 3.0     # no "pong" for this long -> the server link is interrupted
-HB_RECONNECT_SECS = 2.0     # wait between reconnect attempts (after the first, immediate one)
-HB_CONNECT_TIMEOUT_SECS = 6.0  # cap each (re)connect handshake so a half-open/unreachable
+#                            (close + reconnect, and schedule the Wait/Cut dialog)
+HB_RECONNECT_SECS = 1.0     # wait between reconnect attempts (after the first, immediate one)
+#                            -> the agent reconnects fast once the internet comes back
+HB_CONNECT_TIMEOUT_SECS = 4.0  # cap each (re)connect handshake so a half-open/unreachable
 #                                server fails fast instead of hanging ~10s per attempt
 HB_WARN_SECS = 2.0          # reconnect starts at once; show the Wait/Cut dialog this long
 #                            after the drop is detected -> ~5s total (3s detect + 2s)
@@ -995,6 +1000,7 @@ class NetClient:
         from there leaves the window stale on 'connected' for several seconds."""
         self._last_pong = time.time()
         last_tick = time.time()
+        wobbling = False  # we've flagged the link as interrupted (yellow) for this gap
         try:
             while True:
                 await asyncio.sleep(HB_PING_SECS)
@@ -1013,7 +1019,9 @@ class NetClient:
                     self._link_down = True
                     self.app.post(self.app.on_link_interrupted)
                     return
-                if time.time() - self._last_pong > HB_INTERRUPT_SECS:
+                gap = time.time() - self._last_pong
+                if gap > HB_INTERRUPT_SECS:
+                    # Confirmed drop: close + reconnect (and _run schedules the dialog).
                     self._link_down = True
                     self.app.post(self.app.on_link_interrupted)
                     try:
@@ -1021,6 +1029,17 @@ class NetClient:
                     except Exception:
                         pass
                     return
+                if gap > HB_WOBBLE_SECS:
+                    # First missed check(s): surface the interruption IMMEDIATELY (status
+                    # goes yellow) so it shows from the first failed check, well before
+                    # the Wait/Cut window. If the pong resumes we revert it below.
+                    if not wobbling:
+                        wobbling = True
+                        self.app.post(self.app.on_link_unstable)
+                elif wobbling:
+                    # The pong came back before a full drop — the link steadied; clear it.
+                    wobbling = False
+                    self.app.post(self.app.on_link_steady)
         except asyncio.CancelledError:
             pass
 
@@ -2306,6 +2325,27 @@ class App:
 
     # ---- Connection-interruption dialog (same prompt as the webapp) ----
 
+    def on_link_unstable(self):
+        """First missed heartbeat(s): the link looks interrupted. Show it IMMEDIATELY —
+        turn the green 'connected' label yellow with the interruption text (or, when idle,
+        the offline placeholder) — before the full-drop handling and the Wait/Cut window.
+        on_link_steady reverts it if the pong resumes without a full drop."""
+        if self._connected:
+            self.set_status(tr("ui.interrupt.status"), WARN)
+        else:
+            self.code_panel.set_text(CODE_PLACEHOLDER)
+            self.set_status(tr("agent.status.offline"), WARN)
+
+    def on_link_steady(self):
+        """The heartbeat recovered before a full interruption: restore the normal state
+        (the early-warning yellow was a brief wobble, not a real drop)."""
+        if self._connected:
+            self.set_status(tr("agent.status.connected"), GOOD)
+        else:
+            if self._code:
+                self.code_panel.set_text(self._code)
+            self.set_status(tr("agent.status.waiting"), WARN)
+
     def on_link_interrupted(self):
         """Our established link to the server dropped. The net thread is already
         reconnecting; show the Wait/Cut warning only if we're still down after a
@@ -2319,7 +2359,8 @@ class App:
             self.code_panel.set_text(CODE_PLACEHOLDER)
             self.set_status(tr("agent.status.offline"), WARN)
             return
-        self.set_status(tr("ui.interrupt.status"), BAD)
+        # Yellow (WARN), not red: this is a recoverable interruption, not a failure.
+        self.set_status(tr("ui.interrupt.status"), WARN)
         if self._interrupt_dialog is not None or self._interrupt_grace is not None:
             return  # dialog already showing or already scheduled
         self._interrupt_grace = self.root.after(
