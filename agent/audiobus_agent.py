@@ -670,6 +670,28 @@ async def blockrects_loop(ws, client):
         pass
 
 
+def _force_close_ice_sockets(pc):
+    """Close a peer connection's underlying UDP sockets directly, reaching into aiortc's
+    internals (best-effort). On a whole-network drop, aiortc's pc.close() can block the
+    event loop for a long time waiting on sockets that are open but unreachable; dropping
+    the sockets first makes close() return promptly so our net thread keeps detecting the
+    drop and reconnecting. Private attribute access is guarded — if aiortc changes, this
+    silently does nothing and we fall back to the bounded close()."""
+    try:
+        ice_transports = getattr(pc, "_RTCPeerConnection__iceTransports", None) or []
+        for ice in ice_transports:
+            conn = getattr(ice, "_connection", None)
+            for proto in list(getattr(conn, "_protocols", []) or []):
+                tr = getattr(proto, "transport", None) or getattr(proto, "_transport", None)
+                if tr is not None:
+                    try:
+                        tr.close()
+                    except Exception:
+                        pass
+    except Exception:
+        pass
+
+
 # --------------------------------------------------------------------------- #
 # Networking helpers
 # --------------------------------------------------------------------------- #
@@ -1323,12 +1345,21 @@ class NetClient:
                     # failing is part of that same drop — don't tear the session down as
                     # "viewer left". The reconnect flow re-serves when the link returns;
                     # a genuine viewer departure instead arrives as a relayed peer-left.
-                    # The heartbeat confirms a whole-network drop (sets _link_down at
-                    # ~HB_INTERRUPT_SECS, well before ICE reaches "failed" ~10-30s), so
-                    # that flag alone distinguishes it from a lone media failure — we do
-                    # NOT also gate on pong-staleness, which on a two-device session with
-                    # real round-trip latency would wrongly defer a genuine lone media /
-                    # viewer drop and leave the agent stuck "streaming" to a gone viewer.
+                    if self._link_down:
+                        return
+                    # Media failed but the control link isn't CONFIRMED down yet. On a
+                    # whole-network drop (the shared computer loses internet) ICE can reach
+                    # "failed" within a second or two — ahead of the heartbeat's ~3s
+                    # confirmation. Tearing down here would close the pc, drop _connected,
+                    # and report "viewer left" for what is really our own interruption.
+                    # So wait briefly: if the heartbeat flags the control link down, defer
+                    # and let the reconnect flow drive the warn + re-serve. Only a lasting
+                    # media failure with a still-healthy control link is a real "viewer
+                    # gone" (also normally signalled faster by a relayed peer-left).
+                    for _ in range(int(HB_INTERRUPT_SECS / 0.25) + 2):
+                        await asyncio.sleep(0.25)
+                        if self._link_down or not self.streaming or self.pc is not pc:
+                            return
                     if self._link_down:
                         return
                     # The media path died on its own; fall back to waiting for a viewer.
@@ -1435,15 +1466,23 @@ class NetClient:
         if self.pc:
             pc = self.pc
             self.pc = None
+            # Drop the peer connection's UDP sockets BEFORE closing it. On a whole-network
+            # drop (the shared computer loses internet) aiortc's pc.close() blocks for a
+            # long time waiting on sockets that are open but unreachable — which freezes
+            # this net thread's event loop, so the heartbeat never detects the drop (no
+            # warning) and the reconnect never runs. Closing the sockets first makes
+            # close() return promptly; wait_for bounds it as a backstop either way.
+            _force_close_ice_sockets(pc)
             try:
-                await pc.close()
+                await asyncio.wait_for(pc.close(), timeout=HB_INTERRUPT_SECS)
             except Exception:
                 pass
         if self.capture:
             cap = self.capture
             self.capture = None
             try:
-                await self.loop.run_in_executor(None, cap.stop)
+                await asyncio.wait_for(
+                    self.loop.run_in_executor(None, cap.stop), timeout=HB_INTERRUPT_SECS)
             except Exception:
                 pass
 
@@ -2634,7 +2673,33 @@ class App:
     def run(self):
         self.client = NetClient(self, self.args)
         self.client.start()
+        self._wd_tick = time.time()
+        self._wd_grace_until = 0.0
+        self.root.after(1000, self._link_watchdog)
         self.root.mainloop()
+
+    def _link_watchdog(self):
+        """Backup drop-detector on the GUI thread. The net thread normally detects a
+        dropped link within ~HB_INTERRUPT_SECS, but a hung WebRTC teardown could stall
+        its event loop so the warning never appears and it can't reconnect. This GUI
+        thread stays responsive, so here we watch the same pong clock independently: if
+        the link looks dropped (stale pong) during an active session and the net thread
+        hasn't flagged it, surface the interruption and mark the link down so its
+        teardown/reconnect treats it as a drop and recovers once its loop frees up."""
+        now = time.time()
+        # If we were ourselves frozen (device sleep), don't judge for a moment: the pong
+        # is stale only because nothing was running, and the net thread needs a round-trip
+        # to refresh it.
+        if now - self._wd_tick > HB_INTERRUPT_SECS:
+            self._wd_grace_until = now + HB_INTERRUPT_SECS
+        self._wd_tick = now
+        c = getattr(self, "client", None)
+        if (c is not None and self._connected and now >= self._wd_grace_until
+                and not getattr(c, "_link_down", False)
+                and (now - getattr(c, "_last_pong", now)) > HB_INTERRUPT_SECS):
+            c._link_down = True
+            self.on_link_interrupted()
+        self._wd_after = self.root.after(1000, self._link_watchdog)
 
 
 def parse_args(argv):
