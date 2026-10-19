@@ -708,12 +708,15 @@ class NetClient:
 
         # Reconnect loop: once the first connection is ESTABLISHED, an unexpected
         # drop no longer kills the agent — we reconnect IMMEDIATELY with the SAME code
-        # (the server holds the session briefly), warn with the Wait/Cut dialog only
-        # if we're still down after a grace, and give up after the grace window.
+        # (the server holds the session briefly) and warn with the Wait/Cut dialog only
+        # if we're still down after a grace. If an ACTIVE session can't be restored
+        # before the viewer's grace elapses, that viewer is gone, but we KEEP
+        # reconnecting (now as idle) so the agent recovers and is ready for a new viewer
+        # whenever the link returns — it never gives up while the program is running.
         first = True
         interrupted_since = None  # monotonic time the current interruption began
         notified = False          # on_link_interrupted was posted for this interruption
-        gave_up = False           # reconnect deadline elapsed without recovery
+        session_lost = False      # active-session grace elapsed; dropped to idle, still retrying
         while not self.stop_event.is_set():
             code_expired = False   # this attempt hit a 404 (our reservation is gone)
             try:
@@ -746,6 +749,7 @@ class NetClient:
                         self.app.post(self.app.on_reconnected)
                     interrupted_since = None
                     notified = False
+                    session_lost = False
                     recv = asyncio.create_task(self._recv_loop(ws))
                     hb = asyncio.create_task(self._heartbeat(ws))
                     stop = asyncio.create_task(self.stop_event.wait())
@@ -828,25 +832,24 @@ class NetClient:
                 self.app.post(self.app._close_approval_dialog)
                 self.app.post(self.app.on_link_interrupted)
                 continue
-            if now - interrupted_since > HB_MAX_RECONNECT_SECS and self.app._connected:
-                # An ACTIVE session couldn't be restored before the server's grace
-                # elapsed: give up (the viewer is gone). When IDLE we keep retrying the
-                # SAME code instead — so a longer internet outage shows the offline
-                # placeholder and restores the same code once the worker is reachable.
-                gave_up = True
-                break
+            if (not session_lost and self.app._connected
+                    and now - interrupted_since > HB_MAX_RECONNECT_SECS):
+                # An ACTIVE session couldn't be restored before the viewer's grace
+                # elapsed: that viewer is gone (the server has released it). But DON'T
+                # give up — drop to idle and keep reconnecting with the SAME code, so a
+                # longer internet outage shows the offline placeholder and the agent comes
+                # back online (ready for a new viewer, which can resume via its token) as
+                # soon as the worker is reachable again, instead of dying on "lost".
+                session_lost = True
+                self.app.post(self.app.on_session_lost)
             # Already warned on the first drop; just wait a short, stop-interruptible
             # delay before the next reconnect attempt.
             try:
                 await asyncio.wait_for(self.stop_event.wait(), timeout=HB_RECONNECT_SECS)
             except asyncio.TimeoutError:
                 pass
-        # Loop ended: either a deliberate stop (dismiss any dialog) or we gave up
-        # reconnecting (report the lost connection).
-        if gave_up:
-            self.app.post(self.app.on_link_failed)
-        else:
-            self.app.post(self.app.on_link_dismiss)
+        # Loop ended (only a deliberate stop reaches here now): dismiss any dialog.
+        self.app.post(self.app.on_link_dismiss)
 
     async def _heartbeat(self, ws):
         """Ping the server over the WS and watch for the echoed pong. If none comes
@@ -869,14 +872,13 @@ class NetClient:
                 if now - last_tick > HB_INTERRUPT_SECS:
                     self._last_pong = now
                 last_tick = now
-                try:
-                    await ws.send("ping")
-                except Exception:
-                    # The send itself failed: the socket is dead. Warn now rather than
-                    # leaving the window stale while the teardown runs.
-                    self._link_down = True
-                    self.app.post(self.app.on_link_interrupted)
-                    return
+                # Check the pong gap BEFORE sending. On a real half-open drop (Wi-Fi off,
+                # cable pulled; no FIN/RST until the link returns) the ws.send() below can
+                # wedge indefinitely on TCP/TLS write backpressure once the write buffer
+                # fills, so a gap check placed only AFTER the send would never run and the
+                # interruption would surface only when the socket finally broke on
+                # recovery (minutes late). Checking first makes detection independent of
+                # the send draining.
                 gap = time.time() - self._last_pong
                 if gap > HB_INTERRUPT_SECS:
                     # Confirmed drop: close + reconnect (and _run schedules the dialog).
@@ -898,6 +900,25 @@ class NetClient:
                     # The pong came back before a full drop — the link steadied; clear it.
                     wobbling = False
                     self.app.post(self.app.on_link_steady)
+                # Send the heartbeat ping, but never block on it forever: on a half-open
+                # link the write wedges on backpressure, which is itself a confirmed
+                # interruption (and the gap check above has already run for this tick).
+                try:
+                    await asyncio.wait_for(ws.send("ping"), timeout=HB_INTERRUPT_SECS)
+                except asyncio.TimeoutError:
+                    self._link_down = True
+                    self.app.post(self.app.on_link_interrupted)
+                    try:
+                        await ws.close()
+                    except Exception:
+                        pass
+                    return
+                except Exception:
+                    # The send itself failed: the socket is dead. Warn now rather than
+                    # leaving the window stale while the teardown runs.
+                    self._link_down = True
+                    self.app.post(self.app.on_link_interrupted)
+                    return
         except asyncio.CancelledError:
             pass
 
@@ -2209,6 +2230,20 @@ class App:
         self._fade_banner(False)
         self._fade_stop(False)
         self.set_status(tr("ui.interrupt.failed"), BAD)
+
+    def on_session_lost(self):
+        """The viewer's reconnection grace elapsed during a long outage — that viewer is
+        gone — but the outage itself may still recover. Unlike on_link_failed this is NOT
+        terminal: the net thread keeps reconnecting (now as idle), so we drop the
+        'controlling' UI and the Wait/Cut dialog and show the offline placeholder +
+        'reconnecting' status. When the link returns the real code is restored
+        (on_reconnected) and the agent is ready for a new viewer to join and resume."""
+        self.on_link_dismiss()
+        self._connected = False
+        self._fade_banner(False)
+        self._fade_stop(False)
+        self.code_panel.set_text(CODE_PLACEHOLDER)
+        self.set_status(tr("agent.status.offline"), WARN)
 
     def copy_code(self):
         code = self.code_panel.get_text()
