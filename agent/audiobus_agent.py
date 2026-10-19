@@ -2324,7 +2324,33 @@ class App:
     def run(self):
         self.client = NetClient(self, self.args)
         self.client.start()
+        self._wd_tick = time.time()
+        self._wd_grace_until = 0.0
+        self.root.after(1000, self._link_watchdog)
         self.root.mainloop()
+
+    def _link_watchdog(self):
+        """Backup drop-detector on the GUI thread. The net thread normally detects a
+        dropped link within ~HB_INTERRUPT_SECS, but a hung WebRTC teardown could stall
+        its event loop so the warning never appears and it can't reconnect. This GUI
+        thread stays responsive, so here we watch the same pong clock independently: if
+        the link looks dropped (stale pong) during an active session and the net thread
+        hasn't flagged it, surface the interruption and mark the link down so its
+        teardown/reconnect treats it as a drop and recovers once its loop frees up."""
+        now = time.time()
+        # If we were ourselves frozen (device sleep), don't judge for a moment: the pong
+        # is stale only because nothing was running, and the net thread needs a round-trip
+        # to refresh it.
+        if now - self._wd_tick > HB_INTERRUPT_SECS:
+            self._wd_grace_until = now + HB_INTERRUPT_SECS
+        self._wd_tick = now
+        c = getattr(self, "client", None)
+        if (c is not None and self._connected and now >= self._wd_grace_until
+                and not getattr(c, "_link_down", False)
+                and (now - getattr(c, "_last_pong", now)) > HB_INTERRUPT_SECS):
+            c._link_down = True
+            self.on_link_interrupted()
+        self._wd_after = self.root.after(1000, self._link_watchdog)
 
 
 def parse_args(argv):
