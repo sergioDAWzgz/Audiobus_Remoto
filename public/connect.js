@@ -74,6 +74,20 @@ let mediaDown = false; // the WebRTC media path has failed (agent likely dropped
 let reconnecting = false; // actively trying to reopen our WS
 let reconnectTimer = null;
 let intentionalClose = false; // we closed the WS on purpose (reconnect / endSession)
+// This browser's stable RESUME TOKEN for the current session. Minted fresh for each
+// user-initiated join and reused on every reconnect of that session (its own-link drop
+// or a dual-drop), so the agent recognises us as the SAME approved viewer and resumes
+// WITHOUT a new consent prompt. A fresh join (or another browser) mints a different,
+// unguessable token, so a different person who has the code still has to be approved.
+let vtok = null;
+function newVtok() {
+  try {
+    if (crypto && crypto.randomUUID) return crypto.randomUUID();
+  } catch {
+    /* fall through */
+  }
+  return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+}
 
 function setStatus(text, kind) {
   statusEl.textContent = text;
@@ -155,6 +169,10 @@ function connect(code) {
   mediaDown = false;
   videoEverPlayed = false;
   currentCode = code;
+  // A user-initiated join is a NEW session relationship: mint a fresh resume token. The
+  // reconnect path reuses it (via openWs) so a dropped session resumes without a new
+  // prompt, but a brand-new join re-earns consent.
+  vtok = newVtok();
   live = true;
   setStatus(t("connect.status.connecting"));
   openWs(code);
@@ -165,7 +183,10 @@ function connect(code) {
 function openWs(code) {
   const proto = location.protocol === "https:" ? "wss" : "ws";
   intentionalClose = false;
-  ws = new WebSocket(`${proto}://${location.host}/ws/viewer?code=${code}`);
+  // Carry our resume token so the agent can recognise a reconnect as the same approved
+  // viewer. It is reused across reconnects of this session (minted in connect()).
+  const q = vtok ? `&vtok=${encodeURIComponent(vtok)}` : "";
+  ws = new WebSocket(`${proto}://${location.host}/ws/viewer?code=${code}${q}`);
   ws.onopen = () => {
     lastPong = performance.now();
     if (!interruptionActive) {

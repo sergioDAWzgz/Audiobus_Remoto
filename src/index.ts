@@ -126,8 +126,16 @@ export default {
         return new Response("Invalid session code.", { status: 400 });
       }
       const role = path === "/ws/agent" ? "agent" : "viewer";
+      // Forward the viewer's stable resume token (vtok) to the DO so it can tell the
+      // agent whether a (re)connecting viewer is the same approved browser resuming — it
+      // is minted and held client-side and is opaque to us. Agents don't send one.
+      const vtok = url.searchParams.get("vtok");
+      const doUrl =
+        role === "viewer" && vtok
+          ? `https://session/connect?role=${role}&vtok=${encodeURIComponent(vtok)}`
+          : `https://session/connect?role=${role}`;
       const stub = env.SESSIONS.getByName(code);
-      const doReq = new Request(`https://session/connect?role=${role}`, request);
+      const doReq = new Request(doUrl, request);
       return stub.fetch(doReq);
     }
 

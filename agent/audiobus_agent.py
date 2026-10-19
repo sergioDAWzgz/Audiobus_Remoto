@@ -743,6 +743,16 @@ class NetClient:
         #                             approved; a resumed re-serve is auto-admitted only
         #                             if its vid matches, so a different code-holder who
         #                             took over the slot can't inherit the approval
+        self._approved_vtok = None  # the VIEWER's own stable resume token (minted by the
+        #                             viewer's browser, carried in every (re)connect). The
+        #                             vid identifies a socket and changes when the viewer
+        #                             reconnects; the vtok identifies the approved viewer
+        #                             ACROSS reconnects, so the same approved browser can
+        #                             resume a dropped session WITHOUT re-prompting, while a
+        #                             different code-holder (a different, unguessable vtok)
+        #                             still earns consent. Kept across a transient peer-left
+        #                             (the drop may be recovering); cleared on an explicit
+        #                             local end so a later join re-consents.
         self._ended = False         # owner ended the session locally; a held viewer the
         #                             server re-serves on reconnect must be dismissed,
         #                             not resumed (survives a dead-socket send failure)
@@ -903,11 +913,23 @@ class NetClient:
                     recv = asyncio.create_task(self._recv_loop(ws))
                     hb = asyncio.create_task(self._heartbeat(ws))
                     stop = asyncio.create_task(self.stop_event.wait())
-                    _, pending = await asyncio.wait(
+                    done, pending = await asyncio.wait(
                         {recv, hb, stop}, return_when=asyncio.FIRST_COMPLETED
                     )
                     for task in pending:
                         task.cancel()
+                    # Retrieve the result/exception of EVERY task (the one that finished
+                    # first and the cancelled ones). On a real half-open drop _recv_loop
+                    # raises ConnectionClosedError as the socket breaks; if we never
+                    # retrieve it, asyncio logs "Task exception was never retrieved" with a
+                    # scary traceback. The drop itself is already handled (the heartbeat
+                    # posts on_link_interrupted and the reconnect loop runs), so here we
+                    # only drain these tasks to keep teardown clean and quiet.
+                    for task in (*done, *pending):
+                        try:
+                            await task
+                        except (asyncio.CancelledError, Exception):
+                            pass
                     if self.stop_event.is_set():
                         # Deliberate quit (window close / Cut): tell a connected viewer
                         # so it ends promptly instead of waiting out the server's grace.
@@ -1082,7 +1104,9 @@ class NetClient:
                 await self._add_remote_candidate(msg.get("candidate"))
             elif mtype == "viewer-joined":
                 asyncio.create_task(
-                    self._on_viewer(ws, bool(msg.get("resumed")), msg.get("vid"))
+                    self._on_viewer(
+                        ws, bool(msg.get("resumed")), msg.get("vid"), msg.get("vtok")
+                    )
                 )
             elif mtype == "peer-left" and msg.get("who") == "viewer":
                 await self._stop_stream()
@@ -1119,6 +1143,7 @@ class NetClient:
             return
         ws = self.ws
         self._viewer_approved = False  # session ended; a new viewer must consent
+        self._approved_vtok = None     # ...including the same browser (terminal end)
         await self._stop_stream()
         if ws:
             try:
@@ -1127,7 +1152,7 @@ class NetClient:
                 pass
         self._report_peer_left(False)
 
-    async def _on_viewer(self, ws, resumed=False, vid=None):
+    async def _on_viewer(self, ws, resumed=False, vid=None, vtok=None):
         # Serialize viewer admission. Each viewer-joined spawns its own task; without a
         # lock two could interleave their teardown + re-serve and corrupt pc/capture/
         # streaming (and, with auto-accept, start a stream the other then tears down).
@@ -1139,9 +1164,9 @@ class NetClient:
         async with self._viewer_lock:
             if gen != self._viewer_gen:
                 return
-            await self._serve_viewer(ws, resumed, vid)
+            await self._serve_viewer(ws, resumed, vid, vtok)
 
-    async def _serve_viewer(self, ws, resumed=False, vid=None):
+    async def _serve_viewer(self, ws, resumed=False, vid=None, vtok=None):
         if self.streaming:
             # A viewer-joined arrived while we're still streaming to the previous socket.
             # The server only sends one for a genuine new / replacement / held re-serve
@@ -1153,19 +1178,40 @@ class NetClient:
             # dropped) is re-prompted, so a different person who has the code cannot
             # silently inherit the previous viewer's approval.
             await self._stop_stream()
-        # The owner ended this session locally while we were disconnected. A held viewer
-        # the server re-serves on our reconnect must be dismissed (told to close), not
-        # re-admitted — otherwise the explicit Stop is silently reversed (and, under
-        # auto-accept, screen sharing would resume with no consent).
-        if resumed and self._ended:
+        # Is this the SAME approved viewer coming back? Two independent, consent-safe
+        # signals say yes:
+        #   - resumed + matching vid: the server re-served a still-LIVE held viewer (same
+        #     socket) after OUR OWN reconnect — the vid is the exact socket we approved.
+        #   - matching vtok: the viewer's own stable resume token (unguessable, held only
+        #     by the approved browser) matches the one we approved — so even a viewer that
+        #     reconnected on a brand-new socket (its own link dropped, or a full dual-drop)
+        #     is provably the same approved browser. A different code-holder carries a
+        #     different vtok and is NOT matched. The vtok survives a reconnect; the vid
+        #     does not, which is why vtok is what makes "resume without re-consent" work.
+        same_approved_vid = (
+            resumed and self._viewer_approved and vid is not None and vid == self._approved_vid
+        )
+        same_approved_vtok = (
+            vtok is not None and self._approved_vtok is not None and vtok == self._approved_vtok
+        )
+        is_resume = same_approved_vid or same_approved_vtok
+        # The owner ended this session locally while we were disconnected. A held/returning
+        # viewer we'd otherwise resume must be dismissed (told to close), not re-admitted —
+        # otherwise the explicit Stop is silently reversed (and, under auto-accept, screen
+        # sharing would resume with no consent). A brand-new viewer (no resume match) falls
+        # through to earn consent afresh below.
+        if is_resume and self._ended:
+            self._ended = False
+            self._viewer_approved = False
+            self._approved_vtok = None
             try:
                 await ws.send(json.dumps({"type": "session-ended"}))
             except Exception:
                 pass
             return
-        # A brand-new viewer relationship (not a re-serve of a held viewer) must earn
+        # A brand-new viewer relationship (not a resume of the approved viewer) must earn
         # consent afresh — forget any prior approval and clear a stale local-end.
-        if not resumed:
+        if not is_resume:
             self._viewer_approved = False
             self._ended = False
         # A fresh viewer: clear any leftover per-session input state.
@@ -1174,16 +1220,11 @@ class NetClient:
         self._blocked_btns.clear()
         self._pressed_btns.clear()
         self._last_blockrects = None  # force a fresh blockrects send to this viewer
-        # Auto-accept if the user set it, OR this is the SAME viewer the owner already
-        # approved being re-served after the agent's OWN reconnect. `resumed` alone is
-        # NOT proof of consent: the server holds any still-connected viewer (including
-        # one whose approval was still pending when we dropped) AND the held slot may
-        # have been taken over by a different code-holder while we were away. So require
-        # our own approved flag AND a vid that matches the exact socket we approved —
-        # a replacement viewer carries a new vid and is prompted. Everyone else prompts.
-        if self.app.auto_accept or (
-            resumed and self._viewer_approved and vid is not None and vid == self._approved_vid
-        ):
+        # Auto-accept if the user set it, OR this is the same approved viewer resuming
+        # (by vid on our own reconnect, or by vtok across the viewer's own reconnect — see
+        # above). Everyone else — a first-time viewer, or a different code-holder who took
+        # over the slot — is prompted.
+        if self.app.auto_accept or is_resume:
             allowed = True
         else:
             allowed = await self.loop.run_in_executor(None, self._ask_approval)
@@ -1204,7 +1245,9 @@ class NetClient:
                 self.app.post(self.app.on_denied)
             return
         self._viewer_approved = True  # admitted: re-serve silently across our reconnect
-        self._approved_vid = vid      # ...but only this exact viewer socket (vid)
+        self._approved_vid = vid      # ...this exact viewer socket (our own reconnect), ...
+        if vtok is not None:
+            self._approved_vtok = vtok  # ...and this viewer's stable token (its reconnect)
         # Tell the viewer the monitor list so it can build its <video> elements.
         try:
             await ws.send(json.dumps({
