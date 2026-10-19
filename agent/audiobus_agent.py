@@ -1323,18 +1323,13 @@ class NetClient:
                     # failing is part of that same drop — don't tear the session down as
                     # "viewer left". The reconnect flow re-serves when the link returns;
                     # a genuine viewer departure instead arrives as a relayed peer-left.
-                    #   - _link_down: the heartbeat already confirmed the control link is
-                    #     down (set at ~HB_INTERRUPT_SECS).
-                    #   - a stale pong (> HB_WOBBLE_SECS): the control link is ALSO going
-                    #     quiet right now — i.e. the whole network dropped, not just the
-                    #     media. On a real drop ICE reaches "failed" can RACE ahead of the
-                    #     heartbeat's confirmation, and tearing down here would close the
-                    #     pc (cutting the viewer's page) and clear _connected (so the
-                    #     interruption warning would wrongly take the idle branch). Deferring
-                    #     lets the heartbeat drive the warn + reconnect, and the media
-                    #     re-establishes on re-serve. Only a LONE media failure (control
-                    #     link still healthy, pong fresh) is a real "viewer gone".
-                    if self._link_down or (time.time() - self._last_pong) > HB_WOBBLE_SECS:
+                    # The heartbeat confirms a whole-network drop (sets _link_down at
+                    # ~HB_INTERRUPT_SECS, well before ICE reaches "failed" ~10-30s), so
+                    # that flag alone distinguishes it from a lone media failure — we do
+                    # NOT also gate on pong-staleness, which on a two-device session with
+                    # real round-trip latency would wrongly defer a genuine lone media /
+                    # viewer drop and leave the agent stuck "streaming" to a gone viewer.
+                    if self._link_down:
                         return
                     # The media path died on its own; fall back to waiting for a viewer.
                     await self._stop_stream()
