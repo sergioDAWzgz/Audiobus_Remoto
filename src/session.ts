@@ -114,16 +114,22 @@ export class SessionDO extends DurableObject {
       const now = Date.now();
       const heldViewers = this.ctx.getWebSockets("viewer");
       let heldVid: string | undefined;
+      let heldVtok: string | undefined;
       const liveHeld = heldViewers.filter((v) => {
-        let att: { lastPing?: number; vid?: string } | null = null;
+        let att: { lastPing?: number; vid?: string; vtok?: string } | null = null;
         try {
-          att = v.deserializeAttachment() as { lastPing?: number; vid?: string } | null;
+          att = v.deserializeAttachment() as
+            | { lastPing?: number; vid?: string; vtok?: string }
+            | null;
         } catch {
           /* ignore */
         }
         const last = att?.lastPing;
         const live = last !== undefined && now - last <= SILENCE_MS;
-        if (live && heldVid === undefined) heldVid = att?.vid;
+        if (live && heldVid === undefined) {
+          heldVid = att?.vid;
+          heldVtok = att?.vtok;
+        }
         return live;
       });
       if (liveHeld.length > 0) {
@@ -132,8 +138,11 @@ export class SessionDO extends DurableObject {
           // only if this vid matches the one it approved — so a live held viewer that is
           // live because it REPLACED a ghost (a different code-holder, while the agent
           // was also away and never saw the plain viewer-joined that would reset consent)
-          // carries a NEW vid and is re-prompted, not silently inherited.
-          server.send(JSON.stringify({ type: "viewer-joined", resumed: true, vid: heldVid }));
+          // carries a NEW vid and is re-prompted, not silently inherited. The viewer's
+          // stable resume token rides along too, for the viewer's-own-reconnect path.
+          server.send(
+            JSON.stringify({ type: "viewer-joined", resumed: true, vid: heldVid, vtok: heldVtok }),
+          );
         } catch {
           /* ignore */
         }
@@ -169,8 +178,15 @@ export class SessionDO extends DurableObject {
     // whether a resumed re-serve is the SAME viewer it approved or a different one that
     // took over the slot. crypto.randomUUID is available in the Workers runtime.
     const vid = crypto.randomUUID();
+    // The viewer's own stable RESUME TOKEN (minted and held by its browser, sent on
+    // every connect). Unlike vid (per-socket, changes on reconnect) it is constant for a
+    // browser across reconnects, so the agent can recognise the SAME approved viewer
+    // returning on a fresh socket (own-link drop / dual-drop) and resume WITHOUT a new
+    // prompt. It is opaque to us and unguessable; a different code-holder carries a
+    // different token and still earns consent.
+    const vtok = url.searchParams.get("vtok") || undefined;
     try {
-      server.serializeAttachment({ lastPing: Date.now(), vid });
+      server.serializeAttachment({ lastPing: Date.now(), vid, vtok });
     } catch {
       /* ignore */
     }
@@ -194,17 +210,24 @@ export class SessionDO extends DurableObject {
     const incumbents = this.ctx.getWebSockets("viewer").filter((v) => v !== server);
     if (incumbents.length > 0) {
       const now = Date.now();
-      let incumbentLive = false;
+      let busyIncumbent = false;
       for (const v of incumbents) {
-        let last: number | undefined;
+        let att: { lastPing?: number; vtok?: string } | null = null;
         try {
-          last = (v.deserializeAttachment() as { lastPing?: number } | null)?.lastPing;
+          att = v.deserializeAttachment() as { lastPing?: number; vtok?: string } | null;
         } catch {
           /* no attachment */
         }
-        if (last === undefined || now - last <= SILENCE_MS) incumbentLive = true;
+        const last = att?.lastPing;
+        const live = last === undefined || now - last <= SILENCE_MS;
+        // A live incumbent with the SAME resume token is THIS viewer reconnecting faster
+        // than its old socket went silent — take over its own ghost. A live incumbent
+        // with a different/absent token is a genuine second controller → busy, preserving
+        // the single-controller guarantee against anyone else holding the code.
+        const sameViewer = vtok !== undefined && att?.vtok === vtok;
+        if (live && !sameViewer) busyIncumbent = true;
       }
-      if (incumbentLive) {
+      if (busyIncumbent) {
         server.send(
           JSON.stringify({
             type: "error",
@@ -215,7 +238,8 @@ export class SessionDO extends DurableObject {
         server.close(4409, "busy");
         return new Response(null, { status: 101, webSocket: client });
       }
-      // All incumbents are silent ghosts (half-open dropped): replace them. Their
+      // Every incumbent is either a silent ghost (half-open dropped) or this same
+      // viewer's own earlier socket (matching resume token): replace them. Their
       // webSocketClose skips the peer-left (another viewer is now live).
       for (const v of incumbents) {
         try {
@@ -238,7 +262,7 @@ export class SessionDO extends DurableObject {
     // and only when the resumed vid matches — see the agent branch above.
     for (const agent of this.ctx.getWebSockets("agent")) {
       try {
-        agent.send(JSON.stringify({ type: "viewer-joined", vid }));
+        agent.send(JSON.stringify({ type: "viewer-joined", vid, vtok }));
       } catch {
         /* ignore */
       }
