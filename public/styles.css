@@ -309,7 +309,12 @@ body.app {
 @media (max-width: 1400px) {
   .bar-actions .btn .btn-label { display: none; }
   .bar-actions .btn { padding: 9px; gap: 0; }
-  .bar-actions .toggle span { display: none; } /* keyboard toggle -> checkbox only */
+}
+/* The Share / Home masthead is far lighter (brand + theme + one nav button), so it only
+   needs to collapse its button to an icon on genuinely narrow (tablet/phone) windows. */
+@media (max-width: 768px) {
+  .masthead-actions .btn .btn-label { display: none; }
+  .masthead-actions .btn { padding: 9px; gap: 0; }
 }
 
 /* In light mode make the status pill a clearly-outlined white box so it stands
@@ -323,14 +328,21 @@ body.app {
 :root[data-theme="light"] .status.bad { color: #9e1414; border-color: #cf6b6b; }
 :root[data-theme="light"] .status.warn { color: #5f4800; border-color: #c0a33e; }
 
-.toggle {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  font-size: 13px;
+/* Keyboard-input toggle: a .btn that acts as a switch — brand-filled when ON (keys are
+   forwarded to the remote), muted/outlined when OFF. Click toggles it (see connect.js). */
+.btn.kb-toggle.active {
+  background: var(--brand);
+  border-color: var(--brand);
+  color: var(--brand-ink);
+}
+.btn.kb-toggle:not(.active) {
   color: var(--muted);
-  cursor: pointer;
-  user-select: none;
+}
+.btn.kb-toggle:not(.active):hover {
+  color: var(--text);
+}
+.btn.kb-toggle:not(.active) .btn-ico {
+  opacity: 0.75;
 }
 
 .join {
