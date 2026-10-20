@@ -2270,6 +2270,10 @@ class ActionDialog(tk.Toplevel):
                  neg_text, neg_bg, neg_fg, on_pos=None, on_neg=None,
                  title_text=None):
         super().__init__(parent)
+        # Hidden until positioned: setting a position-only geometry before the window is
+        # mapped doesn't stick (it maps at 0,0), so build + size it hidden, then center it
+        # over the parent with a full geometry and only then show it (also avoids a flash).
+        self.withdraw()
         self._on_pos = on_pos
         self._on_neg = on_neg
         self._done = False
@@ -2312,6 +2316,7 @@ class ActionDialog(tk.Toplevel):
         self.bind("<Escape>", lambda e: self._choose_neg())
         self.update_idletasks()
         self._center(parent)
+        self.deiconify()  # now mapped at the centered geometry
         try:
             self.lift()
             self._safe_attr("-topmost", True)
@@ -2329,13 +2334,19 @@ class ActionDialog(tk.Toplevel):
             pass
 
     def _center(self, parent):
+        """Center over the parent window, clamped to stay on screen. Sets a FULL geometry
+        (size + position) while hidden so it sticks when the window is shown."""
         try:
             self.update_idletasks()
             pw, ph = parent.winfo_width(), parent.winfo_height()
             px, py = parent.winfo_rootx(), parent.winfo_rooty()
             w, h = self.winfo_reqwidth(), self.winfo_reqheight()
-            self.geometry("+%d+%d" % (max(0, px + (pw - w) // 2),
-                                      max(0, py + (ph - h) // 2)))
+            x = px + (pw - w) // 2
+            y = py + (ph - h) // 2
+            sw, sh = self.winfo_screenwidth(), self.winfo_screenheight()
+            x = max(0, min(x, sw - w))  # keep fully on screen
+            y = max(0, min(y, sh - h))
+            self.geometry("%dx%d+%d+%d" % (w, h, x, y))
         except Exception:
             pass
 

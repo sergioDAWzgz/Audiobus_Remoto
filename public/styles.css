@@ -302,6 +302,16 @@ body.app {
 .status.bad { color: var(--bad); border-color: #e06a6a; }
 .status.warn { color: var(--warn); border-color: #d9b24f; }
 
+/* Narrower windows: collapse the top-bar controls to icons only so the control-heavy
+   session toolbar (grid/single, keyboard, send file, fullscreen, disconnect, share, theme)
+   fits without clipping. Labels stay available as tooltips (every button carries a title=).
+   ~1400px is where the full labeled toolbar stops fitting; below it, icons only. */
+@media (max-width: 1400px) {
+  .bar-actions .btn .btn-label { display: none; }
+  .bar-actions .btn { padding: 9px; gap: 0; }
+  .bar-actions .toggle span { display: none; } /* keyboard toggle -> checkbox only */
+}
+
 /* In light mode make the status pill a clearly-outlined white box so it stands
    out from both the page and the (white) top bar. Borders stay 2px (from base)
    with stronger colors for visibility. */
