@@ -399,6 +399,20 @@ def _in_rects(x, y, rects):
     return False
 
 
+# Opt-in click-filter diagnostics: set AUDIOBUS_DEBUG_CLICKS=1 to append each click's
+# decision to ~/audiobus-click.log. Off (and zero-cost) by default.
+_CLICK_DEBUG = bool(os.environ.get("AUDIOBUS_DEBUG_CLICKS"))
+
+
+def _click_log(msg):
+    try:
+        with open(os.path.join(os.path.expanduser("~"), "audiobus-click.log"),
+                  "a", encoding="utf-8") as f:
+            f.write(time.strftime("%H:%M:%S ") + msg + "\n")
+    except Exception:
+        pass
+
+
 def _click_on_agent(x, y, rects, agent_hwnds):
     """True if an injected click at absolute (x, y) should be blocked because it lands on
     one of the agent's OWN windows AND that window is really the top-most one there.
@@ -410,8 +424,12 @@ def _click_on_agent(x, y, rects, agent_hwnds):
     so protection is never silently weakened. Safe to call off the Tk thread (the Win32
     hit-test is a read-only query; agent_hwnds was captured on the Tk thread)."""
     if not _in_rects(x, y, rects):
+        if _CLICK_DEBUG:
+            _click_log(f"({x},{y}) outside agent rects {list(rects or ())} -> allow")
         return False
     if not agent_hwnds:
+        if _CLICK_DEBUG:
+            _click_log(f"({x},{y}) in rect but agent_hwnds empty -> BLOCK (fail-closed)")
         return True
     try:
         import ctypes
@@ -421,8 +439,15 @@ def _click_on_agent(x, y, rects, agent_hwnds):
         u.WindowFromPoint.argtypes = [wintypes.POINT]  # POINT is passed BY VALUE
         hwnd = u.WindowFromPoint(wintypes.POINT(int(x), int(y)))
         root = u.GetAncestor(hwnd, 2) if hwnd else 0  # GA_ROOT -> the top-level window
-        return (hwnd in agent_hwnds) or (root in agent_hwnds)
-    except Exception:
+        on_agent = (hwnd in agent_hwnds) or (root in agent_hwnds)
+        if _CLICK_DEBUG:
+            _click_log(f"({x},{y}) in rect; WindowFromPoint hwnd={hwnd} root={root} "
+                       f"agent_hwnds={sorted(agent_hwnds)} -> "
+                       f"{'BLOCK' if on_agent else 'allow'}")
+        return on_agent
+    except Exception as e:
+        if _CLICK_DEBUG:
+            _click_log(f"({x},{y}) WindowFromPoint failed ({e!r}) -> BLOCK (fail-closed)")
         return True  # fail closed: keep the original protective behaviour
 
 
