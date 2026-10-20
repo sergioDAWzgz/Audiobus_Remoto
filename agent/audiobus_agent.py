@@ -413,24 +413,32 @@ def _click_log(msg):
         pass
 
 
-def _click_on_agent(x, y, rects, agent_hwnds):
+def _window_owner_pid(hwnd):
+    """Process id that owns hwnd, or 0."""
+    import ctypes
+    from ctypes import wintypes
+    pid = wintypes.DWORD()
+    ctypes.windll.user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+    return pid.value
+
+
+def _click_on_agent(x, y, rects):
     """True if an injected click at absolute (x, y) should be blocked because it lands on
     one of the agent's OWN windows AND that window is really the top-most one there.
 
     Fast reject: outside every agent rect -> not on the agent. Inside a rect, another
     window may now be covering the agent at that point, so ask the OS which window is
-    actually there (Z-order aware, via WindowFromPoint) and only block when it is ours.
-    If that check can't run, fall back to blocking — the original rect-only behaviour —
-    so protection is never silently weakened. Safe to call off the Tk thread (the Win32
-    hit-test is a read-only query; agent_hwnds was captured on the Tk thread)."""
+    actually at that point (Z-order aware, via WindowFromPoint) and block only when that
+    window belongs to THIS process. Identifying our window by owning process id (rather
+    than a cached handle) is robust to Tk's wrapper-window structure on Windows, where the
+    decorated OS window's handle differs from GetAncestor(winfo_id, GA_ROOT) — a mismatch
+    that made the handle-set check never match. If the check can't run, fall back to
+    blocking so protection is never silently weakened. Safe to call off the Tk thread (the
+    Win32 hit-test is a read-only query)."""
     if not _in_rects(x, y, rects):
         if _CLICK_DEBUG:
             _click_log(f"({x},{y}) outside agent rects {list(rects or ())} -> allow")
         return False
-    if not agent_hwnds:
-        if _CLICK_DEBUG:
-            _click_log(f"({x},{y}) in rect but agent_hwnds empty -> BLOCK (fail-closed)")
-        return True
     try:
         import ctypes
         from ctypes import wintypes
@@ -438,27 +446,30 @@ def _click_on_agent(x, y, rects, agent_hwnds):
         u = ctypes.windll.user32
         u.WindowFromPoint.argtypes = [wintypes.POINT]  # POINT is passed BY VALUE
         hwnd = u.WindowFromPoint(wintypes.POINT(int(x), int(y)))
-        root = u.GetAncestor(hwnd, 2) if hwnd else 0  # GA_ROOT -> the top-level window
-        on_agent = (hwnd in agent_hwnds) or (root in agent_hwnds)
+        if not hwnd:
+            if _CLICK_DEBUG:
+                _click_log(f"({x},{y}) in rect; no window at point -> allow")
+            return False  # nothing is there to protect
+        pid = _window_owner_pid(hwnd)
+        on_agent = (pid == os.getpid())
         if _CLICK_DEBUG:
-            _click_log(f"({x},{y}) in rect; WindowFromPoint hwnd={hwnd} root={root} "
-                       f"agent_hwnds={sorted(agent_hwnds)} -> "
-                       f"{'BLOCK' if on_agent else 'allow'}")
+            _click_log(f"({x},{y}) in rect; WindowFromPoint hwnd={hwnd} pid={pid} "
+                       f"our_pid={os.getpid()} -> {'BLOCK' if on_agent else 'allow'}")
         return on_agent
     except Exception as e:
         if _CLICK_DEBUG:
-            _click_log(f"({x},{y}) WindowFromPoint failed ({e!r}) -> BLOCK (fail-closed)")
+            _click_log(f"({x},{y}) check failed ({e!r}) -> BLOCK (fail-closed)")
         return True  # fail closed: keep the original protective behaviour
 
 
 def apply_event(ev, monitors=None, window_rects=None, blocked=None,
-                pressed=None, agent_foreground=False, agent_hwnds=None):
+                pressed=None, agent_foreground=False):
     """Apply one remote input event, while protecting the agent's OWN windows so a
     remote user can't close it or drive its controls:
 
     - Mouse CLICKS/SCROLL that land on an agent window AND where that window is actually
-      the top-most one (agent_hwnds: our window handles, checked Z-order aware so a click
-      over another window that now covers the agent is NOT blocked) are ignored. Cursor
+      the top-most one (checked Z-order aware via the owning process, so a click over
+      another window that now covers the agent is NOT blocked) are ignored. Cursor
       MOVEMENT may still pass over them.
     - Injected KEYBOARD is dropped while an agent window is foreground
       (agent_foreground), so injected Alt+F4 / Tab-to-a-button can't close or press
@@ -489,7 +500,7 @@ def apply_event(ev, monitors=None, window_rects=None, blocked=None,
         elif t == "md":
             ax, ay = off_x + ev["x"], off_y + ev["y"]
             b = ev.get("b", 0)
-            if _click_on_agent(ax, ay, window_rects, agent_hwnds):
+            if _click_on_agent(ax, ay, window_rects):
                 if blocked is not None:
                     blocked.add(b)  # suppress this press (and its matching release)
                 return
@@ -510,7 +521,7 @@ def apply_event(ev, monitors=None, window_rects=None, blocked=None,
                 pressed.discard(b)
         elif t == "scroll":
             ax, ay = off_x + ev["x"], off_y + ev["y"]
-            if _click_on_agent(ax, ay, window_rects, agent_hwnds):
+            if _click_on_agent(ax, ay, window_rects):
                 return  # don't scroll an agent window that is actually on top here
             mouse.position = (ax, ay)
             sx = _wheel_steps(ev.get("dx", 0))
@@ -1416,7 +1427,6 @@ class NetClient:
                 getattr(self.app, "_window_rects", None),
                 self._blocked_btns, self._pressed_btns,
                 getattr(self.app, "_agent_foreground", False),
-                getattr(self.app, "_our_hwnds", None),
             )
             return
         mtype = msg.get("type")
@@ -2276,10 +2286,10 @@ class App:
         self._interrupt_grace = None   # after() id: delay before the dialog first shows
         self._interrupt_reask = None   # after() id for re-asking 10s after "Wait"
         self._window_rects = ()      # our windows' screen rects (main + any dialog);
-        #                              injected clicks on them are ignored (when we're on top).
-        self._our_hwnds = frozenset()  # our top-level window handles, for the Z-order-aware
-        #                              click filter (a click where another window covers us
-        #                              is allowed through).
+        #                              injected clicks on them are ignored, but only where
+        #                              one of our windows is actually the top-most window
+        #                              (see _click_on_agent — a click on another window that
+        #                              covers us is allowed through).
         self._agent_foreground = False  # an agent window has OS focus -> drop injected keys
         self._clip_last = None        # last clipboard text reconciled with the viewer (sent
         #                               OR received); echo-guards the bidirectional sync. None
@@ -2588,7 +2598,6 @@ class App:
             from ctypes import wintypes
 
             u = ctypes.windll.user32
-            our_hwnds = set()
 
             def _rect_for(widget):
                 try:
@@ -2597,7 +2606,6 @@ class App:
                         return None
                     r = wintypes.RECT()
                     if u.GetWindowRect(wintypes.HWND(hwnd), ctypes.byref(r)):
-                        our_hwnds.add(hwnd)
                         return (r.left, r.top, r.right, r.bottom)
                 except Exception:
                     pass
@@ -2615,9 +2623,11 @@ class App:
                                 rects.append(dr)
                     except Exception:
                         pass
-            self._agent_foreground = u.GetForegroundWindow() in our_hwnds
-            # Captured on the Tk thread; the net thread reads it for the click filter.
-            self._our_hwnds = frozenset(our_hwnds)
+            # Are WE the foreground app? Compare by owning process (handle identity is
+            # unreliable with Tk's wrapper windows — see _click_on_agent), so injected
+            # keys are dropped whenever any of our windows has focus.
+            self._agent_foreground = (
+                _window_owner_pid(u.GetForegroundWindow()) == os.getpid())
         except Exception:
             pass
         if rects:
