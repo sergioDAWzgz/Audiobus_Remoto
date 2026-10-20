@@ -279,21 +279,37 @@ body.app {
 .bar {
   display: flex;
   align-items: center;
-  flex-wrap: wrap; /* on narrow windows the controls wrap to a new row instead of clipping */
-  gap: 10px 16px;
-  padding: 10px 16px;
+  flex-wrap: wrap; /* on narrow windows the sections wrap to a new row instead of clipping */
+  gap: 8px 14px;
+  padding: 8px 16px;
   background: var(--bg-elev);
   border-bottom: 1px solid var(--border);
   flex: 0 0 auto;
 }
 .bar .brand { font-size: 16px; }
+/* Three sections: brand+status (left) and Share+theme (right) take equal flex so the
+   control buttons in the middle are truly centered; the flanks stay at the edges. */
+.bar-left {
+  flex: 1 1 0;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
 .bar-actions {
-  margin-left: auto;
+  flex: 0 1 auto;
   display: flex;
   align-items: center;
   flex-wrap: wrap;
+  justify-content: center;
+  gap: 4px 8px;
+}
+.bar-end {
+  flex: 1 1 0;
+  display: flex;
+  align-items: center;
   justify-content: flex-end;
-  gap: 6px 12px;
+  gap: 10px;
 }
 
 .status {
@@ -375,6 +391,11 @@ body.app {
   stroke-width: 1.6;
   stroke-linecap: round;
   stroke-linejoin: round;
+}
+/* The input (cursor) glyph reads better filled than outlined. */
+.kb-switch .btn-ico.ico-filled {
+  fill: currentColor;
+  stroke: none;
 }
 .kb-switch .btn-label {
   font-size: 10px;
@@ -508,9 +529,23 @@ body.app {
 .fs-bar.show {
   transform: translateX(0);
 }
-/* In the rail the buttons are icon-only and the view controls stack vertically. */
-.fs-bar .btn { gap: 0; padding: 9px; }
-.fs-bar .btn .btn-label { display: none; }
+/* In the rail the buttons show an icon with a small caption underneath (matching the top
+   bar), and the view controls stack vertically. */
+.fs-bar .btn {
+  flex-direction: column;
+  gap: 3px;
+  padding: 6px 8px;
+}
+.fs-bar .btn .btn-ico {
+  width: 18px;
+  height: 18px;
+}
+.fs-bar .btn .btn-label {
+  display: block;
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 1.1;
+}
 .fs-bar .view-controls,
 .fs-bar .mode-group,
 .fs-bar .monitor-picker {

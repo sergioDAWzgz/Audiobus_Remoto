@@ -33,6 +33,7 @@ const fileInput = $("fileInput");
 const dropHint = $("dropHint");
 const transfersEl = $("transfers");
 const barActions = document.querySelector(".bar-actions");
+const barLeft = document.querySelector(".bar-left");
 const topBar = document.querySelector(".bar");
 const joinStatusSlot = $("joinStatusSlot");
 
@@ -605,7 +606,7 @@ function placeStatusInJoin() {
   if (statusEl.parentElement !== joinStatusSlot) joinStatusSlot.appendChild(statusEl);
 }
 function placeStatusInBar() {
-  if (statusEl.parentElement !== topBar) topBar.insertBefore(statusEl, barActions);
+  if (statusEl.parentElement !== barLeft) barLeft.appendChild(statusEl); // next to the brand
 }
 placeStatusInJoin(); // start on the join screen
 
@@ -1606,6 +1607,12 @@ function attachInput(el, mon) {
   let lastMove = 0;
 
   const onMove = (e) => {
+    // The Input switch (kbToggle) gates ALL input — mouse and keyboard. When off, this
+    // is a view-only session: don't forward movement and show a plain cursor.
+    if (!kbToggle.checked) {
+      el.style.cursor = "default";
+      return;
+    }
     const p = mediaXY(el, mon, e);
     // Over the agent's own window the agent ignores clicks, so hint with a
     // "not-allowed" cursor (updated every move; "" reverts to the CSS crosshair).
@@ -1617,6 +1624,7 @@ function attachInput(el, mon) {
   };
   const onDown = (e) => {
     e.preventDefault();
+    if (!kbToggle.checked) return; // input off: view-only
     el.focus();
     activeDown = { el, mon };
     const p = mediaXY(el, mon, e);
@@ -1624,6 +1632,7 @@ function attachInput(el, mon) {
   };
   const onWheel = (e) => {
     e.preventDefault();
+    if (!kbToggle.checked) return; // input off: view-only
     const p = mediaXY(el, mon, e);
     send({ t: "scroll", m: mon.i, x: p.x, y: p.y, dx: e.deltaX, dy: e.deltaY });
   };

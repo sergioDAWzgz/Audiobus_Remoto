@@ -25,7 +25,7 @@
     "share.notice1.outro": "Building the standalone .exe is covered in the project README (agent/build.ps1).",
     "share.notice2.title": "This is a remote-control tool.",
     "share.notice2.body": "Only run the agent on a computer you own or are authorized to share, and only give the code to someone you trust. Anyone with the current code (and your approval) can control this computer until you close the agent.",
-    "connect.nav.share": "Share this computer",
+    "connect.nav.share": "Share PC",
     "connect.status.enterCode": "Enter a session code",
     "connect.btn.grid": "Grid",
     "connect.btn.single": "Single",
@@ -44,7 +44,7 @@
     "connect.err.codeInvalid": "That isn't a valid session code — check it and try again.",
     "connect.status.connecting": "Connecting…",
     "connect.status.waitingAccept": "Waiting for the other computer to accept…",
-    "connect.status.connected": "Connected — you are controlling this computer.",
+    "connect.status.connected": "Connected",
     "connect.status.declined": "The other computer declined the connection.",
     "connect.status.couldNotConnect": "Could not connect.",
     "connect.err.notResponding": "That computer isn't responding — a previous session may be stuck. Ask the other person to check the Audiobus agent, then try again.",
@@ -99,7 +99,8 @@
     "theme.label": "Theme",
     "theme.auto": "Auto",
     "theme.light": "Light",
-    "theme.dark": "Dark"
+    "theme.dark": "Dark",
+    "connect.toggle.input": "Input"
   },
   "es": {
     "doc.title.home": "Audiobus Remote",
@@ -127,7 +128,7 @@
     "share.notice1.outro": "La compilación del .exe independiente se explica en el README del proyecto (agent/build.ps1).",
     "share.notice2.title": "Esta es una herramienta de control remoto.",
     "share.notice2.body": "Ejecuta el agente solo en un ordenador que sea tuyo o que tengas autorización para compartir, y da el código solo a alguien de confianza. Cualquiera que tenga el código actual (y tu aprobación) puede controlar este ordenador hasta que cierres el agente.",
-    "connect.nav.share": "Comparte este ordenador",
+    "connect.nav.share": "Compartir PC",
     "connect.status.enterCode": "Introduce un código de sesión",
     "connect.btn.grid": "Cuadrícula",
     "connect.btn.single": "Individual",
@@ -143,7 +144,7 @@
     "connect.err.codeInvalid": "Ese no es un código de sesión válido: compruébalo e inténtalo de nuevo.",
     "connect.status.connecting": "Conectando…",
     "connect.status.waitingAccept": "Esperando a que el otro ordenador acepte…",
-    "connect.status.connected": "Conectado — estás controlando este ordenador.",
+    "connect.status.connected": "Conectado",
     "connect.status.declined": "El otro ordenador rechazó la conexión.",
     "connect.err.notResponding": "Ese ordenador no responde — puede que una sesión anterior se haya quedado colgada. Pide a la otra persona que revise el agente de Audiobus y vuelve a intentarlo.",
     "connect.status.couldNotConnect": "No se pudo conectar.",
@@ -201,7 +202,8 @@
     "agent.file.receiving": "Recibiendo {name} — {pct}%",
     "agent.file.sent": "Enviado {name}",
     "agent.file.received": "Recibido {name}",
-    "agent.file.failed": "Transferencia fallida: {name}"
+    "agent.file.failed": "Transferencia fallida: {name}",
+    "connect.toggle.input": "Entrada"
   },
   "fr": {
     "doc.title.home": "Audiobus Remote",
@@ -229,7 +231,7 @@
     "share.notice1.outro": "La compilation du .exe autonome est expliquée dans le README du projet (agent/build.ps1).",
     "share.notice2.title": "C'est un outil de contrôle à distance.",
     "share.notice2.body": "Ne lancez l'agent que sur un ordinateur qui vous appartient ou que vous êtes autorisé à partager, et ne donnez le code qu'à une personne de confiance. Quiconque possède le code actuel (et votre approbation) peut contrôler cet ordinateur jusqu'à ce que vous fermiez l'agent.",
-    "connect.nav.share": "Partager cet ordinateur",
+    "connect.nav.share": "Partager PC",
     "connect.status.enterCode": "Saisissez un code de session",
     "connect.btn.grid": "Grille",
     "connect.btn.single": "Unique",
@@ -244,7 +246,7 @@
     "connect.err.codeLen": "Le code doit comporter exactement 10 caractères.",
     "connect.status.connecting": "Connexion…",
     "connect.status.waitingAccept": "En attente de l'acceptation de l'autre ordinateur…",
-    "connect.status.connected": "Connecté — vous contrôlez cet ordinateur.",
+    "connect.status.connected": "Connecté",
     "connect.status.declined": "L'autre ordinateur a refusé la connexion.",
     "connect.status.couldNotConnect": "Connexion impossible.",
     "connect.err.noAgent": "Aucun ordinateur ne partage ce code. Vérifiez le code et assurez-vous que l'agent est en cours d'exécution.",
@@ -293,7 +295,8 @@
     "agent.file.receiving": "Réception de {name} — {pct}%",
     "agent.file.sent": "{name} envoyé",
     "agent.file.received": "{name} reçu",
-    "agent.file.failed": "Échec du transfert : {name}"
+    "agent.file.failed": "Échec du transfert : {name}",
+    "connect.toggle.input": "Entrée"
   },
   "de": {
     "doc.title.home": "Audiobus Remote",
@@ -321,7 +324,7 @@
     "share.notice1.outro": "Das Erstellen der eigenständigen .exe wird in der Projekt-README (agent/build.ps1) beschrieben.",
     "share.notice2.title": "Dies ist ein Fernsteuerungswerkzeug.",
     "share.notice2.body": "Führe den Agenten nur auf einem Computer aus, der dir gehört oder den du teilen darfst, und gib den Code nur an jemanden weiter, dem du vertraust. Jeder mit dem aktuellen Code (und deiner Bestätigung) kann diesen Computer steuern, bis du den Agenten schließt.",
-    "connect.nav.share": "Diesen Computer teilen",
+    "connect.nav.share": "PC teilen",
     "connect.status.enterCode": "Sitzungscode eingeben",
     "connect.btn.grid": "Raster",
     "connect.btn.single": "Einzeln",
@@ -336,7 +339,7 @@
     "connect.err.codeLen": "Der Code muss genau 10 Zeichen lang sein.",
     "connect.status.connecting": "Verbinden…",
     "connect.status.waitingAccept": "Warten, bis der andere Computer annimmt…",
-    "connect.status.connected": "Verbunden — du steuerst diesen Computer.",
+    "connect.status.connected": "Verbunden",
     "connect.status.declined": "Der andere Computer hat die Verbindung abgelehnt.",
     "connect.status.couldNotConnect": "Verbindung nicht möglich.",
     "connect.err.noAgent": "Kein Computer teilt diesen Code. Überprüfe den Code und stelle sicher, dass der Agent läuft.",
@@ -385,7 +388,8 @@
     "agent.file.receiving": "{name} wird empfangen — {pct}%",
     "agent.file.sent": "{name} gesendet",
     "agent.file.received": "{name} empfangen",
-    "agent.file.failed": "Übertragung fehlgeschlagen: {name}"
+    "agent.file.failed": "Übertragung fehlgeschlagen: {name}",
+    "connect.toggle.input": "Eingabe"
   },
   "it": {
     "doc.title.home": "Audiobus Remote",
@@ -413,7 +417,7 @@
     "share.notice1.outro": "La compilazione del .exe autonomo è descritta nel README del progetto (agent/build.ps1).",
     "share.notice2.title": "Questo è uno strumento di controllo remoto.",
     "share.notice2.body": "Esegui l'agente solo su un computer di tua proprietà o che sei autorizzato a condividere, e dai il codice solo a una persona di cui ti fidi. Chiunque abbia il codice attuale (e la tua approvazione) può controllare questo computer finché non chiudi l'agente.",
-    "connect.nav.share": "Condividi questo computer",
+    "connect.nav.share": "Condividi PC",
     "connect.status.enterCode": "Inserisci un codice di sessione",
     "connect.btn.grid": "Griglia",
     "connect.btn.single": "Singolo",
@@ -428,7 +432,7 @@
     "connect.err.codeLen": "Il codice deve avere esattamente 10 caratteri.",
     "connect.status.connecting": "Connessione…",
     "connect.status.waitingAccept": "In attesa che l'altro computer accetti…",
-    "connect.status.connected": "Connesso — stai controllando questo computer.",
+    "connect.status.connected": "Connesso",
     "connect.status.declined": "L'altro computer ha rifiutato la connessione.",
     "connect.status.couldNotConnect": "Impossibile connettersi.",
     "connect.err.noAgent": "Nessun computer sta condividendo quel codice. Controlla il codice e assicurati che l'agente sia in esecuzione.",
@@ -477,7 +481,8 @@
     "agent.file.receiving": "Ricezione di {name} — {pct}%",
     "agent.file.sent": "{name} inviato",
     "agent.file.received": "{name} ricevuto",
-    "agent.file.failed": "Trasferimento fallito: {name}"
+    "agent.file.failed": "Trasferimento fallito: {name}",
+    "connect.toggle.input": "Input"
   },
   "pt": {
     "doc.title.home": "Audiobus Remote",
@@ -505,7 +510,7 @@
     "share.notice1.outro": "A compilação do .exe autónomo está descrita no README do projeto (agent/build.ps1).",
     "share.notice2.title": "Esta é uma ferramenta de controlo remoto.",
     "share.notice2.body": "Execute o agente apenas num computador que lhe pertença ou que esteja autorizado a partilhar, e dê o código apenas a alguém de confiança. Qualquer pessoa com o código atual (e a sua aprovação) pode controlar este computador até fechar o agente.",
-    "connect.nav.share": "Partilhar este computador",
+    "connect.nav.share": "Partilhar PC",
     "connect.status.enterCode": "Introduza um código de sessão",
     "connect.btn.grid": "Grelha",
     "connect.btn.single": "Único",
@@ -520,7 +525,7 @@
     "connect.err.codeLen": "O código tem de ter exatamente 10 caracteres.",
     "connect.status.connecting": "A ligar…",
     "connect.status.waitingAccept": "A aguardar que o outro computador aceite…",
-    "connect.status.connected": "Ligado — está a controlar este computador.",
+    "connect.status.connected": "Ligado",
     "connect.status.declined": "O outro computador recusou a ligação.",
     "connect.status.couldNotConnect": "Não foi possível ligar.",
     "connect.err.noAgent": "Nenhum computador está a partilhar esse código. Verifique o código e certifique-se de que o agente está em execução.",
@@ -569,7 +574,8 @@
     "agent.file.receiving": "A receber {name} — {pct}%",
     "agent.file.sent": "{name} enviado",
     "agent.file.received": "{name} recebido",
-    "agent.file.failed": "Falha na transferência: {name}"
+    "agent.file.failed": "Falha na transferência: {name}",
+    "connect.toggle.input": "Entrada"
   },
   "pt-br": {
     "doc.title.home": "Audiobus Remote",
@@ -597,7 +603,7 @@
     "share.notice1.outro": "A criação do .exe autônomo está descrita no README do projeto (agent/build.ps1).",
     "share.notice2.title": "Esta é uma ferramenta de controle remoto.",
     "share.notice2.body": "Execute o agente apenas em um computador que você possui ou tem autorização para compartilhar, e só dê o código a alguém de confiança. Qualquer pessoa com o código atual (e sua aprovação) pode controlar este computador até você fechar o agente.",
-    "connect.nav.share": "Compartilhar este computador",
+    "connect.nav.share": "Compartilhar PC",
     "connect.status.enterCode": "Digite um código de sessão",
     "connect.btn.grid": "Grade",
     "connect.btn.single": "Único",
@@ -612,7 +618,7 @@
     "connect.err.codeLen": "O código deve ter exatamente 10 caracteres.",
     "connect.status.connecting": "Conectando…",
     "connect.status.waitingAccept": "Aguardando o outro computador aceitar…",
-    "connect.status.connected": "Conectado — você está controlando este computador.",
+    "connect.status.connected": "Conectado",
     "connect.status.declined": "O outro computador recusou a conexão.",
     "connect.status.couldNotConnect": "Não foi possível conectar.",
     "connect.err.noAgent": "Nenhum computador está compartilhando esse código. Verifique o código e confirme que o agente está em execução.",
@@ -661,7 +667,8 @@
     "agent.file.receiving": "Recebendo {name} — {pct}%",
     "agent.file.sent": "{name} enviado",
     "agent.file.received": "{name} recebido",
-    "agent.file.failed": "Falha na transferência: {name}"
+    "agent.file.failed": "Falha na transferência: {name}",
+    "connect.toggle.input": "Entrada"
   },
   "nl": {
     "doc.title.home": "Audiobus Remote",
@@ -689,7 +696,7 @@
     "share.notice1.outro": "Het bouwen van de losstaande .exe wordt behandeld in de README van het project (agent/build.ps1).",
     "share.notice2.title": "Dit is een hulpmiddel voor bediening op afstand.",
     "share.notice2.body": "Voer de agent alleen uit op een computer die je bezit of mag delen, en geef de code alleen aan iemand die je vertrouwt. Iedereen met de huidige code (en jouw goedkeuring) kan deze computer bedienen totdat je de agent sluit.",
-    "connect.nav.share": "Deze computer delen",
+    "connect.nav.share": "Pc delen",
     "connect.status.enterCode": "Voer een sessiecode in",
     "connect.btn.grid": "Raster",
     "connect.btn.single": "Enkel",
@@ -704,7 +711,7 @@
     "connect.err.codeLen": "De code moet precies 10 tekens lang zijn.",
     "connect.status.connecting": "Verbinden…",
     "connect.status.waitingAccept": "Wachten tot de andere computer accepteert…",
-    "connect.status.connected": "Verbonden — je bedient deze computer.",
+    "connect.status.connected": "Verbonden",
     "connect.status.declined": "De andere computer heeft de verbinding geweigerd.",
     "connect.status.couldNotConnect": "Kon geen verbinding maken.",
     "connect.err.noAgent": "Geen computer deelt die code. Controleer de code en zorg dat de agent draait.",
@@ -753,7 +760,8 @@
     "agent.file.receiving": "{name} wordt ontvangen — {pct}%",
     "agent.file.sent": "{name} verzonden",
     "agent.file.received": "{name} ontvangen",
-    "agent.file.failed": "Overdracht mislukt: {name}"
+    "agent.file.failed": "Overdracht mislukt: {name}",
+    "connect.toggle.input": "Invoer"
   },
   "ru": {
     "doc.title.home": "Audiobus Remote",
@@ -781,7 +789,7 @@
     "share.notice1.outro": "Сборка автономного .exe описана в README проекта (agent/build.ps1).",
     "share.notice2.title": "Это инструмент удалённого управления.",
     "share.notice2.body": "Запускайте агент только на компьютере, которым владеете или которым вам разрешено делиться, и сообщайте код только тому, кому доверяете. Любой, у кого есть текущий код (и ваше одобрение), может управлять этим компьютером, пока вы не закроете агент.",
-    "connect.nav.share": "Поделиться этим компьютером",
+    "connect.nav.share": "Поделиться ПК",
     "connect.status.enterCode": "Введите код сессии",
     "connect.btn.grid": "Сетка",
     "connect.btn.single": "Один",
@@ -796,7 +804,7 @@
     "connect.err.codeLen": "Код должен содержать ровно 10 символов.",
     "connect.status.connecting": "Подключение…",
     "connect.status.waitingAccept": "Ожидание принятия другим компьютером…",
-    "connect.status.connected": "Подключено — вы управляете этим компьютером.",
+    "connect.status.connected": "Подключено",
     "connect.status.declined": "Другой компьютер отклонил подключение.",
     "connect.status.couldNotConnect": "Не удалось подключиться.",
     "connect.err.noAgent": "Ни один компьютер не делится этим кодом. Проверьте код и убедитесь, что агент запущен.",
@@ -845,7 +853,8 @@
     "agent.file.receiving": "Получение {name} — {pct}%",
     "agent.file.sent": "Отправлено: {name}",
     "agent.file.received": "Получено: {name}",
-    "agent.file.failed": "Ошибка передачи: {name}"
+    "agent.file.failed": "Ошибка передачи: {name}",
+    "connect.toggle.input": "Ввод"
   },
   "uk": {
     "doc.title.home": "Audiobus Remote",
@@ -873,7 +882,7 @@
     "share.notice1.outro": "Збирання автономного .exe описано в README проєкту (agent/build.ps1).",
     "share.notice2.title": "Це інструмент віддаленого керування.",
     "share.notice2.body": "Запускайте агент лише на комп'ютері, яким ви володієте або яким вам дозволено ділитися, і передавайте код лише тому, кому довіряєте. Будь-хто, хто має поточний код (і ваше схвалення), може керувати цим комп'ютером, доки ви не закриєте агент.",
-    "connect.nav.share": "Поділитися цим комп'ютером",
+    "connect.nav.share": "Поділитися ПК",
     "connect.status.enterCode": "Введіть код сесії",
     "connect.btn.grid": "Сітка",
     "connect.btn.single": "Один",
@@ -888,7 +897,7 @@
     "connect.err.codeLen": "Код має містити рівно 10 символів.",
     "connect.status.connecting": "Підключення…",
     "connect.status.waitingAccept": "Очікування прийняття іншим комп'ютером…",
-    "connect.status.connected": "Підключено — ви керуєте цим комп'ютером.",
+    "connect.status.connected": "Підключено",
     "connect.status.declined": "Інший комп'ютер відхилив підключення.",
     "connect.status.couldNotConnect": "Не вдалося підключитися.",
     "connect.err.noAgent": "Жоден комп'ютер не ділиться цим кодом. Перевірте код і переконайтеся, що агент запущено.",
@@ -937,7 +946,8 @@
     "agent.file.receiving": "Отримання {name} — {pct}%",
     "agent.file.sent": "Надіслано: {name}",
     "agent.file.received": "Отримано: {name}",
-    "agent.file.failed": "Помилка передавання: {name}"
+    "agent.file.failed": "Помилка передавання: {name}",
+    "connect.toggle.input": "Ввід"
   },
   "pl": {
     "doc.title.home": "Audiobus Remote",
@@ -965,7 +975,7 @@
     "share.notice1.outro": "Budowanie samodzielnego pliku .exe jest opisane w pliku README projektu (agent/build.ps1).",
     "share.notice2.title": "To narzędzie do zdalnego sterowania.",
     "share.notice2.body": "Uruchamiaj agenta tylko na komputerze, który posiadasz lub który masz prawo udostępniać, i przekazuj kod tylko osobie, której ufasz. Każdy, kto ma bieżący kod (i Twoje zatwierdzenie), może sterować tym komputerem, dopóki nie zamkniesz agenta.",
-    "connect.nav.share": "Udostępnij ten komputer",
+    "connect.nav.share": "Udostępnij PC",
     "connect.status.enterCode": "Wpisz kod sesji",
     "connect.btn.grid": "Siatka",
     "connect.btn.single": "Pojedynczy",
@@ -980,7 +990,7 @@
     "connect.err.codeLen": "Kod musi mieć dokładnie 10 znaków.",
     "connect.status.connecting": "Łączenie…",
     "connect.status.waitingAccept": "Oczekiwanie na akceptację drugiego komputera…",
-    "connect.status.connected": "Połączono — sterujesz tym komputerem.",
+    "connect.status.connected": "Połączono",
     "connect.status.declined": "Drugi komputer odrzucił połączenie.",
     "connect.status.couldNotConnect": "Nie można połączyć.",
     "connect.err.noAgent": "Żaden komputer nie udostępnia tego kodu. Sprawdź kod i upewnij się, że agent jest uruchomiony.",
@@ -1029,7 +1039,8 @@
     "agent.file.receiving": "Odbieranie {name} — {pct}%",
     "agent.file.sent": "Wysłano: {name}",
     "agent.file.received": "Odebrano: {name}",
-    "agent.file.failed": "Błąd przesyłania: {name}"
+    "agent.file.failed": "Błąd przesyłania: {name}",
+    "connect.toggle.input": "Sterowanie"
   },
   "cs": {
     "doc.title.home": "Audiobus Remote",
@@ -1057,7 +1068,7 @@
     "share.notice1.outro": "Sestavení samostatného souboru .exe je popsáno v souboru README projektu (agent/build.ps1).",
     "share.notice2.title": "Toto je nástroj pro vzdálené ovládání.",
     "share.notice2.body": "Agenta spouštějte pouze na počítači, který vlastníte nebo jste oprávněni sdílet, a kód dávejte jen někomu, komu důvěřujete. Kdokoli s aktuálním kódem (a vaším schválením) může tento počítač ovládat, dokud agenta nezavřete.",
-    "connect.nav.share": "Sdílet tento počítač",
+    "connect.nav.share": "Sdílet PC",
     "connect.status.enterCode": "Zadejte kód relace",
     "connect.btn.grid": "Mřížka",
     "connect.btn.single": "Jeden",
@@ -1072,7 +1083,7 @@
     "connect.err.codeLen": "Kód musí mít přesně 10 znaků.",
     "connect.status.connecting": "Připojování…",
     "connect.status.waitingAccept": "Čekání, až druhý počítač přijme připojení…",
-    "connect.status.connected": "Připojeno — ovládáte tento počítač.",
+    "connect.status.connected": "Připojeno",
     "connect.status.declined": "Druhý počítač připojení odmítl.",
     "connect.status.couldNotConnect": "Nepodařilo se připojit.",
     "connect.err.noAgent": "Žádný počítač nesdílí tento kód. Zkontrolujte kód a ujistěte se, že agent běží.",
@@ -1121,7 +1132,8 @@
     "agent.file.receiving": "Přijímání {name} — {pct}%",
     "agent.file.sent": "Odesláno: {name}",
     "agent.file.received": "Přijato: {name}",
-    "agent.file.failed": "Přenos selhal: {name}"
+    "agent.file.failed": "Přenos selhal: {name}",
+    "connect.toggle.input": "Vstup"
   },
   "sv": {
     "doc.title.home": "Audiobus Remote",
@@ -1149,7 +1161,7 @@
     "share.notice1.outro": "Hur du bygger den fristående .exe-filen beskrivs i projektets README (agent/build.ps1).",
     "share.notice2.title": "Det här är ett fjärrstyrningsverktyg.",
     "share.notice2.body": "Kör bara agenten på en dator du äger eller har tillstånd att dela, och ge bara koden till någon du litar på. Vem som helst med den aktuella koden (och ditt godkännande) kan styra den här datorn tills du stänger agenten.",
-    "connect.nav.share": "Dela den här datorn",
+    "connect.nav.share": "Dela dator",
     "connect.status.enterCode": "Ange en sessionskod",
     "connect.btn.grid": "Rutnät",
     "connect.btn.single": "Enkel",
@@ -1164,7 +1176,7 @@
     "connect.err.codeLen": "Koden måste vara exakt 10 tecken.",
     "connect.status.connecting": "Ansluter…",
     "connect.status.waitingAccept": "Väntar på att den andra datorn ska acceptera…",
-    "connect.status.connected": "Ansluten — du styr den här datorn.",
+    "connect.status.connected": "Ansluten",
     "connect.status.declined": "Den andra datorn avböjde anslutningen.",
     "connect.status.couldNotConnect": "Det gick inte att ansluta.",
     "connect.err.noAgent": "Ingen dator delar den koden. Kontrollera koden och se till att agenten körs.",
@@ -1213,7 +1225,8 @@
     "agent.file.receiving": "Tar emot {name} — {pct}%",
     "agent.file.sent": "Skickat {name}",
     "agent.file.received": "Mottagit {name}",
-    "agent.file.failed": "Överföringen misslyckades: {name}"
+    "agent.file.failed": "Överföringen misslyckades: {name}",
+    "connect.toggle.input": "Inmatning"
   },
   "da": {
     "doc.title.home": "Audiobus Remote",
@@ -1241,7 +1254,7 @@
     "share.notice1.outro": "Bygning af den selvstændige .exe-fil er beskrevet i projektets README (agent/build.ps1).",
     "share.notice2.title": "Dette er et værktøj til fjernstyring.",
     "share.notice2.body": "Kør kun agenten på en computer, du ejer eller har tilladelse til at dele, og giv kun koden til nogen, du stoler på. Enhver med den aktuelle kode (og din godkendelse) kan styre denne computer, indtil du lukker agenten.",
-    "connect.nav.share": "Del denne computer",
+    "connect.nav.share": "Del pc",
     "connect.status.enterCode": "Indtast en sessionskode",
     "connect.btn.grid": "Gitter",
     "connect.btn.single": "Enkelt",
@@ -1256,7 +1269,7 @@
     "connect.err.codeLen": "Koden skal være præcis 10 tegn.",
     "connect.status.connecting": "Opretter forbindelse…",
     "connect.status.waitingAccept": "Venter på, at den anden computer accepterer…",
-    "connect.status.connected": "Forbundet — du styrer denne computer.",
+    "connect.status.connected": "Forbundet",
     "connect.status.declined": "Den anden computer afviste forbindelsen.",
     "connect.status.couldNotConnect": "Kunne ikke oprette forbindelse.",
     "connect.err.noAgent": "Ingen computer deler den kode. Tjek koden, og sørg for, at agenten kører.",
@@ -1305,7 +1318,8 @@
     "agent.file.receiving": "Modtager {name} — {pct}%",
     "agent.file.sent": "Sendt {name}",
     "agent.file.received": "Modtaget {name}",
-    "agent.file.failed": "Overførsel mislykkedes: {name}"
+    "agent.file.failed": "Overførsel mislykkedes: {name}",
+    "connect.toggle.input": "Input"
   },
   "fi": {
     "doc.title.home": "Audiobus Remote",
@@ -1333,7 +1347,7 @@
     "share.notice1.outro": "Erillisen .exe-tiedoston koostaminen on kuvattu projektin README-tiedostossa (agent/build.ps1).",
     "share.notice2.title": "Tämä on etäohjaustyökalu.",
     "share.notice2.body": "Suorita agenttia vain tietokoneella, jonka omistat tai jonka jakamiseen sinulla on lupa, ja anna koodi vain luottamallesi henkilölle. Kuka tahansa, jolla on nykyinen koodi (ja sinun hyväksyntäsi), voi ohjata tätä tietokonetta, kunnes suljet agentin.",
-    "connect.nav.share": "Jaa tämä tietokone",
+    "connect.nav.share": "Jaa PC",
     "connect.status.enterCode": "Syötä istuntokoodi",
     "connect.btn.grid": "Ruudukko",
     "connect.btn.single": "Yksittäinen",
@@ -1348,7 +1362,7 @@
     "connect.err.codeLen": "Koodissa on oltava tasan 10 merkkiä.",
     "connect.status.connecting": "Yhdistetään…",
     "connect.status.waitingAccept": "Odotetaan, että toinen tietokone hyväksyy…",
-    "connect.status.connected": "Yhdistetty — ohjaat tätä tietokonetta.",
+    "connect.status.connected": "Yhdistetty",
     "connect.status.declined": "Toinen tietokone hylkäsi yhteyden.",
     "connect.status.couldNotConnect": "Yhteyttä ei voitu muodostaa.",
     "connect.err.noAgent": "Mikään tietokone ei jaa tätä koodia. Tarkista koodi ja varmista, että agentti on käynnissä.",
@@ -1397,7 +1411,8 @@
     "agent.file.receiving": "Vastaanotetaan {name} — {pct}%",
     "agent.file.sent": "Lähetetty {name}",
     "agent.file.received": "Vastaanotettu {name}",
-    "agent.file.failed": "Siirto epäonnistui: {name}"
+    "agent.file.failed": "Siirto epäonnistui: {name}",
+    "connect.toggle.input": "Syöte"
   },
   "no": {
     "doc.title.home": "Audiobus Remote",
@@ -1425,7 +1440,7 @@
     "share.notice1.outro": "Hvordan du bygger den frittstående .exe-filen er beskrevet i prosjektets README (agent/build.ps1).",
     "share.notice2.title": "Dette er et verktøy for fjernstyring.",
     "share.notice2.body": "Kjør bare agenten på en datamaskin du eier eller har tillatelse til å dele, og gi bare koden til noen du stoler på. Hvem som helst med den gjeldende koden (og din godkjenning) kan styre denne datamaskinen til du lukker agenten.",
-    "connect.nav.share": "Del denne datamaskinen",
+    "connect.nav.share": "Del PC",
     "connect.status.enterCode": "Skriv inn en øktkode",
     "connect.btn.grid": "Rutenett",
     "connect.btn.single": "Enkel",
@@ -1440,7 +1455,7 @@
     "connect.err.codeLen": "Koden må være nøyaktig 10 tegn.",
     "connect.status.connecting": "Kobler til…",
     "connect.status.waitingAccept": "Venter på at den andre datamaskinen godtar…",
-    "connect.status.connected": "Tilkoblet — du styrer denne datamaskinen.",
+    "connect.status.connected": "Tilkoblet",
     "connect.status.declined": "Den andre datamaskinen avslo tilkoblingen.",
     "connect.status.couldNotConnect": "Kunne ikke koble til.",
     "connect.err.noAgent": "Ingen datamaskin deler den koden. Sjekk koden og kontroller at agenten kjører.",
@@ -1489,7 +1504,8 @@
     "agent.file.receiving": "Mottar {name} — {pct}%",
     "agent.file.sent": "Sendt {name}",
     "agent.file.received": "Mottatt {name}",
-    "agent.file.failed": "Overføringen mislyktes: {name}"
+    "agent.file.failed": "Overføringen mislyktes: {name}",
+    "connect.toggle.input": "Input"
   },
   "tr": {
     "doc.title.home": "Audiobus Remote",
@@ -1517,7 +1533,7 @@
     "share.notice1.outro": "Bağımsız .exe dosyasının derlenmesi proje README dosyasında anlatılmaktadır (agent/build.ps1).",
     "share.notice2.title": "Bu bir uzaktan kontrol aracıdır.",
     "share.notice2.body": "Ajanı yalnızca sahip olduğunuz veya paylaşma yetkiniz olan bir bilgisayarda çalıştırın ve kodu yalnızca güvendiğiniz birine verin. Geçerli koda sahip olan (ve onayınızı alan) herkes, siz ajanı kapatana kadar bu bilgisayarı kontrol edebilir.",
-    "connect.nav.share": "Bu bilgisayarı paylaşın",
+    "connect.nav.share": "PC'yi paylaş",
     "connect.status.enterCode": "Bir oturum kodu girin",
     "connect.btn.grid": "Izgara",
     "connect.btn.single": "Tek",
@@ -1532,7 +1548,7 @@
     "connect.err.codeLen": "Kod tam olarak 10 karakter olmalıdır.",
     "connect.status.connecting": "Bağlanıyor…",
     "connect.status.waitingAccept": "Diğer bilgisayarın kabul etmesi bekleniyor…",
-    "connect.status.connected": "Bağlandı — bu bilgisayarı kontrol ediyorsunuz.",
+    "connect.status.connected": "Bağlandı",
     "connect.status.declined": "Diğer bilgisayar bağlantıyı reddetti.",
     "connect.status.couldNotConnect": "Bağlanılamadı.",
     "connect.err.noAgent": "Bu kodu paylaşan bir bilgisayar yok. Kodu kontrol edin ve ajanın çalıştığından emin olun.",
@@ -1581,7 +1597,8 @@
     "agent.file.receiving": "{name} alınıyor — {pct}%",
     "agent.file.sent": "{name} gönderildi",
     "agent.file.received": "{name} alındı",
-    "agent.file.failed": "Aktarım başarısız: {name}"
+    "agent.file.failed": "Aktarım başarısız: {name}",
+    "connect.toggle.input": "Giriş"
   },
   "el": {
     "doc.title.home": "Audiobus Remote",
@@ -1609,7 +1626,7 @@
     "share.notice1.outro": "Η δημιουργία του αυτόνομου αρχείου .exe περιγράφεται στο README του έργου (agent/build.ps1).",
     "share.notice2.title": "Αυτό είναι ένα εργαλείο απομακρυσμένου ελέγχου.",
     "share.notice2.body": "Εκτελείτε τον πράκτορα μόνο σε υπολογιστή που σας ανήκει ή που έχετε εξουσιοδότηση να μοιραστείτε, και δίνετε τον κωδικό μόνο σε κάποιον που εμπιστεύεστε. Οποιοσδήποτε έχει τον τρέχοντα κωδικό (και την έγκρισή σας) μπορεί να ελέγχει αυτόν τον υπολογιστή μέχρι να κλείσετε τον πράκτορα.",
-    "connect.nav.share": "Κοινή χρήση αυτού του υπολογιστή",
+    "connect.nav.share": "Κοινή χρήση PC",
     "connect.status.enterCode": "Εισαγάγετε έναν κωδικό συνεδρίας",
     "connect.btn.grid": "Πλέγμα",
     "connect.btn.single": "Μονή",
@@ -1624,7 +1641,7 @@
     "connect.err.codeLen": "Ο κωδικός πρέπει να έχει ακριβώς 10 χαρακτήρες.",
     "connect.status.connecting": "Σύνδεση…",
     "connect.status.waitingAccept": "Αναμονή αποδοχής από τον άλλο υπολογιστή…",
-    "connect.status.connected": "Συνδέθηκε — ελέγχετε αυτόν τον υπολογιστή.",
+    "connect.status.connected": "Συνδέθηκε",
     "connect.status.declined": "Ο άλλος υπολογιστής απέρριψε τη σύνδεση.",
     "connect.status.couldNotConnect": "Δεν ήταν δυνατή η σύνδεση.",
     "connect.err.noAgent": "Κανένας υπολογιστής δεν μοιράζεται αυτόν τον κωδικό. Ελέγξτε τον κωδικό και βεβαιωθείτε ότι ο πράκτορας εκτελείται.",
@@ -1673,7 +1690,8 @@
     "agent.file.receiving": "Λήψη {name} — {pct}%",
     "agent.file.sent": "Στάλθηκε {name}",
     "agent.file.received": "Λήφθηκε {name}",
-    "agent.file.failed": "Η μεταφορά απέτυχε: {name}"
+    "agent.file.failed": "Η μεταφορά απέτυχε: {name}",
+    "connect.toggle.input": "Είσοδος"
   },
   "ro": {
     "doc.title.home": "Audiobus Remote",
@@ -1701,7 +1719,7 @@
     "share.notice1.outro": "Compilarea fișierului .exe de sine stătător este descrisă în README-ul proiectului (agent/build.ps1).",
     "share.notice2.title": "Acesta este un instrument de control la distanță.",
     "share.notice2.body": "Rulați agentul doar pe un computer pe care îl dețineți sau pe care sunteți autorizat să îl partajați și dați codul doar cuiva în care aveți încredere. Oricine deține codul curent (și aprobarea dvs.) poate controla acest computer până când închideți agentul.",
-    "connect.nav.share": "Partajați acest computer",
+    "connect.nav.share": "Partajați PC",
     "connect.status.enterCode": "Introduceți un cod de sesiune",
     "connect.btn.grid": "Grilă",
     "connect.btn.single": "Unic",
@@ -1716,7 +1734,7 @@
     "connect.err.codeLen": "Codul trebuie să aibă exact 10 caractere.",
     "connect.status.connecting": "Se conectează…",
     "connect.status.waitingAccept": "Se așteaptă acceptarea de către celălalt computer…",
-    "connect.status.connected": "Conectat — controlați acest computer.",
+    "connect.status.connected": "Conectat",
     "connect.status.declined": "Celălalt computer a refuzat conexiunea.",
     "connect.status.couldNotConnect": "Conectarea nu a reușit.",
     "connect.err.noAgent": "Niciun computer nu partajează acel cod. Verificați codul și asigurați-vă că agentul rulează.",
@@ -1765,7 +1783,8 @@
     "agent.file.receiving": "Se primește {name} — {pct}%",
     "agent.file.sent": "S-a trimis {name}",
     "agent.file.received": "S-a primit {name}",
-    "agent.file.failed": "Transfer eșuat: {name}"
+    "agent.file.failed": "Transfer eșuat: {name}",
+    "connect.toggle.input": "Intrare"
   },
   "hu": {
     "doc.title.home": "Audiobus Remote",
@@ -1793,7 +1812,7 @@
     "share.notice1.outro": "Az önálló .exe fájl elkészítését a projekt README fájlja ismerteti (agent/build.ps1).",
     "share.notice2.title": "Ez egy távvezérlő eszköz.",
     "share.notice2.body": "Csak olyan számítógépen futtassa az ügynököt, amely az Öné, vagy amelynek megosztására jogosult, és csak olyan személynek adja meg a kódot, akiben megbízik. Bárki, akinél megvan az aktuális kód (és az Ön jóváhagyása), vezérelheti ezt a számítógépet, amíg be nem zárja az ügynököt.",
-    "connect.nav.share": "A számítógép megosztása",
+    "connect.nav.share": "Gép megosztása",
     "connect.status.enterCode": "Írjon be egy munkamenet-kódot",
     "connect.btn.grid": "Rács",
     "connect.btn.single": "Egyetlen",
@@ -1808,7 +1827,7 @@
     "connect.err.codeLen": "A kódnak pontosan 10 karakterből kell állnia.",
     "connect.status.connecting": "Csatlakozás…",
     "connect.status.waitingAccept": "Várakozás a másik számítógép elfogadására…",
-    "connect.status.connected": "Csatlakozva — Ön vezérli ezt a számítógépet.",
+    "connect.status.connected": "Csatlakozva",
     "connect.status.declined": "A másik számítógép elutasította a kapcsolatot.",
     "connect.status.couldNotConnect": "Nem sikerült csatlakozni.",
     "connect.err.noAgent": "Egyetlen számítógép sem osztja meg ezt a kódot. Ellenőrizze a kódot, és győződjön meg róla, hogy az ügynök fut.",
@@ -1857,7 +1876,8 @@
     "agent.file.receiving": "{name} fogadása — {pct}%",
     "agent.file.sent": "Elküldve: {name}",
     "agent.file.received": "Fogadva: {name}",
-    "agent.file.failed": "Az átvitel sikertelen: {name}"
+    "agent.file.failed": "Az átvitel sikertelen: {name}",
+    "connect.toggle.input": "Bevitel"
   },
   "id": {
     "doc.title.home": "Audiobus Remote",
@@ -1885,7 +1905,7 @@
     "share.notice1.outro": "Membangun file .exe mandiri dijelaskan di README proyek (agent/build.ps1).",
     "share.notice2.title": "Ini adalah alat kontrol jarak jauh.",
     "share.notice2.body": "Jalankan agen hanya di komputer yang Anda miliki atau yang Anda berwenang untuk membagikannya, dan berikan kode hanya kepada orang yang Anda percaya. Siapa pun yang memiliki kode saat ini (dan persetujuan Anda) dapat mengendalikan komputer ini sampai Anda menutup agen.",
-    "connect.nav.share": "Bagikan komputer ini",
+    "connect.nav.share": "Bagikan PC",
     "connect.status.enterCode": "Masukkan kode sesi",
     "connect.btn.grid": "Kisi",
     "connect.btn.single": "Tunggal",
@@ -1900,7 +1920,7 @@
     "connect.err.codeLen": "Kode harus terdiri dari tepat 10 karakter.",
     "connect.status.connecting": "Menghubungkan…",
     "connect.status.waitingAccept": "Menunggu komputer lain menerima…",
-    "connect.status.connected": "Terhubung — Anda sedang mengendalikan komputer ini.",
+    "connect.status.connected": "Terhubung",
     "connect.status.declined": "Komputer lain menolak koneksi.",
     "connect.status.couldNotConnect": "Tidak dapat terhubung.",
     "connect.err.noAgent": "Tidak ada komputer yang membagikan kode itu. Periksa kode dan pastikan agen sedang berjalan.",
@@ -1949,7 +1969,8 @@
     "agent.file.receiving": "Menerima {name} — {pct}%",
     "agent.file.sent": "Terkirim {name}",
     "agent.file.received": "Diterima {name}",
-    "agent.file.failed": "Transfer gagal: {name}"
+    "agent.file.failed": "Transfer gagal: {name}",
+    "connect.toggle.input": "Input"
   },
   "vi": {
     "doc.title.home": "Audiobus Remote",
@@ -1977,7 +1998,7 @@
     "share.notice1.outro": "Cách dựng tệp .exe độc lập được trình bày trong README của dự án (agent/build.ps1).",
     "share.notice2.title": "Đây là công cụ điều khiển từ xa.",
     "share.notice2.body": "Chỉ chạy agent trên máy tính bạn sở hữu hoặc được phép chia sẻ, và chỉ đưa mã cho người bạn tin tưởng. Bất kỳ ai có mã hiện tại (và sự phê duyệt của bạn) đều có thể điều khiển máy tính này cho đến khi bạn đóng agent.",
-    "connect.nav.share": "Chia sẻ máy tính này",
+    "connect.nav.share": "Chia sẻ PC",
     "connect.status.enterCode": "Nhập mã phiên",
     "connect.btn.grid": "Lưới",
     "connect.btn.single": "Đơn",
@@ -1992,7 +2013,7 @@
     "connect.err.codeLen": "Mã phải có đúng 10 ký tự.",
     "connect.status.connecting": "Đang kết nối…",
     "connect.status.waitingAccept": "Đang chờ máy tính kia chấp nhận…",
-    "connect.status.connected": "Đã kết nối — bạn đang điều khiển máy tính này.",
+    "connect.status.connected": "Đã kết nối",
     "connect.status.declined": "Máy tính kia đã từ chối kết nối.",
     "connect.status.couldNotConnect": "Không thể kết nối.",
     "connect.err.noAgent": "Không có máy tính nào đang chia sẻ mã đó. Kiểm tra lại mã và đảm bảo agent đang chạy.",
@@ -2041,7 +2062,8 @@
     "agent.file.receiving": "Đang nhận {name} — {pct}%",
     "agent.file.sent": "Đã gửi {name}",
     "agent.file.received": "Đã nhận {name}",
-    "agent.file.failed": "Truyền tệp thất bại: {name}"
+    "agent.file.failed": "Truyền tệp thất bại: {name}",
+    "connect.toggle.input": "Đầu vào"
   },
   "th": {
     "doc.title.home": "Audiobus Remote",
@@ -2069,7 +2091,7 @@
     "share.notice1.outro": "วิธีบิลด์ไฟล์ .exe แบบสแตนด์อโลนมีอธิบายไว้ใน README ของโปรเจกต์ (agent/build.ps1)",
     "share.notice2.title": "นี่คือเครื่องมือควบคุมระยะไกล",
     "share.notice2.body": "เรียกใช้เอเจนต์เฉพาะบนคอมพิวเตอร์ที่คุณเป็นเจ้าของหรือได้รับอนุญาตให้แชร์เท่านั้น และมอบรหัสให้เฉพาะคนที่คุณไว้ใจ ใครก็ตามที่มีรหัสปัจจุบัน (และได้รับการอนุมัติจากคุณ) สามารถควบคุมคอมพิวเตอร์เครื่องนี้ได้จนกว่าคุณจะปิดเอเจนต์",
-    "connect.nav.share": "แชร์คอมพิวเตอร์เครื่องนี้",
+    "connect.nav.share": "แชร์พีซี",
     "connect.status.enterCode": "ป้อนรหัสเซสชัน",
     "connect.btn.grid": "ตาราง",
     "connect.btn.single": "เดี่ยว",
@@ -2084,7 +2106,7 @@
     "connect.err.codeLen": "รหัสต้องมีความยาว 10 อักขระพอดี",
     "connect.status.connecting": "กำลังเชื่อมต่อ…",
     "connect.status.waitingAccept": "กำลังรอให้คอมพิวเตอร์อีกเครื่องยอมรับ…",
-    "connect.status.connected": "เชื่อมต่อแล้ว — คุณกำลังควบคุมคอมพิวเตอร์เครื่องนี้",
+    "connect.status.connected": "เชื่อมต่อแล้ว",
     "connect.status.declined": "คอมพิวเตอร์อีกเครื่องปฏิเสธการเชื่อมต่อ",
     "connect.status.couldNotConnect": "ไม่สามารถเชื่อมต่อได้",
     "connect.err.noAgent": "ไม่มีคอมพิวเตอร์เครื่องใดแชร์รหัสนั้น ตรวจสอบรหัสและตรวจดูให้แน่ใจว่าเอเจนต์กำลังทำงานอยู่",
@@ -2133,7 +2155,8 @@
     "agent.file.receiving": "กำลังรับ {name} — {pct}%",
     "agent.file.sent": "ส่ง {name} แล้ว",
     "agent.file.received": "รับ {name} แล้ว",
-    "agent.file.failed": "การถ่ายโอนล้มเหลว: {name}"
+    "agent.file.failed": "การถ่ายโอนล้มเหลว: {name}",
+    "connect.toggle.input": "อินพุต"
   },
   "zh": {
     "doc.title.home": "Audiobus Remote",
@@ -2161,7 +2184,7 @@
     "share.notice1.outro": "构建独立 .exe 的方法在项目 README（agent/build.ps1）中有说明。",
     "share.notice2.title": "这是一款远程控制工具。",
     "share.notice2.body": "仅在你拥有或获授权共享的电脑上运行代理程序，并且只把代码交给你信任的人。任何拥有当前代码（并得到你批准）的人，都可以控制这台电脑，直到你关闭代理程序。",
-    "connect.nav.share": "共享这台电脑",
+    "connect.nav.share": "共享电脑",
     "connect.status.enterCode": "输入会话代码",
     "connect.btn.grid": "网格",
     "connect.btn.single": "单屏",
@@ -2176,7 +2199,7 @@
     "connect.err.codeLen": "代码必须正好是 10 个字符。",
     "connect.status.connecting": "正在连接…",
     "connect.status.waitingAccept": "正在等待另一台电脑接受…",
-    "connect.status.connected": "已连接 — 你正在控制这台电脑。",
+    "connect.status.connected": "已连接",
     "connect.status.declined": "另一台电脑拒绝了连接。",
     "connect.status.couldNotConnect": "无法连接。",
     "connect.err.noAgent": "没有电脑在共享该代码。请检查代码并确保代理程序正在运行。",
@@ -2225,7 +2248,8 @@
     "agent.file.receiving": "正在接收 {name} — {pct}%",
     "agent.file.sent": "已发送 {name}",
     "agent.file.received": "已接收 {name}",
-    "agent.file.failed": "传输失败：{name}"
+    "agent.file.failed": "传输失败：{name}",
+    "connect.toggle.input": "输入"
   },
   "zh-tw": {
     "doc.title.home": "Audiobus Remote",
@@ -2253,7 +2277,7 @@
     "share.notice1.outro": "建置獨立 .exe 的方法在專案 README（agent/build.ps1）中有說明。",
     "share.notice2.title": "這是一款遠端控制工具。",
     "share.notice2.body": "僅在你擁有或獲授權共用的電腦上執行代理程式，並且只把代碼交給你信任的人。任何擁有目前代碼（並得到你核准）的人，都可以控制這台電腦，直到你關閉代理程式。",
-    "connect.nav.share": "共用這台電腦",
+    "connect.nav.share": "共用電腦",
     "connect.status.enterCode": "輸入工作階段代碼",
     "connect.btn.grid": "網格",
     "connect.btn.single": "單螢幕",
@@ -2268,7 +2292,7 @@
     "connect.err.codeLen": "代碼必須正好是 10 個字元。",
     "connect.status.connecting": "正在連線…",
     "connect.status.waitingAccept": "正在等待另一台電腦接受…",
-    "connect.status.connected": "已連線 — 你正在控制這台電腦。",
+    "connect.status.connected": "已連線",
     "connect.status.declined": "另一台電腦拒絕了連線。",
     "connect.status.couldNotConnect": "無法連線。",
     "connect.err.noAgent": "沒有電腦在共用該代碼。請檢查代碼並確認代理程式正在執行。",
@@ -2317,7 +2341,8 @@
     "agent.file.receiving": "正在接收 {name} — {pct}%",
     "agent.file.sent": "已傳送 {name}",
     "agent.file.received": "已接收 {name}",
-    "agent.file.failed": "傳輸失敗：{name}"
+    "agent.file.failed": "傳輸失敗：{name}",
+    "connect.toggle.input": "輸入"
   },
   "ja": {
     "doc.title.home": "Audiobus Remote",
@@ -2345,7 +2370,7 @@
     "share.notice1.outro": "スタンドアロンの .exe のビルド方法は、プロジェクトの README（agent/build.ps1）で説明されています。",
     "share.notice2.title": "これはリモート操作ツールです。",
     "share.notice2.body": "自分が所有しているか共有を許可されているコンピューターでのみエージェントを実行し、コードは信頼できる人にのみ渡してください。現在のコードを持つ人は（あなたの承認があれば）、エージェントを閉じるまでこのコンピューターを操作できます。",
-    "connect.nav.share": "このコンピューターを共有",
+    "connect.nav.share": "PCを共有",
     "connect.status.enterCode": "セッションコードを入力してください",
     "connect.btn.grid": "グリッド",
     "connect.btn.single": "単一",
@@ -2360,7 +2385,7 @@
     "connect.err.codeLen": "コードは正確に10文字である必要があります。",
     "connect.status.connecting": "接続中…",
     "connect.status.waitingAccept": "相手のコンピューターの承認を待っています…",
-    "connect.status.connected": "接続しました — このコンピューターを操作しています。",
+    "connect.status.connected": "接続しました",
     "connect.status.declined": "相手のコンピューターが接続を拒否しました。",
     "connect.status.couldNotConnect": "接続できませんでした。",
     "connect.err.noAgent": "そのコードを共有しているコンピューターがありません。コードを確認し、エージェントが実行されていることを確認してください。",
@@ -2409,7 +2434,8 @@
     "agent.file.receiving": "{name} を受信中 — {pct}%",
     "agent.file.sent": "{name} を送信しました",
     "agent.file.received": "{name} を受信しました",
-    "agent.file.failed": "転送に失敗しました：{name}"
+    "agent.file.failed": "転送に失敗しました：{name}",
+    "connect.toggle.input": "入力"
   },
   "ko": {
     "doc.title.home": "Audiobus Remote",
@@ -2437,7 +2463,7 @@
     "share.notice1.outro": "독립 실행형 .exe 빌드 방법은 프로젝트 README(agent/build.ps1)에 설명되어 있습니다.",
     "share.notice2.title": "이것은 원격 제어 도구입니다.",
     "share.notice2.body": "본인이 소유했거나 공유 권한이 있는 컴퓨터에서만 에이전트를 실행하고, 신뢰하는 사람에게만 코드를 알려주세요. 현재 코드를 가진 사람은 (본인의 승인과 함께) 에이전트를 닫기 전까지 이 컴퓨터를 제어할 수 있습니다.",
-    "connect.nav.share": "이 컴퓨터 공유",
+    "connect.nav.share": "PC 공유",
     "connect.status.enterCode": "세션 코드를 입력하세요",
     "connect.btn.grid": "그리드",
     "connect.btn.single": "단일",
@@ -2452,7 +2478,7 @@
     "connect.err.codeLen": "코드는 정확히 10자여야 합니다.",
     "connect.status.connecting": "연결 중…",
     "connect.status.waitingAccept": "상대 컴퓨터의 수락을 기다리는 중…",
-    "connect.status.connected": "연결됨 — 이 컴퓨터를 제어하고 있습니다.",
+    "connect.status.connected": "연결됨",
     "connect.status.declined": "상대 컴퓨터가 연결을 거부했습니다.",
     "connect.status.couldNotConnect": "연결할 수 없습니다.",
     "connect.err.noAgent": "그 코드를 공유하는 컴퓨터가 없습니다. 코드를 확인하고 에이전트가 실행 중인지 확인하세요.",
@@ -2501,7 +2527,8 @@
     "agent.file.receiving": "{name} 받는 중 — {pct}%",
     "agent.file.sent": "{name} 보냄",
     "agent.file.received": "{name} 받음",
-    "agent.file.failed": "전송 실패: {name}"
+    "agent.file.failed": "전송 실패: {name}",
+    "connect.toggle.input": "입력"
   },
   "ar": {
     "doc.title.home": "Audiobus Remote",
@@ -2529,7 +2556,7 @@
     "share.notice1.outro": "طريقة بناء ملف .exe المستقل موضّحة في ملف README الخاص بالمشروع (agent/build.ps1).",
     "share.notice2.title": "هذه أداة تحكّم عن بُعد.",
     "share.notice2.body": "شغّل الوكيل فقط على كمبيوتر تملكه أو مُصرَّح لك بمشاركته، ولا تعطِ الرمز إلا لشخص تثق به. يمكن لأي شخص يملك الرمز الحالي (مع موافقتك) التحكم في هذا الكمبيوتر حتى تغلق الوكيل.",
-    "connect.nav.share": "مشاركة هذا الكمبيوتر",
+    "connect.nav.share": "مشاركة الكمبيوتر",
     "connect.status.enterCode": "أدخل رمز جلسة",
     "connect.btn.grid": "شبكة",
     "connect.btn.single": "مفردة",
@@ -2544,7 +2571,7 @@
     "connect.err.codeLen": "يجب أن يتكوّن الرمز من 10 أحرف بالضبط.",
     "connect.status.connecting": "جارٍ الاتصال…",
     "connect.status.waitingAccept": "في انتظار قبول الكمبيوتر الآخر…",
-    "connect.status.connected": "متصل — أنت تتحكم في هذا الكمبيوتر.",
+    "connect.status.connected": "متصل",
     "connect.status.declined": "رفض الكمبيوتر الآخر الاتصال.",
     "connect.status.couldNotConnect": "تعذّر الاتصال.",
     "connect.err.noAgent": "لا يوجد كمبيوتر يشارك هذا الرمز. تحقق من الرمز وتأكد من أن الوكيل قيد التشغيل.",
@@ -2593,7 +2620,8 @@
     "agent.file.receiving": "جارٍ استقبال {name} — {pct}%",
     "agent.file.sent": "تم إرسال {name}",
     "agent.file.received": "تم استقبال {name}",
-    "agent.file.failed": "فشل النقل: {name}"
+    "agent.file.failed": "فشل النقل: {name}",
+    "connect.toggle.input": "الإدخال"
   },
   "he": {
     "doc.title.home": "Audiobus Remote",
@@ -2621,7 +2649,7 @@
     "share.notice1.outro": "בניית קובץ ה-.exe העצמאי מתוארת ב-README של הפרויקט (agent/build.ps1).",
     "share.notice2.title": "זהו כלי לשליטה מרחוק.",
     "share.notice2.body": "הפעל את הסוכן רק במחשב שבבעלותך או שיש לך הרשאה לשתף, ומסור את הקוד רק למי שאתה סומך עליו. כל מי שברשותו הקוד הנוכחי (ובאישורך) יכול לשלוט במחשב זה עד שתסגור את הסוכן.",
-    "connect.nav.share": "שיתוף מחשב זה",
+    "connect.nav.share": "שיתוף מחשב",
     "connect.status.enterCode": "הזן קוד הפעלה",
     "connect.btn.grid": "רשת",
     "connect.btn.single": "בודד",
@@ -2636,7 +2664,7 @@
     "connect.err.codeLen": "הקוד חייב להיות באורך של 10 תווים בדיוק.",
     "connect.status.connecting": "מתחבר…",
     "connect.status.waitingAccept": "ממתין שהמחשב השני יאשר…",
-    "connect.status.connected": "מחובר — אתה שולט במחשב זה.",
+    "connect.status.connected": "מחובר",
     "connect.status.declined": "המחשב השני דחה את החיבור.",
     "connect.status.couldNotConnect": "לא ניתן היה להתחבר.",
     "connect.err.noAgent": "אף מחשב אינו משתף קוד זה. בדוק את הקוד וודא שהסוכן פועל.",
@@ -2685,7 +2713,8 @@
     "agent.file.receiving": "מקבל את {name} — {pct}%",
     "agent.file.sent": "{name} נשלח",
     "agent.file.received": "{name} התקבל",
-    "agent.file.failed": "ההעברה נכשלה: {name}"
+    "agent.file.failed": "ההעברה נכשלה: {name}",
+    "connect.toggle.input": "קלט"
   },
   "fa": {
     "doc.title.home": "Audiobus Remote",
@@ -2713,7 +2742,7 @@
     "share.notice1.outro": "ساختن فایل .exe مستقل در README پروژه (agent/build.ps1) توضیح داده شده است.",
     "share.notice2.title": "این یک ابزار کنترل از راه دور است.",
     "share.notice2.body": "عامل را فقط روی رایانه‌ای اجرا کنید که مالک آن هستید یا اجازهٔ اشتراک‌گذاری‌اش را دارید، و کد را فقط به کسی بدهید که به او اعتماد دارید. هر کسی که کد فعلی را داشته باشد (و با تأیید شما) می‌تواند تا زمانی که عامل را نبسته‌اید این رایانه را کنترل کند.",
-    "connect.nav.share": "اشتراک‌گذاری این رایانه",
+    "connect.nav.share": "اشتراک‌گذاری رایانه",
     "connect.status.enterCode": "یک کد نشست وارد کنید",
     "connect.btn.grid": "شبکه‌ای",
     "connect.btn.single": "تکی",
@@ -2728,7 +2757,7 @@
     "connect.err.codeLen": "کد باید دقیقاً ۱۰ کاراکتر باشد.",
     "connect.status.connecting": "در حال اتصال…",
     "connect.status.waitingAccept": "در انتظار پذیرش رایانهٔ دیگر…",
-    "connect.status.connected": "متصل شد — شما در حال کنترل این رایانه هستید.",
+    "connect.status.connected": "متصل شد",
     "connect.status.declined": "رایانهٔ دیگر اتصال را رد کرد.",
     "connect.status.couldNotConnect": "اتصال ممکن نشد.",
     "connect.err.noAgent": "هیچ رایانه‌ای این کد را به اشتراک نمی‌گذارد. کد را بررسی کنید و مطمئن شوید عامل در حال اجراست.",
@@ -2777,7 +2806,8 @@
     "agent.file.receiving": "در حال دریافت {name} — {pct}%",
     "agent.file.sent": "{name} ارسال شد",
     "agent.file.received": "{name} دریافت شد",
-    "agent.file.failed": "انتقال ناموفق بود: {name}"
+    "agent.file.failed": "انتقال ناموفق بود: {name}",
+    "connect.toggle.input": "ورودی"
   },
   "hi": {
     "doc.title.home": "Audiobus Remote",
@@ -2805,7 +2835,7 @@
     "share.notice1.outro": "स्टैंडअलोन .exe बनाने की जानकारी प्रोजेक्ट README (agent/build.ps1) में दी गई है।",
     "share.notice2.title": "यह एक रिमोट-कंट्रोल टूल है।",
     "share.notice2.body": "एजेंट केवल उसी कंप्यूटर पर चलाएँ जिसके आप मालिक हैं या जिसे साझा करने की अनुमति आपके पास है, और कोड केवल उसी को दें जिस पर आप भरोसा करते हैं। जिसके पास मौजूदा कोड है वह (आपकी मंज़ूरी के साथ) तब तक इस कंप्यूटर को नियंत्रित कर सकता है जब तक आप एजेंट बंद नहीं कर देते।",
-    "connect.nav.share": "यह कंप्यूटर साझा करें",
+    "connect.nav.share": "पीसी साझा करें",
     "connect.status.enterCode": "सेशन कोड दर्ज करें",
     "connect.btn.grid": "ग्रिड",
     "connect.btn.single": "एकल",
@@ -2820,7 +2850,7 @@
     "connect.err.codeLen": "कोड ठीक 10 अक्षरों का होना चाहिए।",
     "connect.status.connecting": "कनेक्ट हो रहा है…",
     "connect.status.waitingAccept": "दूसरे कंप्यूटर के स्वीकार करने की प्रतीक्षा…",
-    "connect.status.connected": "कनेक्ट हो गया — आप इस कंप्यूटर को नियंत्रित कर रहे हैं।",
+    "connect.status.connected": "कनेक्ट हो गया",
     "connect.status.declined": "दूसरे कंप्यूटर ने कनेक्शन अस्वीकार कर दिया।",
     "connect.status.couldNotConnect": "कनेक्ट नहीं हो सका।",
     "connect.err.noAgent": "कोई भी कंप्यूटर वह कोड साझा नहीं कर रहा है। कोड जाँचें और सुनिश्चित करें कि एजेंट चल रहा है।",
@@ -2869,6 +2899,7 @@
     "agent.file.receiving": "{name} प्राप्त की जा रही है — {pct}%",
     "agent.file.sent": "{name} भेजी गई",
     "agent.file.received": "{name} प्राप्त हुई",
-    "agent.file.failed": "स्थानांतरण विफल: {name}"
+    "agent.file.failed": "स्थानांतरण विफल: {name}",
+    "connect.toggle.input": "इनपुट"
   }
 }
