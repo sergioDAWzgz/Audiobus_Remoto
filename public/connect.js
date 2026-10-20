@@ -104,10 +104,14 @@ function newVtok() {
 // viewer->host sync is Chromium/Safari only (host->viewer still works) — consistent with
 // the app already relying on Chromium-only Keyboard Lock.
 const CLIP_MAX_BYTES = 256 * 1024; // cap synced clipboard text; must match the agent
+const CLIP_IMG_MAX_BYTES = 16 * 1024 * 1024; // cap synced clipboard image; matches the agent
 let clipCaps = false; // the agent advertised clipboard support (caps.clip)
-let clipLast = null; // last clipboard text reconciled with the host (sent OR received)
-let clipReadBusy = false; // a readText() is in flight (avoid overlap)
-let clipReadAt = 0; // performance.now() of the last readText attempt (throttle)
+let clipLast = null; // last clipboard TEXT reconciled with the host (sent OR received)
+let clipLastImg = null; // hash of the last clipboard IMAGE reconciled (echo guard)
+let clipReadBusy = false; // a clipboard read is in flight (avoid overlap)
+let clipReadAt = 0; // performance.now() of the last read attempt (throttle)
+let clipImgSeq = 0; // local counter for outbound clipboard-image ids
+let clipImgRx = null; // in-flight incoming clipboard image: { id, parts, got }
 
 function clipBytes(s) {
   try {
@@ -117,22 +121,92 @@ function clipBytes(s) {
   }
 }
 
+// Fast sampled content hash (FNV-1a over up to ~4096 sampled bytes + length), for
+// echo-guarding clipboard images without re-sending our own writes.
+function hashBytes(u8) {
+  let h = 0x811c9dc5;
+  const step = Math.max(1, Math.floor(u8.length / 4096));
+  for (let i = 0; i < u8.length; i += step) {
+    h ^= u8[i];
+    h = Math.imul(h, 0x01000193);
+  }
+  return (h >>> 0) + ":" + u8.length;
+}
+
+// Send while pacing on the socket's buffered amount, so a big clipboard image can't bloat
+// the WS send buffer and starve the heartbeat ping (the agent paces via await ws.send).
+async function sendPaced(obj) {
+  let waited = 0;
+  while (ws && ws.readyState === 1 && ws.bufferedAmount > 1000000 && waited < 15000) {
+    await new Promise((r) => setTimeout(r, 20));
+    waited += 20;
+  }
+  send(obj);
+}
+
+async function sendClipImage(bytes) {
+  const id = "ci" + ++clipImgSeq;
+  await sendPaced({ type: "clip-img-begin", id, size: bytes.length });
+  for (let off = 0, n = 0; off < bytes.length; off += FILE_CHUNK_BYTES, n++) {
+    if (!inSession || !clipCaps) return;
+    await sendPaced({
+      type: "clip-img-chunk",
+      id,
+      n,
+      data: bytesToBase64(bytes.subarray(off, off + FILE_CHUNK_BYTES)),
+    });
+  }
+  send({ type: "clip-img-end", id });
+}
+
 async function syncClipboardUp() {
   if (!inSession || !clipCaps || clipReadBusy) return;
-  if (!navigator.clipboard || !navigator.clipboard.readText) return;
+  if (!navigator.clipboard) return;
   const now = performance.now();
-  if (now - clipReadAt < 400) return; // throttle: readText can fire on every click/focus
+  if (now - clipReadAt < 400) return; // throttle: fires on every click/focus
   clipReadAt = now;
   clipReadBusy = true;
   try {
-    const text = await navigator.clipboard.readText();
-    if (typeof text === "string" && text !== clipLast) {
-      clipLast = text; // echo-guard + don't re-send an over-cap value every time
-      if (clipBytes(text) <= CLIP_MAX_BYTES) send({ type: "clip", text });
+    if (navigator.clipboard.read) {
+      // Chromium/Safari: read() exposes images AND text.
+      const items = await navigator.clipboard.read();
+      for (const item of items) {
+        const imgType = item.types.find((t) => t.startsWith("image/"));
+        if (imgType) {
+          const blob = await item.getType(imgType);
+          if (blob.size > CLIP_IMG_MAX_BYTES) return; // too big; never materialize it
+          const bytes = new Uint8Array(await blob.arrayBuffer());
+          const h = hashBytes(bytes);
+          if (h !== clipLastImg) {
+            clipLastImg = h;
+            clipLast = null;
+            await sendClipImage(bytes);
+          }
+          return;
+        }
+      }
+      for (const item of items) {
+        if (item.types.includes("text/plain")) {
+          const text = await (await item.getType("text/plain")).text();
+          if (text !== clipLast) {
+            clipLast = text;
+            clipLastImg = null;
+            if (clipBytes(text) <= CLIP_MAX_BYTES) send({ type: "clip", text });
+          }
+          return;
+        }
+      }
+    } else if (navigator.clipboard.readText) {
+      // Firefox: text only (no read()/image support).
+      const text = await navigator.clipboard.readText();
+      if (text !== clipLast) {
+        clipLast = text;
+        clipLastImg = null;
+        if (clipBytes(text) <= CLIP_MAX_BYTES) send({ type: "clip", text });
+      }
     }
   } catch {
-    // No permission/focus yet: readText rejects quietly (no prompt without a gesture).
-    // A later pointerdown provides the gesture that shows Chrome's one-time prompt.
+    // No permission/focus yet: rejects quietly (a pointerdown gesture prompts in Chrome).
   } finally {
     clipReadBusy = false;
   }
@@ -140,8 +214,69 @@ async function syncClipboardUp() {
 
 function applyRemoteClipboard(text) {
   clipLast = text; // record first so our own up-sync won't bounce it back to the host
+  clipLastImg = null;
   if (navigator.clipboard && navigator.clipboard.writeText) {
     navigator.clipboard.writeText(text).catch(() => {});
+  }
+}
+
+// ---- incoming clipboard image (host -> viewer), chunked ----
+function onClipImgBegin(msg) {
+  if (!inSession || typeof msg.id !== "string") return;
+  if ((Number(msg.size) || 0) > CLIP_IMG_MAX_BYTES) return;
+  clipImgRx = { id: msg.id, parts: [], got: 0 };
+}
+function onClipImgChunk(msg) {
+  if (!clipImgRx || clipImgRx.id !== msg.id || typeof msg.data !== "string") return;
+  let bytes;
+  try {
+    bytes = base64ToBytes(msg.data);
+  } catch {
+    clipImgRx = null;
+    return;
+  }
+  if (clipImgRx.got + bytes.length > CLIP_IMG_MAX_BYTES) {
+    clipImgRx = null;
+    return;
+  }
+  clipImgRx.parts.push(bytes);
+  clipImgRx.got += bytes.length;
+}
+function onClipImgEnd(msg) {
+  if (!clipImgRx || clipImgRx.id !== msg.id) return;
+  const parts = clipImgRx.parts;
+  clipImgRx = null;
+  clipLast = null;
+  const blob = new Blob(parts, { type: "image/png" });
+  // Provisional echo-guard from the wire bytes (used if the reseed read below can't run).
+  blob.arrayBuffer().then((ab) => {
+    clipLastImg = hashBytes(new Uint8Array(ab));
+  });
+  if (navigator.clipboard && navigator.clipboard.write && window.ClipboardItem) {
+    navigator.clipboard
+      .write([new ClipboardItem({ "image/png": blob })])
+      .then(reseedClipImgGuard) // browsers RE-ENCODE images on write, so seed the guard
+      .catch(() => {}); //         from the bytes read() will actually return next
+  }
+}
+
+// After writing a received image, record the hash the browser will hand back on the next
+// read() — it re-encodes PNGs, so hashing the bytes we wrote would mis-detect our own write
+// as a local change and bounce it back to the host. Best-effort: if the read can't run
+// (no focus/permission), the provisional wire-byte hash stands (bounded to one echo).
+async function reseedClipImgGuard() {
+  try {
+    if (!navigator.clipboard.read) return;
+    const items = await navigator.clipboard.read();
+    for (const item of items) {
+      const t = item.types.find((x) => x.startsWith("image/"));
+      if (t) {
+        clipLastImg = hashBytes(new Uint8Array(await (await item.getType(t)).arrayBuffer()));
+        return;
+      }
+    }
+  } catch {
+    /* focus/permission unavailable; provisional hash stands */
   }
 }
 
@@ -673,6 +808,15 @@ async function onMessage(ev) {
       // The host clipboard changed; mirror it into ours (best-effort).
       if (typeof msg.text === "string") applyRemoteClipboard(msg.text);
       break;
+    case "clip-img-begin":
+      onClipImgBegin(msg);
+      break;
+    case "clip-img-chunk":
+      onClipImgChunk(msg);
+      break;
+    case "clip-img-end":
+      onClipImgEnd(msg);
+      break;
     case "file-begin":
       onFileBegin(msg);
       break;
@@ -1078,6 +1222,8 @@ function startSession(mons) {
   inSession = true;
   blockRects = []; // fresh session: clear any stale agent-window regions
   clipLast = null; // fresh session: no clipboard reconciled yet (caps arrives right after)
+  clipLastImg = null;
+  clipImgRx = null;
   fileCaps = false; // re-advertised by the agent's "caps" message right after "monitors"
   cancelAllTransfers();
   updateTransferUI();
@@ -1119,6 +1265,8 @@ function endSession(keepStatus) {
   videoEverPlayed = false;
   clipCaps = false; // the agent is gone; stop sampling the clipboard until a new session
   clipLast = null;
+  clipLastImg = null;
+  clipImgRx = null;
   fileCaps = false;
   cancelAllTransfers();
   updateTransferUI();

@@ -22,7 +22,10 @@ the whole time someone is connected, and closing this window ends the session.
 import argparse
 import asyncio
 import base64
+import ctypes
+from ctypes import wintypes
 import fractions
+import io
 import json
 import os
 import queue
@@ -42,7 +45,7 @@ try:
         from mss import MSS as ScreenGrabber  # mss >= 10
     except ImportError:
         from mss import mss as ScreenGrabber  # mss < 10
-    from PIL import Image
+    from PIL import Image, ImageGrab
     from pynput.mouse import Button, Controller as MouseController
     from pynput.keyboard import Controller as KeyboardController, Key, KeyCode
     import numpy as np
@@ -100,6 +103,7 @@ INTERRUPT_REASK_MS = 10000  # re-ask the Wait/Cut dialog this long after "Wait"
 # Clipboard sync + file transfer tuning.
 CLIP_POLL_MS = 500             # how often the GUI thread polls the OS clipboard for changes
 CLIP_MAX_BYTES = 256 * 1024    # cap on synced clipboard text (UTF-8); larger is skipped
+CLIP_IMG_MAX_BYTES = 16 * 1024 * 1024  # cap on a synced clipboard image (PNG); larger skipped
 FILE_CHUNK_BYTES = 128 * 1024  # raw bytes per file-chunk (base64 inflates ~33% on the wire)
 FILE_MAX_BYTES = 2 * 1024 * 1024 * 1024  # hard cap per received/sent file (2 GiB)
 FILE_WINDOW = 8                # unacked file-chunks allowed in flight (sender flow control)
@@ -857,6 +861,63 @@ def request_ice_servers(http_base, ctx, code):
 # Network client (runs its own asyncio loop on a background thread)
 # --------------------------------------------------------------------------- #
 
+def _clipboard_seq():
+    """The Windows clipboard sequence number (bumps on every clipboard change), or None.
+    Used to detect changes cheaply and to echo-guard our own writes (text and images)."""
+    try:
+        return int(ctypes.windll.user32.GetClipboardSequenceNumber())
+    except Exception:
+        return None
+
+
+def _encode_png(img):
+    """PIL image -> PNG bytes (RGBA/RGB preserved)."""
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    return buf.getvalue()
+
+
+def _set_clipboard_image(img):
+    """Put a PIL image on the Windows clipboard as CF_DIB (no pywin32 needed). Handles are
+    64-bit, so every alloc/lock call sets restype/argtypes to avoid pointer truncation."""
+    bmp = io.BytesIO()
+    img.convert("RGB").save(bmp, format="BMP")
+    data = bmp.getvalue()[14:]  # DIB = BMP minus the 14-byte BITMAPFILEHEADER
+    k = ctypes.windll.kernel32
+    u = ctypes.windll.user32
+    k.GlobalAlloc.restype = ctypes.c_void_p
+    k.GlobalAlloc.argtypes = [wintypes.UINT, ctypes.c_size_t]
+    k.GlobalLock.restype = ctypes.c_void_p
+    k.GlobalLock.argtypes = [ctypes.c_void_p]
+    k.GlobalUnlock.argtypes = [ctypes.c_void_p]
+    k.GlobalFree.argtypes = [ctypes.c_void_p]
+    u.SetClipboardData.restype = ctypes.c_void_p
+    u.SetClipboardData.argtypes = [wintypes.UINT, ctypes.c_void_p]
+    u.OpenClipboard.argtypes = [ctypes.c_void_p]
+    GMEM_MOVEABLE = 0x0002
+    CF_DIB = 8
+    h = k.GlobalAlloc(GMEM_MOVEABLE, len(data))
+    if not h:
+        return False
+    p = k.GlobalLock(h)
+    if not p:
+        k.GlobalFree(h)
+        return False
+    ctypes.memmove(p, data, len(data))
+    k.GlobalUnlock(h)
+    if not u.OpenClipboard(None):
+        k.GlobalFree(h)
+        return False
+    try:
+        u.EmptyClipboard()
+        if not u.SetClipboardData(CF_DIB, h):
+            k.GlobalFree(h)  # ownership stays with us on failure
+            return False
+        return True  # on success the system owns the handle; don't free it
+    finally:
+        u.CloseClipboard()
+
+
 def received_files_dir():
     """Where incoming files land: ~/Downloads/AudiobusRemote (created on demand)."""
     base = os.path.join(os.path.expanduser("~"), "Downloads", "AudiobusRemote")
@@ -943,6 +1004,8 @@ class NetClient:
         # Outgoing (host->viewer): id -> {"acked": int, "event": asyncio.Event, "cancel": bool}.
         self._recv_files = {}
         self._send_files = {}
+        self._clip_img_rx = None  # in-flight incoming clipboard image: {"id","buf"}
+        self._clip_img_lock = None  # serializes outgoing clipboard-image sends (net loop)
 
     def start(self):
         threading.Thread(target=self._thread_main, daemon=True).start()
@@ -998,6 +1061,40 @@ class NetClient:
         if self.ws and self.streaming:
             try:
                 await self.ws.send(json.dumps({"type": "clip", "text": text}))
+            except Exception:
+                pass
+
+    def send_clip_image(self, png_bytes):
+        """Push a host clipboard image to the viewer (called from the GUI thread)."""
+        if self.loop and not self.loop.is_closed():
+            try:
+                self.loop.call_soon_threadsafe(
+                    lambda: asyncio.create_task(self._send_clip_image(png_bytes)))
+            except Exception:
+                pass
+
+    async def _send_clip_image(self, png_bytes):
+        # Chunked so a big image can't monopolise the socket; each await ws.send applies
+        # backpressure, so the heartbeat ping still interleaves between chunks. The lock
+        # serializes concurrent image sends so their begin/chunk/end frames never interleave
+        # on the single socket (the viewer reassembles one image at a time).
+        lock = self._clip_img_lock
+        if lock is None:
+            return
+        async with lock:
+            if not self.ws or not self.streaming:
+                return
+            cid = "ci" + os.urandom(6).hex()
+            try:
+                await self._send_json({"type": "clip-img-begin", "id": cid,
+                                       "size": len(png_bytes)})
+                for n, off in enumerate(range(0, len(png_bytes), FILE_CHUNK_BYTES)):
+                    if not self.streaming:
+                        return
+                    chunk = png_bytes[off:off + FILE_CHUNK_BYTES]
+                    await self._send_json({"type": "clip-img-chunk", "id": cid, "n": n,
+                                           "data": base64.b64encode(chunk).decode("ascii")})
+                await self._send_json({"type": "clip-img-end", "id": cid})
             except Exception:
                 pass
 
@@ -1165,6 +1262,7 @@ class NetClient:
         for st in self._send_files.values():
             st["cancel"] = True
             st["event"].set()
+        self._clip_img_rx = None  # discard a partial incoming clipboard image
 
     def _thread_main(self):
         try:
@@ -1177,6 +1275,7 @@ class NetClient:
         self.stop_event = asyncio.Event()
         # Create the viewer-admission lock on THIS (net-thread) loop, like stop_event.
         self._viewer_lock = asyncio.Lock()
+        self._clip_img_lock = asyncio.Lock()  # one clipboard-image send in flight at a time
 
         # NOTE on coordinates: instantiating mss (ScreenGrabber) makes the PROCESS
         # per-monitor DPI-aware as a side effect, so from here on screen capture,
@@ -1516,9 +1615,31 @@ class NetClient:
             text = msg.get("text")
             if isinstance(text, str) and len(text.encode("utf-8")) <= CLIP_MAX_BYTES:
                 # Tk is not thread-safe: set the clipboard on the GUI thread, which also
-                # records it as the last-seen value so the host watcher doesn't echo it
-                # straight back to the viewer.
+                # records the new clipboard sequence number so the host watcher doesn't
+                # echo it straight back to the viewer.
                 self.app.post(lambda t=text: self.app.set_remote_clipboard(t))
+        elif mtype == "clip-img-begin":
+            if self.streaming:
+                self._clip_img_rx = {"id": msg.get("id"), "buf": bytearray()}
+        elif mtype == "clip-img-chunk":
+            rx = self._clip_img_rx
+            if (self.streaming and rx and rx["id"] == msg.get("id")
+                    and isinstance(msg.get("data"), str)):
+                try:
+                    raw = base64.b64decode(msg["data"])
+                except Exception:
+                    raw = b""
+                if len(rx["buf"]) + len(raw) <= CLIP_IMG_MAX_BYTES:
+                    rx["buf"].extend(raw)
+                else:
+                    self._clip_img_rx = None  # oversized; drop the transfer
+        elif mtype == "clip-img-end":
+            rx = self._clip_img_rx
+            if self.streaming and rx and rx["id"] == msg.get("id"):
+                self._clip_img_rx = None
+                png = bytes(rx["buf"])
+                if png:
+                    self.app.post(lambda p=png: self.app.set_remote_clipboard_image(p))
         elif mtype == "file-begin":
             # Viewer is sending us a file. Same gate as input: approved + streaming.
             if self.streaming:
@@ -2334,9 +2455,9 @@ class App:
         #                              (see _click_on_agent — a click on another window that
         #                              covers us is allowed through).
         self._agent_foreground = False  # an agent window has OS focus -> drop injected keys
-        self._clip_last = None        # last clipboard text reconciled with the viewer (sent
-        #                               OR received); echo-guards the bidirectional sync. None
-        #                               means "resync baseline on next connected poll".
+        self._clip_seq = None         # last OS clipboard sequence number we reconciled;
+        #                               a change means the local clipboard changed, and we
+        #                               set it to our own writes so they don't echo back.
         self._clip_after = None       # after() id for the clipboard poll loop
 
         self.root = tk.Tk()
@@ -3040,42 +3161,71 @@ class App:
             self.root.after(1500, lambda: self.copy_btn.set_text(tr("agent.btn.copy")))
 
     def set_remote_clipboard(self, text):
-        """Apply a clipboard value received from the viewer onto this machine's clipboard
-        (GUI thread). Record it as the last reconciled value FIRST so the poll loop sees
-        no change and doesn't bounce it straight back to the viewer."""
-        self._clip_last = text
+        """Apply clipboard TEXT received from the viewer onto this machine's clipboard
+        (GUI thread), then record the new clipboard sequence number so the poll loop sees
+        no change and doesn't bounce it back to the viewer."""
         try:
             self.root.clipboard_clear()
             if text:
                 self.root.clipboard_append(text)
         except Exception:
             pass
+        self._clip_seq = _clipboard_seq()
+
+    def set_remote_clipboard_image(self, png_bytes):
+        """Apply a clipboard IMAGE received from the viewer (GUI thread) via CF_DIB, then
+        record the new sequence number so our own write doesn't echo back."""
+        try:
+            img = Image.open(io.BytesIO(png_bytes))
+            img.load()
+            _set_clipboard_image(img)
+        except Exception:
+            pass
+        self._clip_seq = _clipboard_seq()
 
     def _clip_tick(self):
-        """Poll the OS clipboard on the GUI thread and push local changes to the viewer.
-        Bidirectional sync of changes only: on (re)connect we take the current clipboard as
-        the baseline without sending it, so nothing pre-existing is leaked; thereafter any
-        genuine local change propagates. Echo is guarded by _clip_last, which both this loop
-        and set_remote_clipboard() keep current. Text only — a non-text/empty clipboard
-        (TclError) is left untouched."""
+        """Watch the OS clipboard on the GUI thread and push local changes to the viewer.
+        We gate on the clipboard sequence number (cheap) and only inspect the contents when
+        it changes — which also avoids re-grabbing a large image every tick. On (re)connect
+        we take the current sequence as the baseline WITHOUT sending, so nothing pre-existing
+        is leaked; our own writes bump _clip_seq in set_remote_clipboard*, echo-guarding the
+        loop for both text and images."""
         try:
             if not self._connected or not self.client:
-                self._clip_last = None  # drop the baseline; re-sync on the next session
+                self._clip_seq = None  # drop the baseline; re-sync on the next session
             else:
-                cur = self.root.clipboard_get()  # TclError if empty or non-text (e.g. image)
-                if cur != self._clip_last:
-                    if self._clip_last is None:
-                        self._clip_last = cur   # first poll of a session: baseline, no send
-                    elif len(cur.encode("utf-8")) <= CLIP_MAX_BYTES:
-                        self._clip_last = cur
-                        self.client.send_clip(cur)
-                    else:
-                        self._clip_last = cur   # too large to sync; don't retry every tick
-        except tk.TclError:
-            pass
+                seq = _clipboard_seq()
+                if seq != self._clip_seq:
+                    first = self._clip_seq is None
+                    self._clip_seq = seq
+                    if not first:  # first poll of a session is just the baseline
+                        self._reconcile_clipboard()
         except Exception:
             pass
         self._clip_after = self.root.after(CLIP_POLL_MS, self._clip_tick)
+
+    def _reconcile_clipboard(self):
+        """The clipboard changed locally — send its text, or else its image, to the viewer."""
+        text = None
+        try:
+            text = self.root.clipboard_get()  # TclError if empty or non-text (e.g. an image)
+        except Exception:
+            text = None
+        if isinstance(text, str) and text != "":
+            if len(text.encode("utf-8")) <= CLIP_MAX_BYTES:
+                self.client.send_clip(text)
+            return
+        try:
+            img = ImageGrab.grabclipboard()  # PIL image, a list of file paths, or None
+        except Exception:
+            img = None
+        if isinstance(img, Image.Image):
+            try:
+                png = _encode_png(img)
+            except Exception:
+                png = None
+            if png and len(png) <= CLIP_IMG_MAX_BYTES:
+                self.client.send_clip_image(png)
 
     def send_file_click(self):
         """Host->viewer: pick a local file and stream it to the connected viewer."""
