@@ -26,6 +26,11 @@ const fsBar = $("fsBar");
 const fsExitBtn = $("fsExitBtn");
 const fsDisconnectBtn = $("fsDisconnectBtn");
 const fsHint = $("fsHint");
+const sendFileBtn = $("sendFileBtn");
+const fsSendFileBtn = $("fsSendFileBtn");
+const fileInput = $("fileInput");
+const dropHint = $("dropHint");
+const transfersEl = $("transfers");
 const barActions = document.querySelector(".bar-actions");
 const kbLabel = document.querySelector(".bar-actions .toggle");
 const topBar = document.querySelector(".bar");
@@ -87,6 +92,371 @@ function newVtok() {
     /* fall through */
   }
   return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+}
+
+// ---- Clipboard sync (bidirectional, best-effort) ----
+// The agent streams its clipboard changes to us (we writeText them); we send ours to the
+// agent. Browsers give NO clipboard-change event and readText() needs focus + the
+// clipboard-read permission, so we sample the local clipboard when the remote view regains
+// focus/visibility and on pointer interaction (a user gesture, which lets Chrome show the
+// one-time permission prompt). clipboard-write is granted by default to focused secure
+// contexts, so inbound host->viewer works without a prompt. Firefox has no readText(), so
+// viewer->host sync is Chromium/Safari only (host->viewer still works) — consistent with
+// the app already relying on Chromium-only Keyboard Lock.
+const CLIP_MAX_BYTES = 256 * 1024; // cap synced clipboard text; must match the agent
+let clipCaps = false; // the agent advertised clipboard support (caps.clip)
+let clipLast = null; // last clipboard text reconciled with the host (sent OR received)
+let clipReadBusy = false; // a readText() is in flight (avoid overlap)
+let clipReadAt = 0; // performance.now() of the last readText attempt (throttle)
+
+function clipBytes(s) {
+  try {
+    return new TextEncoder().encode(s).length;
+  } catch {
+    return s.length;
+  }
+}
+
+async function syncClipboardUp() {
+  if (!inSession || !clipCaps || clipReadBusy) return;
+  if (!navigator.clipboard || !navigator.clipboard.readText) return;
+  const now = performance.now();
+  if (now - clipReadAt < 400) return; // throttle: readText can fire on every click/focus
+  clipReadAt = now;
+  clipReadBusy = true;
+  try {
+    const text = await navigator.clipboard.readText();
+    if (typeof text === "string" && text !== clipLast) {
+      clipLast = text; // echo-guard + don't re-send an over-cap value every time
+      if (clipBytes(text) <= CLIP_MAX_BYTES) send({ type: "clip", text });
+    }
+  } catch {
+    // No permission/focus yet: readText rejects quietly (no prompt without a gesture).
+    // A later pointerdown provides the gesture that shows Chrome's one-time prompt.
+  } finally {
+    clipReadBusy = false;
+  }
+}
+
+function applyRemoteClipboard(text) {
+  clipLast = text; // record first so our own up-sync won't bounce it back to the host
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(text).catch(() => {});
+  }
+}
+
+function onClipFocus() {
+  syncClipboardUp();
+}
+function onClipVisible() {
+  if (document.visibilityState === "visible") syncClipboardUp();
+}
+function onClipPointerDown() {
+  syncClipboardUp();
+}
+
+// ---- File transfer (both directions, base64 chunks over the relay) ----
+// Must mirror the agent's constants. Files are chunked and windowed (at most FILE_WINDOW
+// chunks unacked) so a slow peer can't make us flood the relay and starve the heartbeat.
+const FILE_CHUNK_BYTES = 128 * 1024;
+const FILE_MAX_BYTES = 2 * 1024 * 1024 * 1024;
+const FILE_WINDOW = 8;
+let fileCaps = false; // the agent advertised file-transfer support (caps.file)
+let xferSeq = 0; // local counter for unique upload ids
+const uploads = new Map(); // id -> { name, size, sent, n, acked, cancel, wake, done, failed, dir }
+const downloads = new Map(); // id -> { name, size, got, parts, mime, done, failed, dir }
+// Uploads run ONE AT A TIME through this queue. Each upload's window already bounds its
+// own in-flight chunks; serializing keeps the GLOBAL in-flight bytes bounded too, so a
+// multi-file drop can't burst the WebSocket send buffer and starve the heartbeat ping.
+const uploadQueue = [];
+let uploadRunning = false;
+
+function bytesToBase64(bytes) {
+  let bin = "";
+  const CH = 0x8000; // chunk the String.fromCharCode spread to dodge arg-count limits
+  for (let i = 0; i < bytes.length; i += CH) {
+    bin += String.fromCharCode.apply(null, bytes.subarray(i, i + CH));
+  }
+  return btoa(bin);
+}
+function base64ToBytes(b64) {
+  const bin = atob(b64);
+  const out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+  return out;
+}
+
+function xferPct(st) {
+  const total = st.size || 0;
+  const cur = st.dir === "up" ? st.sent : st.got;
+  if (!total) return st.done ? 100 : 0;
+  return Math.min(100, Math.floor((cur / total) * 100));
+}
+
+function renderTransfers() {
+  if (!transfersEl) return;
+  const items = [];
+  uploads.forEach((st, id) => items.push([id, st]));
+  downloads.forEach((st, id) => items.push([id, st]));
+  if (!items.length) {
+    transfersEl.hidden = true;
+    transfersEl.innerHTML = "";
+    return;
+  }
+  transfersEl.hidden = false;
+  transfersEl.innerHTML = "";
+  for (const [, st] of items) {
+    const pct = xferPct(st);
+    const row = document.createElement("div");
+    row.className = "xfer" + (st.failed ? " failed" : st.done ? " done" : "");
+    row.innerHTML =
+      '<div class="xfer-top"><span class="xfer-name"></span>' +
+      '<span class="xfer-pct"></span></div>' +
+      '<div class="xfer-bar"><div class="xfer-fill"></div></div>';
+    row.querySelector(".xfer-name").textContent =
+      (st.dir === "up" ? "↑ " : "↓ ") + st.name; // textContent: no filename XSS
+    row.querySelector(".xfer-pct").textContent = st.failed
+      ? t("connect.file.failed")
+      : pct + "%";
+    row.querySelector(".xfer-fill").style.width = pct + "%";
+    transfersEl.appendChild(row);
+  }
+}
+
+function finishTransfer(id, map, failed) {
+  const st = map.get(id);
+  if (!st) return;
+  st.done = true;
+  st.failed = !!failed;
+  renderTransfers();
+  // Let the finished row linger briefly, then drop it.
+  setTimeout(() => {
+    map.delete(id);
+    renderTransfers();
+  }, 4000);
+}
+
+function enqueueUpload(file) {
+  if (!inSession || !fileCaps || !file) return;
+  uploadQueue.push(file);
+  pumpUploads();
+}
+
+async function pumpUploads() {
+  if (uploadRunning) return;
+  uploadRunning = true;
+  try {
+    while (uploadQueue.length) {
+      if (!inSession || !fileCaps) {
+        uploadQueue.length = 0;
+        break;
+      }
+      await uploadFile(uploadQueue.shift());
+    }
+  } finally {
+    uploadRunning = false;
+  }
+}
+
+// viewer -> host: stream a dropped/picked File to the agent.
+async function uploadFile(file) {
+  if (!inSession || !fileCaps || !file) return;
+  const id = "v" + ++xferSeq + "-" + Math.random().toString(36).slice(2);
+  const st = {
+    name: file.name || "file",
+    size: file.size,
+    sent: 0,
+    n: 0,
+    acked: -1,
+    cancel: false,
+    wake: null,
+    done: false,
+    failed: false,
+    dir: "up",
+  };
+  uploads.set(id, st);
+  renderTransfers();
+  if (file.size > FILE_MAX_BYTES) {
+    finishTransfer(id, uploads, true);
+    return;
+  }
+  send({
+    type: "file-begin",
+    id,
+    name: st.name,
+    size: file.size,
+    mime: file.type || "",
+  });
+  try {
+    let offset = 0;
+    while (offset < file.size && !st.cancel) {
+      // Flow control: wait while FILE_WINDOW chunks are still unacked.
+      while (!st.cancel && st.n - st.acked > FILE_WINDOW) {
+        await new Promise((res) => {
+          st.wake = res;
+        });
+      }
+      if (st.cancel) break;
+      if (!ws || ws.readyState !== 1) {
+        st.cancel = true;
+        break;
+      }
+      const slice = file.slice(offset, offset + FILE_CHUNK_BYTES);
+      const buf = new Uint8Array(await slice.arrayBuffer());
+      if (st.cancel) break;
+      send({ type: "file-chunk", id, n: st.n, data: bytesToBase64(buf) });
+      offset += buf.length;
+      st.sent = offset;
+      st.n += 1;
+      renderTransfers();
+    }
+    if (st.cancel) {
+      send({ type: "file-cancel", id });
+      finishTransfer(id, uploads, true);
+    } else {
+      send({ type: "file-end", id });
+      finishTransfer(id, uploads, false);
+    }
+  } catch {
+    st.cancel = true;
+    send({ type: "file-cancel", id });
+    finishTransfer(id, uploads, true);
+  }
+}
+
+// host -> viewer: accept an incoming file and save it when complete.
+function onFileBegin(msg) {
+  if (!inSession || typeof msg.id !== "string" || downloads.has(msg.id)) return;
+  const size = Number(msg.size) || 0;
+  if (size > FILE_MAX_BYTES) {
+    send({ type: "file-cancel", id: msg.id });
+    return;
+  }
+  downloads.set(msg.id, {
+    name: (msg.name || "file").toString().slice(0, 200),
+    size,
+    got: 0,
+    parts: [],
+    mime: typeof msg.mime === "string" ? msg.mime : "",
+    done: false,
+    failed: false,
+    dir: "down",
+  });
+  renderTransfers();
+}
+
+function onFileChunk(msg) {
+  const dl = downloads.get(msg.id);
+  if (!dl || typeof msg.data !== "string") return;
+  let bytes;
+  try {
+    bytes = base64ToBytes(msg.data);
+  } catch {
+    send({ type: "file-cancel", id: msg.id });
+    finishTransfer(msg.id, downloads, true);
+    return;
+  }
+  dl.parts.push(bytes);
+  dl.got += bytes.length;
+  send({ type: "file-ack", id: msg.id, n: msg.n });
+  renderTransfers();
+}
+
+function onFileEnd(msg) {
+  const dl = downloads.get(msg.id);
+  if (!dl) return;
+  const blob = new Blob(dl.parts, dl.mime ? { type: dl.mime } : undefined);
+  dl.parts = []; // release the chunk buffers; the Blob owns the data now
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = dl.name || "file";
+  // In fullscreen only the #stage subtree renders, so anchor the click there.
+  (document.fullscreenElement || document.body).appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 15000);
+  finishTransfer(msg.id, downloads, false);
+}
+
+function onFileCancel(msg) {
+  const up = uploads.get(msg.id);
+  if (up) {
+    up.cancel = true;
+    if (up.wake) {
+      const w = up.wake;
+      up.wake = null;
+      w();
+    }
+    finishTransfer(msg.id, uploads, true);
+  }
+  if (downloads.has(msg.id)) finishTransfer(msg.id, downloads, true);
+}
+
+function onFileAck(msg) {
+  const up = uploads.get(msg.id);
+  if (!up) return;
+  up.acked = Math.max(up.acked, Number(msg.n) || 0);
+  if (up.wake) {
+    const w = up.wake;
+    up.wake = null;
+    w(); // free the sender if it was waiting on the window
+  }
+}
+
+function cancelAllTransfers() {
+  uploadQueue.length = 0; // drop anything still waiting to start
+  uploads.forEach((st) => {
+    st.cancel = true;
+    if (st.wake) {
+      const w = st.wake;
+      st.wake = null;
+      w();
+    }
+  });
+  uploads.clear();
+  downloads.clear();
+  if (transfersEl) {
+    transfersEl.hidden = true;
+    transfersEl.innerHTML = "";
+  }
+}
+
+// Drag-and-drop onto the stage, plus the toolbar button / hidden file input.
+let dragDepth = 0; // dragenter/leave fire per child; count to toggle the hint once
+function onStageDragEnter(e) {
+  if (!inSession || !fileCaps || modalOpen) return;
+  if (!e.dataTransfer || !Array.from(e.dataTransfer.types || []).includes("Files")) return;
+  e.preventDefault();
+  dragDepth += 1;
+  if (dropHint) dropHint.hidden = false;
+}
+function onStageDragOver(e) {
+  if (!inSession || !fileCaps || modalOpen) return;
+  if (!e.dataTransfer || !Array.from(e.dataTransfer.types || []).includes("Files")) return;
+  e.preventDefault(); // required so the "drop" event fires
+  e.dataTransfer.dropEffect = "copy";
+}
+function onStageDragLeave() {
+  dragDepth = Math.max(0, dragDepth - 1);
+  if (dragDepth === 0 && dropHint) dropHint.hidden = true;
+}
+function onStageDrop(e) {
+  dragDepth = 0;
+  if (dropHint) dropHint.hidden = true;
+  if (!inSession || !fileCaps || modalOpen) return;
+  if (!e.dataTransfer) return;
+  e.preventDefault();
+  const files = Array.from(e.dataTransfer.files || []);
+  for (const f of files) enqueueUpload(f);
+}
+function onSendFileClick() {
+  if (fileInput) fileInput.click();
+}
+function onFileInputChange() {
+  const files = Array.from(fileInput.files || []);
+  for (const f of files) enqueueUpload(f);
+  fileInput.value = ""; // allow re-picking the same file
 }
 
 function setStatus(text, kind) {
@@ -293,7 +663,38 @@ async function onMessage(ev) {
       // are ignored by the agent, so show a "blocked" cursor over them.
       blockRects = Array.isArray(msg.rects) ? msg.rects : [];
       break;
+    case "caps":
+      // The agent advertised its optional capabilities (clipboard / file transfer).
+      clipCaps = !!msg.clip;
+      fileCaps = !!msg.file;
+      updateTransferUI();
+      break;
+    case "clip":
+      // The host clipboard changed; mirror it into ours (best-effort).
+      if (typeof msg.text === "string") applyRemoteClipboard(msg.text);
+      break;
+    case "file-begin":
+      onFileBegin(msg);
+      break;
+    case "file-chunk":
+      onFileChunk(msg);
+      break;
+    case "file-end":
+      onFileEnd(msg);
+      break;
+    case "file-cancel":
+      onFileCancel(msg);
+      break;
+    case "file-ack":
+      onFileAck(msg);
+      break;
   }
+}
+
+function updateTransferUI() {
+  const show = !(inSession && fileCaps);
+  if (sendFileBtn) sendFileBtn.hidden = show;
+  if (fsSendFileBtn) fsSendFileBtn.hidden = show;
 }
 
 // Agent-window regions where input is blocked (per monitor), for the cursor hint.
@@ -676,6 +1077,10 @@ function startSession(mons) {
   monitors = mons.map((m) => ({ i: m.i, w: m.w, h: m.h }));
   inSession = true;
   blockRects = []; // fresh session: clear any stale agent-window regions
+  clipLast = null; // fresh session: no clipboard reconciled yet (caps arrives right after)
+  fileCaps = false; // re-advertised by the agent's "caps" message right after "monitors"
+  cancelAllTransfers();
+  updateTransferUI();
 
   buildScreens();
 
@@ -712,6 +1117,11 @@ function endSession(keepStatus) {
   agentDown = false;
   mediaDown = false;
   videoEverPlayed = false;
+  clipCaps = false; // the agent is gone; stop sampling the clipboard until a new session
+  clipLast = null;
+  fileCaps = false;
+  cancelAllTransfers();
+  updateTransferUI();
   stopHeartbeat();
   stopReconnecting();
   if (dialogTimer) {
@@ -1109,6 +1519,18 @@ function bindWindowListeners() {
   window.addEventListener("mouseup", onWindowMouseUp);
   window.addEventListener("keydown", onKeyDown, true);
   window.addEventListener("keyup", onKeyUp, true);
+  // Clipboard up-sync triggers: focus/visibility (silent once permission is granted) and
+  // pointerdown (a user gesture that lets Chrome show the one-time clipboard-read prompt).
+  window.addEventListener("focus", onClipFocus);
+  document.addEventListener("visibilitychange", onClipVisible);
+  window.addEventListener("pointerdown", onClipPointerDown, true);
+  // File drag-and-drop onto the screen stage.
+  if (stageEl) {
+    stageEl.addEventListener("dragenter", onStageDragEnter);
+    stageEl.addEventListener("dragover", onStageDragOver);
+    stageEl.addEventListener("dragleave", onStageDragLeave);
+    stageEl.addEventListener("drop", onStageDrop);
+  }
 }
 
 function unbindWindowListeners() {
@@ -1117,6 +1539,17 @@ function unbindWindowListeners() {
   window.removeEventListener("mouseup", onWindowMouseUp);
   window.removeEventListener("keydown", onKeyDown, true);
   window.removeEventListener("keyup", onKeyUp, true);
+  window.removeEventListener("focus", onClipFocus);
+  document.removeEventListener("visibilitychange", onClipVisible);
+  window.removeEventListener("pointerdown", onClipPointerDown, true);
+  if (stageEl) {
+    stageEl.removeEventListener("dragenter", onStageDragEnter);
+    stageEl.removeEventListener("dragover", onStageDragOver);
+    stageEl.removeEventListener("dragleave", onStageDragLeave);
+    stageEl.removeEventListener("drop", onStageDrop);
+  }
+  dragDepth = 0;
+  if (dropHint) dropHint.hidden = true;
 }
 
 // ---------------- Controls ----------------
@@ -1203,6 +1636,18 @@ async function requestDisconnect() {
 }
 disconnectBtn.addEventListener("click", requestDisconnect);
 fsDisconnectBtn.addEventListener("click", requestDisconnect);
+
+if (sendFileBtn) sendFileBtn.addEventListener("click", onSendFileClick);
+if (fsSendFileBtn) fsSendFileBtn.addEventListener("click", onSendFileClick);
+if (fileInput) fileInput.addEventListener("change", onFileInputChange);
+
+// Global drag guard (always on): stop the browser from navigating away — which would
+// destroy a live session — if a file is dropped anywhere outside the stage drop zone
+// (e.g. on the top bar). The stage's own drop handler still performs the upload; drops
+// elsewhere are simply swallowed. preventDefault at window level still cancels the
+// default open/navigate even though the stage handler runs first on an in-stage drop.
+window.addEventListener("dragover", (e) => e.preventDefault());
+window.addEventListener("drop", (e) => e.preventDefault());
 
 fsBtn.addEventListener("click", () => {
   if (stageEl.requestFullscreen) stageEl.requestFullscreen();

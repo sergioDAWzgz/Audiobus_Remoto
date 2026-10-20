@@ -34,6 +34,9 @@
     "connect.btn.exitFullscreen": "Exit fullscreen",
     "connect.fsHint.show": "Show controls",
     "connect.btn.disconnect": "Disconnect",
+    "connect.btn.sendFile": "Send file",
+    "connect.file.dropHere": "Drop files to send them to the remote computer",
+    "connect.file.failed": "Failed",
     "connect.card.title": "Connect to a computer",
     "connect.card.desc": "Type the 10-character code shown in the Audiobus agent on the computer you want to control.",
     "connect.btn.connect": "Connect",
@@ -70,6 +73,13 @@
     "agent.banner.controlling": "●  Someone is controlling this computer",
     "agent.banner.viewerInterrupted": "●  Viewer connection interrupted…",
     "agent.btn.stop": "Stop session",
+    "agent.btn.sendFile": "Send file",
+    "agent.file.pickTitle": "Choose a file to send",
+    "agent.file.sending": "Sending {name} — {pct}%",
+    "agent.file.receiving": "Receiving {name} — {pct}%",
+    "agent.file.sent": "Sent {name}",
+    "agent.file.received": "Received {name}",
+    "agent.file.failed": "Transfer failed: {name}",
     "agent.status.asking": "A viewer is asking to connect…",
     "agent.status.connected": "Connected.",
     "agent.status.viewerInterrupted": "The viewer's connection was interrupted. Waiting for it to come back…",
@@ -181,7 +191,17 @@
     "theme.label": "Tema",
     "theme.auto": "Automático",
     "theme.light": "Claro",
-    "theme.dark": "Oscuro"
+    "theme.dark": "Oscuro",
+    "connect.btn.sendFile": "Enviar archivo",
+    "connect.file.dropHere": "Suelta archivos para enviarlos al ordenador remoto",
+    "connect.file.failed": "Fallido",
+    "agent.btn.sendFile": "Enviar archivo",
+    "agent.file.pickTitle": "Elige un archivo para enviar",
+    "agent.file.sending": "Enviando {name} — {pct}%",
+    "agent.file.receiving": "Recibiendo {name} — {pct}%",
+    "agent.file.sent": "Enviado {name}",
+    "agent.file.received": "Recibido {name}",
+    "agent.file.failed": "Transferencia fallida: {name}"
   },
   "fr": {
     "doc.title.home": "Audiobus Remote",
@@ -263,7 +283,17 @@
     "theme.label": "Thème",
     "theme.auto": "Auto",
     "theme.light": "Clair",
-    "theme.dark": "Sombre"
+    "theme.dark": "Sombre",
+    "connect.btn.sendFile": "Envoyer un fichier",
+    "connect.file.dropHere": "Déposez des fichiers pour les envoyer à l'ordinateur distant",
+    "connect.file.failed": "Échec",
+    "agent.btn.sendFile": "Envoyer un fichier",
+    "agent.file.pickTitle": "Choisir un fichier à envoyer",
+    "agent.file.sending": "Envoi de {name} — {pct}%",
+    "agent.file.receiving": "Réception de {name} — {pct}%",
+    "agent.file.sent": "{name} envoyé",
+    "agent.file.received": "{name} reçu",
+    "agent.file.failed": "Échec du transfert : {name}"
   },
   "de": {
     "doc.title.home": "Audiobus Remote",
@@ -345,7 +375,17 @@
     "theme.label": "Design",
     "theme.auto": "Automatisch",
     "theme.light": "Hell",
-    "theme.dark": "Dunkel"
+    "theme.dark": "Dunkel",
+    "connect.btn.sendFile": "Datei senden",
+    "connect.file.dropHere": "Dateien ablegen, um sie an den entfernten Computer zu senden",
+    "connect.file.failed": "Fehlgeschlagen",
+    "agent.btn.sendFile": "Datei senden",
+    "agent.file.pickTitle": "Datei zum Senden auswählen",
+    "agent.file.sending": "{name} wird gesendet — {pct}%",
+    "agent.file.receiving": "{name} wird empfangen — {pct}%",
+    "agent.file.sent": "{name} gesendet",
+    "agent.file.received": "{name} empfangen",
+    "agent.file.failed": "Übertragung fehlgeschlagen: {name}"
   },
   "it": {
     "doc.title.home": "Audiobus Remote",
@@ -427,7 +467,17 @@
     "theme.label": "Tema",
     "theme.auto": "Automatico",
     "theme.light": "Chiaro",
-    "theme.dark": "Scuro"
+    "theme.dark": "Scuro",
+    "connect.btn.sendFile": "Invia file",
+    "connect.file.dropHere": "Rilascia i file per inviarli al computer remoto",
+    "connect.file.failed": "Fallito",
+    "agent.btn.sendFile": "Invia file",
+    "agent.file.pickTitle": "Scegli un file da inviare",
+    "agent.file.sending": "Invio di {name} — {pct}%",
+    "agent.file.receiving": "Ricezione di {name} — {pct}%",
+    "agent.file.sent": "{name} inviato",
+    "agent.file.received": "{name} ricevuto",
+    "agent.file.failed": "Trasferimento fallito: {name}"
   },
   "pt": {
     "doc.title.home": "Audiobus Remote",
@@ -509,7 +559,17 @@
     "theme.label": "Tema",
     "theme.auto": "Automático",
     "theme.light": "Claro",
-    "theme.dark": "Escuro"
+    "theme.dark": "Escuro",
+    "connect.btn.sendFile": "Enviar ficheiro",
+    "connect.file.dropHere": "Largue ficheiros para os enviar ao computador remoto",
+    "connect.file.failed": "Falhou",
+    "agent.btn.sendFile": "Enviar ficheiro",
+    "agent.file.pickTitle": "Escolha um ficheiro para enviar",
+    "agent.file.sending": "A enviar {name} — {pct}%",
+    "agent.file.receiving": "A receber {name} — {pct}%",
+    "agent.file.sent": "{name} enviado",
+    "agent.file.received": "{name} recebido",
+    "agent.file.failed": "Falha na transferência: {name}"
   },
   "pt-br": {
     "doc.title.home": "Audiobus Remote",
@@ -591,7 +651,17 @@
     "theme.label": "Tema",
     "theme.auto": "Automático",
     "theme.light": "Claro",
-    "theme.dark": "Escuro"
+    "theme.dark": "Escuro",
+    "connect.btn.sendFile": "Enviar arquivo",
+    "connect.file.dropHere": "Solte os arquivos para enviá-los ao computador remoto",
+    "connect.file.failed": "Falhou",
+    "agent.btn.sendFile": "Enviar arquivo",
+    "agent.file.pickTitle": "Escolha um arquivo para enviar",
+    "agent.file.sending": "Enviando {name} — {pct}%",
+    "agent.file.receiving": "Recebendo {name} — {pct}%",
+    "agent.file.sent": "{name} enviado",
+    "agent.file.received": "{name} recebido",
+    "agent.file.failed": "Falha na transferência: {name}"
   },
   "nl": {
     "doc.title.home": "Audiobus Remote",
@@ -673,7 +743,17 @@
     "theme.label": "Thema",
     "theme.auto": "Automatisch",
     "theme.light": "Licht",
-    "theme.dark": "Donker"
+    "theme.dark": "Donker",
+    "connect.btn.sendFile": "Bestand verzenden",
+    "connect.file.dropHere": "Zet bestanden neer om ze naar de externe computer te verzenden",
+    "connect.file.failed": "Mislukt",
+    "agent.btn.sendFile": "Bestand verzenden",
+    "agent.file.pickTitle": "Kies een bestand om te verzenden",
+    "agent.file.sending": "{name} wordt verzonden — {pct}%",
+    "agent.file.receiving": "{name} wordt ontvangen — {pct}%",
+    "agent.file.sent": "{name} verzonden",
+    "agent.file.received": "{name} ontvangen",
+    "agent.file.failed": "Overdracht mislukt: {name}"
   },
   "ru": {
     "doc.title.home": "Audiobus Remote",
@@ -755,7 +835,17 @@
     "theme.label": "Тема",
     "theme.auto": "Авто",
     "theme.light": "Светлая",
-    "theme.dark": "Тёмная"
+    "theme.dark": "Тёмная",
+    "connect.btn.sendFile": "Отправить файл",
+    "connect.file.dropHere": "Перетащите файлы, чтобы отправить их на удалённый компьютер",
+    "connect.file.failed": "Ошибка",
+    "agent.btn.sendFile": "Отправить файл",
+    "agent.file.pickTitle": "Выберите файл для отправки",
+    "agent.file.sending": "Отправка {name} — {pct}%",
+    "agent.file.receiving": "Получение {name} — {pct}%",
+    "agent.file.sent": "Отправлено: {name}",
+    "agent.file.received": "Получено: {name}",
+    "agent.file.failed": "Ошибка передачи: {name}"
   },
   "uk": {
     "doc.title.home": "Audiobus Remote",
@@ -837,7 +927,17 @@
     "theme.label": "Тема",
     "theme.auto": "Авто",
     "theme.light": "Світла",
-    "theme.dark": "Темна"
+    "theme.dark": "Темна",
+    "connect.btn.sendFile": "Надіслати файл",
+    "connect.file.dropHere": "Перетягніть файли, щоб надіслати їх на віддалений комп'ютер",
+    "connect.file.failed": "Помилка",
+    "agent.btn.sendFile": "Надіслати файл",
+    "agent.file.pickTitle": "Виберіть файл для надсилання",
+    "agent.file.sending": "Надсилання {name} — {pct}%",
+    "agent.file.receiving": "Отримання {name} — {pct}%",
+    "agent.file.sent": "Надіслано: {name}",
+    "agent.file.received": "Отримано: {name}",
+    "agent.file.failed": "Помилка передавання: {name}"
   },
   "pl": {
     "doc.title.home": "Audiobus Remote",
@@ -919,7 +1019,17 @@
     "theme.label": "Motyw",
     "theme.auto": "Automatyczny",
     "theme.light": "Jasny",
-    "theme.dark": "Ciemny"
+    "theme.dark": "Ciemny",
+    "connect.btn.sendFile": "Wyślij plik",
+    "connect.file.dropHere": "Upuść pliki, aby wysłać je na zdalny komputer",
+    "connect.file.failed": "Błąd",
+    "agent.btn.sendFile": "Wyślij plik",
+    "agent.file.pickTitle": "Wybierz plik do wysłania",
+    "agent.file.sending": "Wysyłanie {name} — {pct}%",
+    "agent.file.receiving": "Odbieranie {name} — {pct}%",
+    "agent.file.sent": "Wysłano: {name}",
+    "agent.file.received": "Odebrano: {name}",
+    "agent.file.failed": "Błąd przesyłania: {name}"
   },
   "cs": {
     "doc.title.home": "Audiobus Remote",
@@ -1001,7 +1111,17 @@
     "theme.label": "Motiv",
     "theme.auto": "Automaticky",
     "theme.light": "Světlý",
-    "theme.dark": "Tmavý"
+    "theme.dark": "Tmavý",
+    "connect.btn.sendFile": "Odeslat soubor",
+    "connect.file.dropHere": "Přetáhněte soubory sem a odešlete je do vzdáleného počítače",
+    "connect.file.failed": "Selhalo",
+    "agent.btn.sendFile": "Odeslat soubor",
+    "agent.file.pickTitle": "Vyberte soubor k odeslání",
+    "agent.file.sending": "Odesílání {name} — {pct}%",
+    "agent.file.receiving": "Přijímání {name} — {pct}%",
+    "agent.file.sent": "Odesláno: {name}",
+    "agent.file.received": "Přijato: {name}",
+    "agent.file.failed": "Přenos selhal: {name}"
   },
   "sv": {
     "doc.title.home": "Audiobus Remote",
@@ -1083,7 +1203,17 @@
     "theme.label": "Tema",
     "theme.auto": "Auto",
     "theme.light": "Ljust",
-    "theme.dark": "Mörkt"
+    "theme.dark": "Mörkt",
+    "connect.btn.sendFile": "Skicka fil",
+    "connect.file.dropHere": "Släpp filer för att skicka dem till den fjärranslutna datorn",
+    "connect.file.failed": "Misslyckades",
+    "agent.btn.sendFile": "Skicka fil",
+    "agent.file.pickTitle": "Välj en fil att skicka",
+    "agent.file.sending": "Skickar {name} — {pct}%",
+    "agent.file.receiving": "Tar emot {name} — {pct}%",
+    "agent.file.sent": "Skickat {name}",
+    "agent.file.received": "Mottagit {name}",
+    "agent.file.failed": "Överföringen misslyckades: {name}"
   },
   "da": {
     "doc.title.home": "Audiobus Remote",
@@ -1165,7 +1295,17 @@
     "theme.label": "Tema",
     "theme.auto": "Auto",
     "theme.light": "Lyst",
-    "theme.dark": "Mørkt"
+    "theme.dark": "Mørkt",
+    "connect.btn.sendFile": "Send fil",
+    "connect.file.dropHere": "Slip filer for at sende dem til den eksterne computer",
+    "connect.file.failed": "Mislykkedes",
+    "agent.btn.sendFile": "Send fil",
+    "agent.file.pickTitle": "Vælg en fil, der skal sendes",
+    "agent.file.sending": "Sender {name} — {pct}%",
+    "agent.file.receiving": "Modtager {name} — {pct}%",
+    "agent.file.sent": "Sendt {name}",
+    "agent.file.received": "Modtaget {name}",
+    "agent.file.failed": "Overførsel mislykkedes: {name}"
   },
   "fi": {
     "doc.title.home": "Audiobus Remote",
@@ -1247,7 +1387,17 @@
     "theme.label": "Teema",
     "theme.auto": "Automaattinen",
     "theme.light": "Vaalea",
-    "theme.dark": "Tumma"
+    "theme.dark": "Tumma",
+    "connect.btn.sendFile": "Lähetä tiedosto",
+    "connect.file.dropHere": "Pudota tiedostot lähettääksesi ne etätietokoneelle",
+    "connect.file.failed": "Epäonnistui",
+    "agent.btn.sendFile": "Lähetä tiedosto",
+    "agent.file.pickTitle": "Valitse lähetettävä tiedosto",
+    "agent.file.sending": "Lähetetään {name} — {pct}%",
+    "agent.file.receiving": "Vastaanotetaan {name} — {pct}%",
+    "agent.file.sent": "Lähetetty {name}",
+    "agent.file.received": "Vastaanotettu {name}",
+    "agent.file.failed": "Siirto epäonnistui: {name}"
   },
   "no": {
     "doc.title.home": "Audiobus Remote",
@@ -1329,7 +1479,17 @@
     "theme.label": "Tema",
     "theme.auto": "Auto",
     "theme.light": "Lyst",
-    "theme.dark": "Mørkt"
+    "theme.dark": "Mørkt",
+    "connect.btn.sendFile": "Send fil",
+    "connect.file.dropHere": "Slipp filer for å sende dem til den eksterne datamaskinen",
+    "connect.file.failed": "Mislyktes",
+    "agent.btn.sendFile": "Send fil",
+    "agent.file.pickTitle": "Velg en fil som skal sendes",
+    "agent.file.sending": "Sender {name} — {pct}%",
+    "agent.file.receiving": "Mottar {name} — {pct}%",
+    "agent.file.sent": "Sendt {name}",
+    "agent.file.received": "Mottatt {name}",
+    "agent.file.failed": "Overføringen mislyktes: {name}"
   },
   "tr": {
     "doc.title.home": "Audiobus Remote",
@@ -1411,7 +1571,17 @@
     "theme.label": "Tema",
     "theme.auto": "Otomatik",
     "theme.light": "Açık",
-    "theme.dark": "Koyu"
+    "theme.dark": "Koyu",
+    "connect.btn.sendFile": "Dosya gönder",
+    "connect.file.dropHere": "Dosyaları uzak bilgisayara göndermek için buraya bırakın",
+    "connect.file.failed": "Başarısız",
+    "agent.btn.sendFile": "Dosya gönder",
+    "agent.file.pickTitle": "Gönderilecek bir dosya seçin",
+    "agent.file.sending": "{name} gönderiliyor — {pct}%",
+    "agent.file.receiving": "{name} alınıyor — {pct}%",
+    "agent.file.sent": "{name} gönderildi",
+    "agent.file.received": "{name} alındı",
+    "agent.file.failed": "Aktarım başarısız: {name}"
   },
   "el": {
     "doc.title.home": "Audiobus Remote",
@@ -1493,7 +1663,17 @@
     "theme.label": "Θέμα",
     "theme.auto": "Αυτόματο",
     "theme.light": "Φωτεινό",
-    "theme.dark": "Σκοτεινό"
+    "theme.dark": "Σκοτεινό",
+    "connect.btn.sendFile": "Αποστολή αρχείου",
+    "connect.file.dropHere": "Αφήστε αρχεία εδώ για να τα στείλετε στον απομακρυσμένο υπολογιστή",
+    "connect.file.failed": "Απέτυχε",
+    "agent.btn.sendFile": "Αποστολή αρχείου",
+    "agent.file.pickTitle": "Επιλέξτε ένα αρχείο για αποστολή",
+    "agent.file.sending": "Αποστολή {name} — {pct}%",
+    "agent.file.receiving": "Λήψη {name} — {pct}%",
+    "agent.file.sent": "Στάλθηκε {name}",
+    "agent.file.received": "Λήφθηκε {name}",
+    "agent.file.failed": "Η μεταφορά απέτυχε: {name}"
   },
   "ro": {
     "doc.title.home": "Audiobus Remote",
@@ -1575,7 +1755,17 @@
     "theme.label": "Temă",
     "theme.auto": "Automat",
     "theme.light": "Luminos",
-    "theme.dark": "Întunecat"
+    "theme.dark": "Întunecat",
+    "connect.btn.sendFile": "Trimiteți un fișier",
+    "connect.file.dropHere": "Plasați fișierele aici pentru a le trimite către computerul la distanță",
+    "connect.file.failed": "Eșuat",
+    "agent.btn.sendFile": "Trimiteți un fișier",
+    "agent.file.pickTitle": "Alegeți un fișier de trimis",
+    "agent.file.sending": "Se trimite {name} — {pct}%",
+    "agent.file.receiving": "Se primește {name} — {pct}%",
+    "agent.file.sent": "S-a trimis {name}",
+    "agent.file.received": "S-a primit {name}",
+    "agent.file.failed": "Transfer eșuat: {name}"
   },
   "hu": {
     "doc.title.home": "Audiobus Remote",
@@ -1657,7 +1847,17 @@
     "theme.label": "Téma",
     "theme.auto": "Automatikus",
     "theme.light": "Világos",
-    "theme.dark": "Sötét"
+    "theme.dark": "Sötét",
+    "connect.btn.sendFile": "Fájl küldése",
+    "connect.file.dropHere": "Húzza ide a fájlokat, hogy elküldje őket a távoli számítógépre",
+    "connect.file.failed": "Sikertelen",
+    "agent.btn.sendFile": "Fájl küldése",
+    "agent.file.pickTitle": "Válassza ki a küldendő fájlt",
+    "agent.file.sending": "{name} küldése — {pct}%",
+    "agent.file.receiving": "{name} fogadása — {pct}%",
+    "agent.file.sent": "Elküldve: {name}",
+    "agent.file.received": "Fogadva: {name}",
+    "agent.file.failed": "Az átvitel sikertelen: {name}"
   },
   "id": {
     "doc.title.home": "Audiobus Remote",
@@ -1739,7 +1939,17 @@
     "theme.label": "Tema",
     "theme.auto": "Otomatis",
     "theme.light": "Terang",
-    "theme.dark": "Gelap"
+    "theme.dark": "Gelap",
+    "connect.btn.sendFile": "Kirim file",
+    "connect.file.dropHere": "Lepaskan file untuk mengirimnya ke komputer jarak jauh",
+    "connect.file.failed": "Gagal",
+    "agent.btn.sendFile": "Kirim file",
+    "agent.file.pickTitle": "Pilih file untuk dikirim",
+    "agent.file.sending": "Mengirim {name} — {pct}%",
+    "agent.file.receiving": "Menerima {name} — {pct}%",
+    "agent.file.sent": "Terkirim {name}",
+    "agent.file.received": "Diterima {name}",
+    "agent.file.failed": "Transfer gagal: {name}"
   },
   "vi": {
     "doc.title.home": "Audiobus Remote",
@@ -1821,7 +2031,17 @@
     "theme.label": "Giao diện",
     "theme.auto": "Tự động",
     "theme.light": "Sáng",
-    "theme.dark": "Tối"
+    "theme.dark": "Tối",
+    "connect.btn.sendFile": "Gửi tệp",
+    "connect.file.dropHere": "Thả tệp vào đây để gửi đến máy tính từ xa",
+    "connect.file.failed": "Thất bại",
+    "agent.btn.sendFile": "Gửi tệp",
+    "agent.file.pickTitle": "Chọn tệp để gửi",
+    "agent.file.sending": "Đang gửi {name} — {pct}%",
+    "agent.file.receiving": "Đang nhận {name} — {pct}%",
+    "agent.file.sent": "Đã gửi {name}",
+    "agent.file.received": "Đã nhận {name}",
+    "agent.file.failed": "Truyền tệp thất bại: {name}"
   },
   "th": {
     "doc.title.home": "Audiobus Remote",
@@ -1903,7 +2123,17 @@
     "theme.label": "ธีม",
     "theme.auto": "อัตโนมัติ",
     "theme.light": "สว่าง",
-    "theme.dark": "มืด"
+    "theme.dark": "มืด",
+    "connect.btn.sendFile": "ส่งไฟล์",
+    "connect.file.dropHere": "วางไฟล์เพื่อส่งไปยังคอมพิวเตอร์อีกเครื่อง",
+    "connect.file.failed": "ล้มเหลว",
+    "agent.btn.sendFile": "ส่งไฟล์",
+    "agent.file.pickTitle": "เลือกไฟล์ที่จะส่ง",
+    "agent.file.sending": "กำลังส่ง {name} — {pct}%",
+    "agent.file.receiving": "กำลังรับ {name} — {pct}%",
+    "agent.file.sent": "ส่ง {name} แล้ว",
+    "agent.file.received": "รับ {name} แล้ว",
+    "agent.file.failed": "การถ่ายโอนล้มเหลว: {name}"
   },
   "zh": {
     "doc.title.home": "Audiobus Remote",
@@ -1985,7 +2215,17 @@
     "theme.label": "主题",
     "theme.auto": "自动",
     "theme.light": "浅色",
-    "theme.dark": "深色"
+    "theme.dark": "深色",
+    "connect.btn.sendFile": "发送文件",
+    "connect.file.dropHere": "拖放文件以发送到远程电脑",
+    "connect.file.failed": "失败",
+    "agent.btn.sendFile": "发送文件",
+    "agent.file.pickTitle": "选择要发送的文件",
+    "agent.file.sending": "正在发送 {name} — {pct}%",
+    "agent.file.receiving": "正在接收 {name} — {pct}%",
+    "agent.file.sent": "已发送 {name}",
+    "agent.file.received": "已接收 {name}",
+    "agent.file.failed": "传输失败：{name}"
   },
   "zh-tw": {
     "doc.title.home": "Audiobus Remote",
@@ -2067,7 +2307,17 @@
     "theme.label": "佈景主題",
     "theme.auto": "自動",
     "theme.light": "淺色",
-    "theme.dark": "深色"
+    "theme.dark": "深色",
+    "connect.btn.sendFile": "傳送檔案",
+    "connect.file.dropHere": "拖放檔案以傳送到遠端電腦",
+    "connect.file.failed": "失敗",
+    "agent.btn.sendFile": "傳送檔案",
+    "agent.file.pickTitle": "選擇要傳送的檔案",
+    "agent.file.sending": "正在傳送 {name} — {pct}%",
+    "agent.file.receiving": "正在接收 {name} — {pct}%",
+    "agent.file.sent": "已傳送 {name}",
+    "agent.file.received": "已接收 {name}",
+    "agent.file.failed": "傳輸失敗：{name}"
   },
   "ja": {
     "doc.title.home": "Audiobus Remote",
@@ -2149,7 +2399,17 @@
     "theme.label": "テーマ",
     "theme.auto": "自動",
     "theme.light": "ライト",
-    "theme.dark": "ダーク"
+    "theme.dark": "ダーク",
+    "connect.btn.sendFile": "ファイルを送信",
+    "connect.file.dropHere": "ファイルをドロップしてリモートコンピューターに送信",
+    "connect.file.failed": "失敗",
+    "agent.btn.sendFile": "ファイルを送信",
+    "agent.file.pickTitle": "送信するファイルを選択",
+    "agent.file.sending": "{name} を送信中 — {pct}%",
+    "agent.file.receiving": "{name} を受信中 — {pct}%",
+    "agent.file.sent": "{name} を送信しました",
+    "agent.file.received": "{name} を受信しました",
+    "agent.file.failed": "転送に失敗しました：{name}"
   },
   "ko": {
     "doc.title.home": "Audiobus Remote",
@@ -2231,7 +2491,17 @@
     "theme.label": "테마",
     "theme.auto": "자동",
     "theme.light": "라이트",
-    "theme.dark": "다크"
+    "theme.dark": "다크",
+    "connect.btn.sendFile": "파일 보내기",
+    "connect.file.dropHere": "원격 컴퓨터로 보내려면 파일을 놓으세요",
+    "connect.file.failed": "실패",
+    "agent.btn.sendFile": "파일 보내기",
+    "agent.file.pickTitle": "보낼 파일 선택",
+    "agent.file.sending": "{name} 보내는 중 — {pct}%",
+    "agent.file.receiving": "{name} 받는 중 — {pct}%",
+    "agent.file.sent": "{name} 보냄",
+    "agent.file.received": "{name} 받음",
+    "agent.file.failed": "전송 실패: {name}"
   },
   "ar": {
     "doc.title.home": "Audiobus Remote",
@@ -2313,7 +2583,17 @@
     "theme.label": "السمة",
     "theme.auto": "تلقائي",
     "theme.light": "فاتح",
-    "theme.dark": "داكن"
+    "theme.dark": "داكن",
+    "connect.btn.sendFile": "إرسال ملف",
+    "connect.file.dropHere": "أفلت الملفات لإرسالها إلى الكمبيوتر الآخر",
+    "connect.file.failed": "فشل",
+    "agent.btn.sendFile": "إرسال ملف",
+    "agent.file.pickTitle": "اختر ملفًا لإرساله",
+    "agent.file.sending": "جارٍ إرسال {name} — {pct}%",
+    "agent.file.receiving": "جارٍ استقبال {name} — {pct}%",
+    "agent.file.sent": "تم إرسال {name}",
+    "agent.file.received": "تم استقبال {name}",
+    "agent.file.failed": "فشل النقل: {name}"
   },
   "he": {
     "doc.title.home": "Audiobus Remote",
@@ -2395,7 +2675,17 @@
     "theme.label": "ערכת נושא",
     "theme.auto": "אוטומטי",
     "theme.light": "בהיר",
-    "theme.dark": "כהה"
+    "theme.dark": "כהה",
+    "connect.btn.sendFile": "שליחת קובץ",
+    "connect.file.dropHere": "שחרר קבצים כדי לשלוח אותם למחשב השני",
+    "connect.file.failed": "נכשל",
+    "agent.btn.sendFile": "שליחת קובץ",
+    "agent.file.pickTitle": "בחר קובץ לשליחה",
+    "agent.file.sending": "שולח את {name} — {pct}%",
+    "agent.file.receiving": "מקבל את {name} — {pct}%",
+    "agent.file.sent": "{name} נשלח",
+    "agent.file.received": "{name} התקבל",
+    "agent.file.failed": "ההעברה נכשלה: {name}"
   },
   "fa": {
     "doc.title.home": "Audiobus Remote",
@@ -2477,7 +2767,17 @@
     "theme.label": "پوسته",
     "theme.auto": "خودکار",
     "theme.light": "روشن",
-    "theme.dark": "تیره"
+    "theme.dark": "تیره",
+    "connect.btn.sendFile": "ارسال فایل",
+    "connect.file.dropHere": "فایل‌ها را رها کنید تا به رایانهٔ دیگر ارسال شوند",
+    "connect.file.failed": "ناموفق",
+    "agent.btn.sendFile": "ارسال فایل",
+    "agent.file.pickTitle": "فایلی برای ارسال انتخاب کنید",
+    "agent.file.sending": "در حال ارسال {name} — {pct}%",
+    "agent.file.receiving": "در حال دریافت {name} — {pct}%",
+    "agent.file.sent": "{name} ارسال شد",
+    "agent.file.received": "{name} دریافت شد",
+    "agent.file.failed": "انتقال ناموفق بود: {name}"
   },
   "hi": {
     "doc.title.home": "Audiobus Remote",
@@ -2559,6 +2859,16 @@
     "theme.label": "थीम",
     "theme.auto": "स्वतः",
     "theme.light": "लाइट",
-    "theme.dark": "डार्क"
+    "theme.dark": "डार्क",
+    "connect.btn.sendFile": "फ़ाइल भेजें",
+    "connect.file.dropHere": "फ़ाइलें दूसरे कंप्यूटर पर भेजने के लिए यहाँ छोड़ें",
+    "connect.file.failed": "विफल",
+    "agent.btn.sendFile": "फ़ाइल भेजें",
+    "agent.file.pickTitle": "भेजने के लिए फ़ाइल चुनें",
+    "agent.file.sending": "{name} भेजी जा रही है — {pct}%",
+    "agent.file.receiving": "{name} प्राप्त की जा रही है — {pct}%",
+    "agent.file.sent": "{name} भेजी गई",
+    "agent.file.received": "{name} प्राप्त हुई",
+    "agent.file.failed": "स्थानांतरण विफल: {name}"
   }
 }

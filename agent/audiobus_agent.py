@@ -21,6 +21,7 @@ the whole time someone is connected, and closing this window ends the session.
 
 import argparse
 import asyncio
+import base64
 import fractions
 import json
 import os
@@ -33,7 +34,7 @@ import urllib.request
 
 import tkinter as tk
 import tkinter.font as tkfont
-from tkinter import messagebox
+from tkinter import filedialog, messagebox
 
 try:
     import websockets
@@ -95,6 +96,13 @@ HB_WARN_SECS = 2.0          # reconnect starts at once; show the Wait/Cut dialog
 #                            after the drop is detected -> ~5s total (3s detect + 2s)
 HB_MAX_RECONNECT_SECS = 65.0  # > the DO's 60s grace: give up reconnecting after this
 INTERRUPT_REASK_MS = 10000  # re-ask the Wait/Cut dialog this long after "Wait"
+
+# Clipboard sync + file transfer tuning.
+CLIP_POLL_MS = 500             # how often the GUI thread polls the OS clipboard for changes
+CLIP_MAX_BYTES = 256 * 1024    # cap on synced clipboard text (UTF-8); larger is skipped
+FILE_CHUNK_BYTES = 128 * 1024  # raw bytes per file-chunk (base64 inflates ~33% on the wire)
+FILE_MAX_BYTES = 2 * 1024 * 1024 * 1024  # hard cap per received/sent file (2 GiB)
+FILE_WINDOW = 8                # unacked file-chunks allowed in flight (sender flow control)
 
 # --------------------------------------------------------------------------- #
 # Localization: show the UI in the user's OS language, falling back to English.
@@ -742,6 +750,35 @@ def request_ice_servers(http_base, ctx, code):
 # Network client (runs its own asyncio loop on a background thread)
 # --------------------------------------------------------------------------- #
 
+def received_files_dir():
+    """Where incoming files land: ~/Downloads/AudiobusRemote (created on demand)."""
+    base = os.path.join(os.path.expanduser("~"), "Downloads", "AudiobusRemote")
+    os.makedirs(base, exist_ok=True)
+    return base
+
+
+def safe_filename(name):
+    """Reduce a viewer-supplied name to a bare, safe basename (no path traversal)."""
+    name = os.path.basename(str(name or "").replace("\\", "/"))
+    name = "".join(c for c in name if c not in '<>:"/\\|?*' and ord(c) >= 32)
+    name = name.strip().strip(".")
+    return name[:200] or "file"
+
+
+def dedupe_path(directory, name):
+    """A non-colliding full path in directory for name (adds ' (1)', ' (2)', ...)."""
+    path = os.path.join(directory, name)
+    if not os.path.exists(path):
+        return path
+    stem, ext = os.path.splitext(name)
+    i = 1
+    while True:
+        cand = os.path.join(directory, f"{stem} ({i}){ext}")
+        if not os.path.exists(cand):
+            return cand
+        i += 1
+
+
 class NetClient:
     def __init__(self, app, args):
         self.app = app
@@ -795,6 +832,10 @@ class NetClient:
         # so the status reads "you closed the connection" rather than blaming the
         # viewer for a disconnect we initiated.
         self.ended_locally = False
+        # File transfer. Incoming (viewer->host): id -> {"f","path","name","size","got"}.
+        # Outgoing (host->viewer): id -> {"acked": int, "event": asyncio.Event, "cancel": bool}.
+        self._recv_files = {}
+        self._send_files = {}
 
     def start(self):
         threading.Thread(target=self._thread_main, daemon=True).start()
@@ -834,6 +875,189 @@ class NetClient:
                 await self.ws.send(json.dumps({"type": "session-ended"}))
             except Exception:
                 pass
+
+    def send_clip(self, text):
+        """Push the host clipboard to the viewer (called from the GUI thread when the
+        local clipboard changes). Hops to the net-thread loop to do the actual send."""
+        if self.loop and not self.loop.is_closed():
+            try:
+                self.loop.call_soon_threadsafe(
+                    lambda: asyncio.create_task(self._send_clip(text))
+                )
+            except Exception:
+                pass
+
+    async def _send_clip(self, text):
+        if self.ws and self.streaming:
+            try:
+                await self.ws.send(json.dumps({"type": "clip", "text": text}))
+            except Exception:
+                pass
+
+    # ---- File transfer (both directions ride the JSON relay as base64 chunks) ----
+
+    async def _send_json(self, obj):
+        if self.ws:
+            try:
+                await self.ws.send(json.dumps(obj))
+            except Exception:
+                pass
+
+    async def _on_file_begin(self, msg):
+        """Viewer->host: open a destination file and start accepting chunks."""
+        fid = msg.get("id")
+        if not isinstance(fid, str) or fid in self._recv_files:
+            return
+        name = safe_filename(msg.get("name"))
+        try:
+            size = int(msg.get("size", 0))
+        except (TypeError, ValueError):
+            size = -1
+        if size < 0 or size > FILE_MAX_BYTES:
+            await self._send_json({"type": "file-cancel", "id": fid, "reason": "too-large"})
+            return
+        try:
+            directory = await self.loop.run_in_executor(None, received_files_dir)
+            path = await self.loop.run_in_executor(None, dedupe_path, directory, name)
+            f = await self.loop.run_in_executor(None, lambda: open(path, "wb"))
+        except Exception:
+            await self._send_json({"type": "file-cancel", "id": fid, "reason": "open-failed"})
+            return
+        base = os.path.basename(path)
+        self._recv_files[fid] = {"f": f, "path": path, "name": base, "size": size, "got": 0}
+        self.app.post(lambda: self.app.on_file_progress(base, 0, size, False))
+
+    async def _on_file_chunk(self, msg):
+        fid = msg.get("id")
+        st = self._recv_files.get(fid)
+        if not st:
+            return
+        data = msg.get("data")
+        if not isinstance(data, str):
+            return
+        try:
+            raw = base64.b64decode(data)
+        except Exception:
+            self._cancel_recv(fid)
+            await self._send_json({"type": "file-cancel", "id": fid, "reason": "bad-data"})
+            return
+        if st["got"] + len(raw) > FILE_MAX_BYTES:
+            self._cancel_recv(fid)
+            await self._send_json({"type": "file-cancel", "id": fid, "reason": "too-large"})
+            return
+        try:
+            await self.loop.run_in_executor(None, st["f"].write, raw)
+        except Exception:
+            self._cancel_recv(fid)
+            await self._send_json({"type": "file-cancel", "id": fid, "reason": "write-failed"})
+            return
+        st["got"] += len(raw)
+        await self._send_json({"type": "file-ack", "id": fid, "n": msg.get("n")})
+        self.app.post(
+            lambda s=st: self.app.on_file_progress(s["name"], s["got"], s["size"], False))
+
+    async def _on_file_end(self, msg):
+        fid = msg.get("id")
+        st = self._recv_files.pop(fid, None)
+        if not st:
+            return
+        try:
+            await self.loop.run_in_executor(None, st["f"].close)
+        except Exception:
+            pass
+        self.app.post(lambda s=st: self.app.on_file_done(s["name"], s["path"], False, True))
+
+    def _cancel_recv(self, fid, notify=True):
+        """Abort an incoming transfer: close + discard the partial file. With notify, also
+        tell the UI it failed; a peer-initiated cancel passes notify=False (the viewer
+        already knows, and this avoids a duplicate when we triggered the cancel ourselves)."""
+        st = self._recv_files.pop(fid, None)
+        if not st:
+            return
+        try:
+            st["f"].close()
+        except Exception:
+            pass
+        try:
+            os.remove(st["path"])
+        except Exception:
+            pass
+        if notify:
+            self.app.post(lambda s=st: self.app.on_file_done(s["name"], s["path"], False, False))
+
+    def send_file(self, path):
+        """Host->viewer: start sending a local file (called from the GUI thread)."""
+        if self.loop and not self.loop.is_closed():
+            try:
+                self.loop.call_soon_threadsafe(
+                    lambda: asyncio.create_task(self._send_file(path)))
+            except Exception:
+                pass
+
+    async def _send_file(self, path):
+        if not self.ws or not self.streaming:
+            return
+        name = os.path.basename(path)
+        try:
+            size = os.path.getsize(path)
+        except Exception:
+            self.app.post(lambda: self.app.on_file_done(name, path, True, False))
+            return
+        if size > FILE_MAX_BYTES:
+            self.app.post(lambda: self.app.on_file_done(name, path, True, False))
+            return
+        fid = "h" + os.urandom(8).hex()
+        st = {"acked": -1, "event": asyncio.Event(), "cancel": False}
+        self._send_files[fid] = st
+        try:
+            await self._send_json({"type": "file-begin", "id": fid, "name": name,
+                                   "size": size, "mime": ""})
+            f = await self.loop.run_in_executor(None, lambda: open(path, "rb"))
+            n = sent = 0
+            try:
+                while not st["cancel"]:
+                    chunk = await self.loop.run_in_executor(None, f.read, FILE_CHUNK_BYTES)
+                    if not chunk:
+                        break
+                    # Flow control: never keep more than FILE_WINDOW chunks unacked, so a
+                    # slow viewer can't make us flood the relay (which would starve pings).
+                    while not st["cancel"] and n - st["acked"] > FILE_WINDOW:
+                        st["event"].clear()
+                        if n - st["acked"] <= FILE_WINDOW:
+                            break
+                        try:
+                            await asyncio.wait_for(st["event"].wait(),
+                                                   timeout=HB_MAX_RECONNECT_SECS)
+                        except asyncio.TimeoutError:
+                            st["cancel"] = True
+                    if st["cancel"]:
+                        break
+                    b64 = base64.b64encode(chunk).decode("ascii")
+                    await self._send_json({"type": "file-chunk", "id": fid,
+                                           "n": n, "data": b64})
+                    sent += len(chunk)
+                    n += 1
+                    self.app.post(
+                        lambda s=sent: self.app.on_file_progress(name, s, size, True))
+            finally:
+                await self.loop.run_in_executor(None, f.close)
+            if st["cancel"]:
+                self.app.post(lambda: self.app.on_file_done(name, path, True, False))
+            else:
+                await self._send_json({"type": "file-end", "id": fid})
+                self.app.post(lambda: self.app.on_file_done(name, path, True, True))
+        except Exception:
+            self.app.post(lambda: self.app.on_file_done(name, path, True, False))
+        finally:
+            self._send_files.pop(fid, None)
+
+    def _reset_transfers(self):
+        """Drop all in-flight transfers (session ended / viewer left)."""
+        for fid in list(self._recv_files.keys()):
+            self._cancel_recv(fid)
+        for st in self._send_files.values():
+            st["cancel"] = True
+            st["event"].set()
 
     def _thread_main(self):
         try:
@@ -1119,55 +1343,103 @@ class NetClient:
                 msg = json.loads(raw)
             except Exception:
                 continue
-            if "t" in msg:
-                # Only inject input for an APPROVED, streaming session (ignore
-                # anything sent before consent / during the prompt / after a deny),
-                # and protect the agent's own windows (see apply_event).
-                if not self.streaming:
-                    continue
-                apply_event(
-                    msg, self.monitors,
-                    getattr(self.app, "_window_rects", None),
-                    self._blocked_btns, self._pressed_btns,
-                    getattr(self.app, "_agent_foreground", False),
-                )
+            try:
+                await self._handle_msg(ws, msg)
+            except Exception:
+                # Defense-in-depth: a single malformed message or a bug in one handler
+                # must never tear down the live session. Drop it and keep receiving.
                 continue
-            mtype = msg.get("type")
-            if mtype == "want":
-                self._set_wanted(msg.get("monitors"))
-            elif mtype == "webrtc-answer":
-                if self.pc:
-                    try:
-                        await self.pc.setRemoteDescription(
-                            RTCSessionDescription(sdp=msg.get("sdp", ""), type="answer")
-                        )
-                    except Exception:
-                        pass
-            elif mtype == "webrtc-ice":
-                await self._add_remote_candidate(msg.get("candidate"))
-            elif mtype == "viewer-joined":
-                asyncio.create_task(
-                    self._on_viewer(
-                        ws, bool(msg.get("resumed")), msg.get("vid"), msg.get("vtok")
+
+    async def _handle_msg(self, ws, msg):
+        """Dispatch one decoded viewer/server message. Called inside _recv_loop's guard."""
+        if "t" in msg:
+            # Only inject input for an APPROVED, streaming session (ignore anything sent
+            # before consent / during the prompt / after a deny), and protect the agent's
+            # own windows (see apply_event).
+            if not self.streaming:
+                return
+            apply_event(
+                msg, self.monitors,
+                getattr(self.app, "_window_rects", None),
+                self._blocked_btns, self._pressed_btns,
+                getattr(self.app, "_agent_foreground", False),
+            )
+            return
+        mtype = msg.get("type")
+        if mtype == "want":
+            self._set_wanted(msg.get("monitors"))
+        elif mtype == "webrtc-answer":
+            if self.pc:
+                try:
+                    await self.pc.setRemoteDescription(
+                        RTCSessionDescription(sdp=msg.get("sdp", ""), type="answer")
                     )
+                except Exception:
+                    pass
+        elif mtype == "webrtc-ice":
+            await self._add_remote_candidate(msg.get("candidate"))
+        elif mtype == "viewer-joined":
+            asyncio.create_task(
+                self._on_viewer(
+                    ws, bool(msg.get("resumed")), msg.get("vid"), msg.get("vtok")
                 )
-            elif mtype == "peer-left" and msg.get("who") == "viewer":
-                await self._stop_stream()
-                self._viewer_approved = False  # viewer relationship ended; re-consent next
-                local = self.ended_locally
-                self.ended_locally = False
-                self._report_peer_left(local)
-            elif mtype == "viewer-interrupted":
-                # The server noticed the viewer's link went quiet — its browser tab may
-                # be frozen/backgrounded, or its connection briefly dropped. Advisory
-                # only: we keep the session and consent intact (the WebRTC media keeps
-                # flowing; a frozen tab catches up on unfreeze) and just warn the owner.
-                # A genuine departure still arrives as peer-left (relayed or via the
-                # media connectionstatechange); a reconnect as viewer-joined.
-                self.app.post(self.app.on_viewer_interrupted)
-            elif mtype == "viewer-restored":
-                # The viewer's link went quiet but it is pinging again: clear the warning.
-                self.app.post(self.app.on_viewer_restored)
+            )
+        elif mtype == "peer-left" and msg.get("who") == "viewer":
+            await self._stop_stream()
+            self._viewer_approved = False  # viewer relationship ended; re-consent next
+            local = self.ended_locally
+            self.ended_locally = False
+            self._report_peer_left(local)
+        elif mtype == "viewer-interrupted":
+            # The server noticed the viewer's link went quiet — its browser tab may
+            # be frozen/backgrounded, or its connection briefly dropped. Advisory
+            # only: we keep the session and consent intact (the WebRTC media keeps
+            # flowing; a frozen tab catches up on unfreeze) and just warn the owner.
+            # A genuine departure still arrives as peer-left (relayed or via the
+            # media connectionstatechange); a reconnect as viewer-joined.
+            self.app.post(self.app.on_viewer_interrupted)
+        elif mtype == "viewer-restored":
+            # The viewer's link went quiet but it is pinging again: clear the warning.
+            self.app.post(self.app.on_viewer_restored)
+        elif mtype == "clip":
+            # The viewer's clipboard changed; mirror it onto this machine's clipboard.
+            # Only for an approved, streaming session (same gate as injected input).
+            if not self.streaming:
+                return
+            text = msg.get("text")
+            if isinstance(text, str) and len(text.encode("utf-8")) <= CLIP_MAX_BYTES:
+                # Tk is not thread-safe: set the clipboard on the GUI thread, which also
+                # records it as the last-seen value so the host watcher doesn't echo it
+                # straight back to the viewer.
+                self.app.post(lambda t=text: self.app.set_remote_clipboard(t))
+        elif mtype == "file-begin":
+            # Viewer is sending us a file. Same gate as input: approved + streaming.
+            if self.streaming:
+                await self._on_file_begin(msg)
+        elif mtype == "file-chunk":
+            if self.streaming:
+                await self._on_file_chunk(msg)
+        elif mtype == "file-end":
+            if self.streaming:
+                await self._on_file_end(msg)
+        elif mtype == "file-cancel":
+            # Either a viewer->host transfer the viewer aborted, or the viewer
+            # refusing/aborting a host->viewer transfer we were sending.
+            fid = msg.get("id")
+            self._cancel_recv(fid, notify=False)
+            st = self._send_files.get(fid)
+            if st:
+                st["cancel"] = True
+                st["event"].set()
+        elif mtype == "file-ack":
+            # Flow control for a host->viewer transfer: the viewer acked chunk n.
+            st = self._send_files.get(msg.get("id"))
+            if st:
+                try:
+                    st["acked"] = max(st["acked"], int(msg.get("n", -1)))
+                except (TypeError, ValueError):
+                    pass
+                st["event"].set()
 
     def _report_peer_left(self, local):
         """Report the viewer gone to the UI exactly once per session. Two paths can
@@ -1303,6 +1575,12 @@ class NetClient:
         except Exception:
             return
         self.streaming = True
+        # Advertise optional capabilities so a newer viewer enables its clipboard/file UI
+        # only against an agent that supports them (older agents just ignore these types).
+        try:
+            await ws.send(json.dumps({"type": "caps", "clip": True, "file": True}))
+        except Exception:
+            pass
         # Start grabbing the screen and open the WebRTC video connection.
         self.capture = CaptureManager(self)
         self.capture.start()
@@ -1453,6 +1731,7 @@ class NetClient:
     async def _stop_stream(self):
         self.streaming = False
         self._release_held_buttons()
+        self._reset_transfers()  # discard any in-flight file transfers for this session
         if self.blockrects_task:
             self.blockrects_task.cancel()
             try:
@@ -1945,6 +2224,10 @@ class App:
         self._window_rects = ()      # our windows' screen rects (main + any dialog);
         #                              injected clicks on them are ignored.
         self._agent_foreground = False  # an agent window has OS focus -> drop injected keys
+        self._clip_last = None        # last clipboard text reconciled with the viewer (sent
+        #                               OR received); echo-guards the bidirectional sync. None
+        #                               means "resync baseline on next connected poll".
+        self._clip_after = None       # after() id for the clipboard poll loop
 
         self.root = tk.Tk()
         self.root.title(tr("agent.window.title"))
@@ -2100,15 +2383,26 @@ class App:
             font=tkfont.Font(family="Segoe UI Semibold", size=10),
         )
 
+        # Session controls (Send file + Stop) share one row so they reserve a single
+        # row's height in the fixed window; shown only while a viewer is connected.
+        self.action_row = tk.Frame(self.root, bg=BG)
+        self.send_btn = RoundedButton(
+            self.action_row, tr("agent.btn.sendFile"), NEUTRAL_BG, NEUTRAL_FG,
+            command=self.send_file_click,
+            font=("Segoe UI Semibold", 10), min_width=0, pad_x=14, parent_bg=BG,
+            border=BORDER,
+        )
+        self.send_btn.pack(side="left", padx=(0, 8))
         self.stop_btn = RoundedButton(
-            self.root, tr("agent.btn.stop"), STOP_BG, STOP_FG,
+            self.action_row, tr("agent.btn.stop"), STOP_BG, STOP_FG,
             command=self.end_session_click,
             font=("Segoe UI Semibold", 10), min_width=150, parent_bg=BG,
         )
-        # Packed now so the base-layout measurement below RESERVES room for it in
-        # the fixed window height; it is pack_forget()'d again before the window
-        # is shown (idle state has no Stop button) and re-packed in on_connected.
-        self.stop_btn.pack(pady=(6, 14))
+        self.stop_btn.pack(side="left")
+        # Packed now so the base-layout measurement below RESERVES room for the row in
+        # the fixed window height; it is pack_forget()'d again before the window is
+        # shown (idle state has no controls) and re-packed in on_connected.
+        self.action_row.pack(pady=(6, 14))
 
         # Measure the base layout (no approval prompt / no banner yet) and use it
         # as the minimum size, so the base content can never be shrunk into a
@@ -2136,9 +2430,9 @@ class App:
             + self.subtitle.winfo_reqheight() + 6
         )
 
-        # Base layout is measured; hide the Stop button so it only appears while a
+        # Base layout is measured; hide the controls row so it only appears while a
         # viewer is connected (its height stays reserved in the fixed window).
-        self.stop_btn.pack_forget()
+        self.action_row.pack_forget()
 
     def _build_theme_selector(self):
         # A modern segmented control of rounded buttons (matching the app's other
@@ -2199,7 +2493,7 @@ class App:
             self.set_status(status_text, self._status_color(role))
         if connected:
             # Re-show the connected UI at full color (no fade on a theme switch).
-            self.stop_btn.pack(pady=(6, 14))
+            self.action_row.pack(pady=(6, 14))
             self.stop_btn.set_fade(1.0)
             self.banner.set_text(tr("agent.banner.controlling"))
             self.banner.set_fade_colors(BANNER_BG, BANNER_FG)
@@ -2327,7 +2621,7 @@ class App:
 
         def done():
             if not show:
-                self.stop_btn.pack_forget()
+                self.action_row.pack_forget()
 
         self._animate("stop", draw, on_done=done)
 
@@ -2376,10 +2670,10 @@ class App:
     def on_connected(self):
         self._connected = True
         self.set_status(tr("agent.status.connected"), GOOD)
-        # Show the Stop button only while a viewer is connected (packed back into
-        # the normal flow, below the checkbox). Room for it is reserved in the
-        # fixed window height. It fades in from the background.
-        self.stop_btn.pack(pady=(6, 14))
+        # Show the session controls (Send file + Stop) only while a viewer is connected
+        # (packed back into the normal flow, below the checkbox). Room for the row is
+        # reserved in the fixed window height. The Stop button fades in from the bg.
+        self.action_row.pack(pady=(6, 14))
         self._fade_stop(True)
         # Overlay the banner at the TOP of the window as a full-width strip that
         # covers the title AND the "This computer can be shared" subtitle; fade it in.
@@ -2602,6 +2896,88 @@ class App:
             self.copy_btn.set_text(tr("agent.btn.copied"))
             self.root.after(1500, lambda: self.copy_btn.set_text(tr("agent.btn.copy")))
 
+    def set_remote_clipboard(self, text):
+        """Apply a clipboard value received from the viewer onto this machine's clipboard
+        (GUI thread). Record it as the last reconciled value FIRST so the poll loop sees
+        no change and doesn't bounce it straight back to the viewer."""
+        self._clip_last = text
+        try:
+            self.root.clipboard_clear()
+            if text:
+                self.root.clipboard_append(text)
+        except Exception:
+            pass
+
+    def _clip_tick(self):
+        """Poll the OS clipboard on the GUI thread and push local changes to the viewer.
+        Bidirectional sync of changes only: on (re)connect we take the current clipboard as
+        the baseline without sending it, so nothing pre-existing is leaked; thereafter any
+        genuine local change propagates. Echo is guarded by _clip_last, which both this loop
+        and set_remote_clipboard() keep current. Text only — a non-text/empty clipboard
+        (TclError) is left untouched."""
+        try:
+            if not self._connected or not self.client:
+                self._clip_last = None  # drop the baseline; re-sync on the next session
+            else:
+                cur = self.root.clipboard_get()  # TclError if empty or non-text (e.g. image)
+                if cur != self._clip_last:
+                    if self._clip_last is None:
+                        self._clip_last = cur   # first poll of a session: baseline, no send
+                    elif len(cur.encode("utf-8")) <= CLIP_MAX_BYTES:
+                        self._clip_last = cur
+                        self.client.send_clip(cur)
+                    else:
+                        self._clip_last = cur   # too large to sync; don't retry every tick
+        except tk.TclError:
+            pass
+        except Exception:
+            pass
+        self._clip_after = self.root.after(CLIP_POLL_MS, self._clip_tick)
+
+    def send_file_click(self):
+        """Host->viewer: pick a local file and stream it to the connected viewer."""
+        if not self._connected or not self.client:
+            return
+        try:
+            path = filedialog.askopenfilename(
+                parent=self.root, title=tr("agent.file.pickTitle"))
+        except Exception:
+            path = None
+        if path:
+            self.client.send_file(path)
+
+    def on_file_progress(self, name, got, size, outgoing):
+        """Transfer progress (either direction). Shown in the status line, throttled by
+        the caller's chunk cadence; harmless if a stray late update arrives after a
+        session ends (guarded by _connected)."""
+        if not self._connected:
+            return
+        pct = int(got * 100 / size) if size else 100
+        key = "agent.file.sending" if outgoing else "agent.file.receiving"
+        try:
+            self.set_status(tr(key).format(name=name, pct=pct), BRAND)
+        except Exception:
+            self.set_status(f"{name} — {pct}%", BRAND)
+
+    def on_file_done(self, name, path, outgoing, ok):
+        if ok:
+            key = "agent.file.sent" if outgoing else "agent.file.received"
+            color = GOOD
+        else:
+            key = "agent.file.failed"
+            color = BAD
+        try:
+            self.set_status(tr(key).format(name=name), color)
+        except Exception:
+            self.set_status(name, color)
+        self.root.after(2500, self._restore_status_after_transfer)
+
+    def _restore_status_after_transfer(self):
+        # Return to the normal connected status once no transfer is in flight.
+        c = self.client
+        if self._connected and c and not (c._recv_files or c._send_files):
+            self.set_status(tr("agent.status.connected"), GOOD)
+
     def _toggle_auto(self):
         self.auto_accept = self.auto_var.get()
 
@@ -2658,7 +3034,7 @@ class App:
     def _finish(self):
         # Cancel in-flight fade animations and the drain loop so their after
         # callbacks don't fire against destroyed widgets during teardown.
-        for aid in list(self._anims.values()) + [self._drain_after]:
+        for aid in list(self._anims.values()) + [self._drain_after, self._clip_after]:
             try:
                 if aid is not None:
                     self.root.after_cancel(aid)
@@ -2676,6 +3052,7 @@ class App:
         self._wd_tick = time.time()
         self._wd_grace_until = 0.0
         self.root.after(1000, self._link_watchdog)
+        self._clip_after = self.root.after(CLIP_POLL_MS, self._clip_tick)
         self.root.mainloop()
 
     def _link_watchdog(self):
