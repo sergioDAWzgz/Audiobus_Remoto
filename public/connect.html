@@ -67,7 +67,8 @@
     </svg>
     <header class="bar">
       <a class="brand" href="/"
-        ><img class="brand-logo" src="/logo.png" alt="" /> Audiobus Remote</a
+        ><img class="brand-logo" src="/logo.png" alt="" />
+        <span class="brand-name">Audiobus Remote</span></a
       >
       <div id="status" class="status" data-i18n="connect.status.enterCode">
         Enter a session code
@@ -86,10 +87,16 @@
           </div>
           <div id="monitorPicker" class="monitor-picker" hidden></div>
         </div>
-        <button id="kbBtn" class="btn kb-toggle active" type="button" aria-pressed="true" data-i18n-attr="title:connect.toggle.keyboard">
-          <svg class="btn-ico"><use href="#ico-keyboard" /></svg>
+        <label id="kbSwitch" class="kb-switch" data-i18n-attr="title:connect.toggle.keyboard">
+          <span class="kb-row">
+            <svg class="btn-ico"><use href="#ico-keyboard" /></svg>
+            <span class="switch">
+              <input type="checkbox" id="kbToggle" checked />
+              <span class="slider"></span>
+            </span>
+          </span>
           <span class="btn-label" data-i18n="connect.toggle.keyboard">Keyboard</span>
-        </button>
+        </label>
         <button id="fsBtn" class="btn" hidden type="button" data-i18n-attr="title:connect.btn.fullscreen">
           <svg class="btn-ico"><use href="#ico-expand" /></svg>
           <span class="btn-label" data-i18n="connect.btn.fullscreen">Fullscreen</span>

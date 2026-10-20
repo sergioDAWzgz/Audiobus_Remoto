@@ -279,14 +279,22 @@ body.app {
 .bar {
   display: flex;
   align-items: center;
-  gap: 16px;
+  flex-wrap: wrap; /* on narrow windows the controls wrap to a new row instead of clipping */
+  gap: 10px 16px;
   padding: 10px 16px;
   background: var(--bg-elev);
   border-bottom: 1px solid var(--border);
   flex: 0 0 auto;
 }
 .bar .brand { font-size: 16px; }
-.bar-actions { margin-left: auto; display: flex; align-items: center; gap: 12px; }
+.bar-actions {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 6px 12px;
+}
 
 .status {
   font-size: 13px;
@@ -302,19 +310,32 @@ body.app {
 .status.bad { color: var(--bad); border-color: #e06a6a; }
 .status.warn { color: var(--warn); border-color: #d9b24f; }
 
-/* Narrower windows: collapse the top-bar controls to icons only so the control-heavy
-   session toolbar (grid/single, keyboard, send file, fullscreen, disconnect, share, theme)
-   fits without clipping. Labels stay available as tooltips (every button carries a title=).
-   ~1400px is where the full labeled toolbar stops fitting; below it, icons only. */
-@media (max-width: 1400px) {
-  .bar-actions .btn .btn-label { display: none; }
-  .bar-actions .btn { padding: 9px; gap: 0; }
+/* Top-bar controls are compact: a centered icon with a small caption underneath (always
+   shown, independent of window size), which keeps the control-heavy session toolbar narrow
+   without ever hiding the labels. */
+.bar-actions .btn,
+.masthead-actions .btn {
+  flex-direction: column;
+  gap: 3px;
+  padding: 5px 9px;
 }
-/* The Share / Home masthead is far lighter (brand + theme + one nav button), so it only
-   needs to collapse its button to an icon on genuinely narrow (tablet/phone) windows. */
-@media (max-width: 768px) {
-  .masthead-actions .btn .btn-label { display: none; }
-  .masthead-actions .btn { padding: 9px; gap: 0; }
+.bar-actions .btn .btn-ico,
+.masthead-actions .btn .btn-ico {
+  width: 18px;
+  height: 18px;
+}
+.bar-actions .btn .btn-label,
+.masthead-actions .btn .btn-label {
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 1.1;
+  white-space: nowrap;
+}
+
+/* Small windows: drop the "Audiobus Remote" wordmark (the logo stays, still linking home)
+   to free up space at the top. */
+@media (max-width: 680px) {
+  .brand-name { display: none; }
 }
 
 /* In light mode make the status pill a clearly-outlined white box so it stands
@@ -328,21 +349,80 @@ body.app {
 :root[data-theme="light"] .status.bad { color: #9e1414; border-color: #cf6b6b; }
 :root[data-theme="light"] .status.warn { color: #5f4800; border-color: #c0a33e; }
 
-/* Keyboard-input toggle: a .btn that acts as a switch — brand-filled when ON (keys are
-   forwarded to the remote), muted/outlined when OFF. Click toggles it (see connect.js). */
-.btn.kb-toggle.active {
-  background: var(--brand);
-  border-color: var(--brand);
-  color: var(--brand-ink);
-}
-.btn.kb-toggle:not(.active) {
-  color: var(--muted);
-}
-.btn.kb-toggle:not(.active):hover {
+/* Keyboard-input toggle: a keyboard icon beside a sliding switch, with a small caption
+   below (matching the other top-bar controls). The switch is a styled checkbox (#kbToggle):
+   ON = brand track, knob right (keys forwarded to the remote); OFF = grey track, knob left. */
+.kb-switch {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 3px;
+  padding: 5px 9px;
+  cursor: pointer;
+  user-select: none;
   color: var(--text);
 }
-.btn.kb-toggle:not(.active) .btn-ico {
-  opacity: 0.75;
+.kb-switch .kb-row {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+}
+.kb-switch .btn-ico {
+  width: 18px;
+  height: 18px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.6;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.kb-switch .btn-label {
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 1.1;
+  color: var(--muted);
+}
+.switch {
+  position: relative;
+  width: 30px;
+  height: 17px;
+  flex: 0 0 auto;
+}
+.switch input {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  opacity: 0;
+  cursor: pointer;
+}
+.switch .slider {
+  position: absolute;
+  inset: 0;
+  border-radius: 999px;
+  background: var(--bg-elev-2);
+  border: 1px solid var(--border);
+  transition: background 0.15s ease, border-color 0.15s ease;
+}
+.switch .slider::before {
+  content: "";
+  position: absolute;
+  left: 2px;
+  top: 2px;
+  width: 11px;
+  height: 11px;
+  border-radius: 50%;
+  background: var(--muted);
+  transition: transform 0.15s ease, background 0.15s ease;
+}
+.switch input:checked + .slider {
+  background: var(--brand);
+  border-color: var(--brand);
+}
+.switch input:checked + .slider::before {
+  transform: translateX(13px);
+  background: #fff;
 }
 
 .join {
