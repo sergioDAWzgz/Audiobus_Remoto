@@ -329,17 +329,20 @@ body.app {
    shown, independent of window size), which keeps the control-heavy session toolbar narrow
    without ever hiding the labels. */
 .bar-actions .btn,
+.bar-end .btn,
 .masthead-actions .btn {
   flex-direction: column;
   gap: 3px;
   padding: 5px 9px;
 }
 .bar-actions .btn .btn-ico,
+.bar-end .btn .btn-ico,
 .masthead-actions .btn .btn-ico {
   width: 18px;
   height: 18px;
 }
 .bar-actions .btn .btn-label,
+.bar-end .btn .btn-label,
 .masthead-actions .btn .btn-label {
   font-size: 10px;
   font-weight: 600;
