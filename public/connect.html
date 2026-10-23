@@ -64,14 +64,19 @@
         <path d="M3.7 8.7h.01M6 8.7h.01M8.3 8.7h.01M10.6 8.7h.01M12.3 8.7h.01" />
         <path d="M5.2 10.5h5.6" />
       </symbol>
+      <symbol id="ico-input" viewBox="0 0 16 16">
+        <path d="M3.4 2.2 3.4 12.8 6.2 10 8.1 13.9 9.9 13 8 9.2 11.8 9.2Z" />
+      </symbol>
     </svg>
     <header class="bar">
-      <a class="brand" href="/"
-        ><img class="brand-logo" src="/logo.png" alt="" />
-        <span class="brand-name">Audiobus Remote</span></a
-      >
-      <div id="status" class="status" data-i18n="connect.status.enterCode">
-        Enter a session code
+      <div class="bar-left">
+        <a class="brand" href="/"
+          ><img class="brand-logo" src="/logo.png" alt="" />
+          <span class="brand-name">Audiobus Remote</span></a
+        >
+        <div id="status" class="status" data-i18n="connect.status.enterCode">
+          Enter a session code
+        </div>
       </div>
       <div class="bar-actions">
         <div id="viewControls" class="view-controls" hidden>
@@ -87,15 +92,15 @@
           </div>
           <div id="monitorPicker" class="monitor-picker" hidden></div>
         </div>
-        <label id="kbSwitch" class="kb-switch" data-i18n-attr="title:connect.toggle.keyboard">
+        <label id="kbSwitch" class="kb-switch" data-i18n-attr="title:connect.toggle.input">
           <span class="kb-row">
-            <svg class="btn-ico"><use href="#ico-keyboard" /></svg>
+            <svg class="btn-ico ico-filled"><use href="#ico-input" /></svg>
             <span class="switch">
               <input type="checkbox" id="kbToggle" checked />
               <span class="slider"></span>
             </span>
           </span>
-          <span class="btn-label" data-i18n="connect.toggle.keyboard">Keyboard</span>
+          <span class="btn-label" data-i18n="connect.toggle.input">Input</span>
         </label>
         <button id="fsBtn" class="btn" hidden type="button" data-i18n-attr="title:connect.btn.fullscreen">
           <svg class="btn-ico"><use href="#ico-expand" /></svg>
@@ -110,6 +115,8 @@
           <svg class="btn-ico"><use href="#ico-disconnect" /></svg>
           <span class="btn-label" data-i18n="connect.btn.disconnect">Disconnect</span>
         </button>
+      </div>
+      <div class="bar-end">
         <a class="btn nav" href="/share" target="_blank" rel="noopener" data-i18n-attr="title:connect.nav.share">
           <svg class="btn-ico" viewBox="0 0 16 16" aria-hidden="true">
             <circle cx="4" cy="8" r="2.1" />
@@ -118,7 +125,7 @@
             <path d="M5.9 7 10.1 4.6" />
             <path d="M5.9 9 10.1 11.4" />
           </svg>
-          <span class="btn-label" data-i18n="connect.nav.share">Share this computer</span>
+          <span class="btn-label" data-i18n="connect.nav.share">Share PC</span>
         </a>
         <label class="theme-select">
           <svg class="theme-ico" viewBox="0 0 16 16" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.3">
