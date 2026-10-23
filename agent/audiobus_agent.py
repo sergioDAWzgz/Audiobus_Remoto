@@ -385,14 +385,42 @@ def _in_rects(x, y, rects):
     return False
 
 
+def _click_on_agent(x, y, rects, agent_hwnds):
+    """True if an injected click at absolute (x, y) should be blocked because it lands on
+    one of the agent's OWN windows AND that window is really the top-most one there.
+
+    Fast reject: outside every agent rect -> not on the agent. Inside a rect, another
+    window may now be covering the agent at that point, so ask the OS which window is
+    actually there (Z-order aware, via WindowFromPoint) and only block when it is ours.
+    If that check can't run, fall back to blocking — the original rect-only behaviour —
+    so protection is never silently weakened. Safe to call off the Tk thread (the Win32
+    hit-test is a read-only query; agent_hwnds was captured on the Tk thread)."""
+    if not _in_rects(x, y, rects):
+        return False
+    if not agent_hwnds:
+        return True
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        u = ctypes.windll.user32
+        u.WindowFromPoint.argtypes = [wintypes.POINT]  # POINT is passed BY VALUE
+        hwnd = u.WindowFromPoint(wintypes.POINT(int(x), int(y)))
+        root = u.GetAncestor(hwnd, 2) if hwnd else 0  # GA_ROOT -> the top-level window
+        return (hwnd in agent_hwnds) or (root in agent_hwnds)
+    except Exception:
+        return True  # fail closed: keep the original protective behaviour
+
+
 def apply_event(ev, monitors=None, window_rects=None, blocked=None,
-                pressed=None, agent_foreground=False):
+                pressed=None, agent_foreground=False, agent_hwnds=None):
     """Apply one remote input event, while protecting the agent's OWN windows so a
     remote user can't close it or drive its controls:
 
-    - Mouse CLICKS/SCROLL that land on any agent window (window_rects: the main
-      window plus any open dialog, full frames incl. the title bar, in physical
-      screen coords) are ignored. Cursor MOVEMENT may still pass over them.
+    - Mouse CLICKS/SCROLL that land on an agent window AND where that window is actually
+      the top-most one (agent_hwnds: our window handles, checked Z-order aware so a click
+      over another window that now covers the agent is NOT blocked) are ignored. Cursor
+      MOVEMENT may still pass over them.
     - Injected KEYBOARD is dropped while an agent window is foreground
       (agent_foreground), so injected Alt+F4 / Tab-to-a-button can't close or press
       the agent.
@@ -422,7 +450,7 @@ def apply_event(ev, monitors=None, window_rects=None, blocked=None,
         elif t == "md":
             ax, ay = off_x + ev["x"], off_y + ev["y"]
             b = ev.get("b", 0)
-            if _in_rects(ax, ay, window_rects):
+            if _click_on_agent(ax, ay, window_rects, agent_hwnds):
                 if blocked is not None:
                     blocked.add(b)  # suppress this press (and its matching release)
                 return
@@ -443,8 +471,8 @@ def apply_event(ev, monitors=None, window_rects=None, blocked=None,
                 pressed.discard(b)
         elif t == "scroll":
             ax, ay = off_x + ev["x"], off_y + ev["y"]
-            if _in_rects(ax, ay, window_rects):
-                return  # don't scroll an agent window
+            if _click_on_agent(ax, ay, window_rects, agent_hwnds):
+                return  # don't scroll an agent window that is actually on top here
             mouse.position = (ax, ay)
             sx = _wheel_steps(ev.get("dx", 0))
             sy = _wheel_steps(ev.get("dy", 0))
@@ -1177,6 +1205,7 @@ class NetClient:
                 getattr(self.app, "_window_rects", None),
                 self._blocked_btns, self._pressed_btns,
                 getattr(self.app, "_agent_foreground", False),
+                getattr(self.app, "_our_hwnds", None),
             )
             return
         mtype = msg.get("type")
@@ -1873,7 +1902,10 @@ class App:
         self._interrupt_grace = None   # after() id: delay before the dialog first shows
         self._interrupt_reask = None   # after() id for re-asking 10s after "Wait"
         self._window_rects = ()      # our windows' screen rects (main + any dialog);
-        #                              injected clicks on them are ignored.
+        #                              injected clicks on them are ignored (when we're on top).
+        self._our_hwnds = frozenset()  # our top-level window handles, for the Z-order-aware
+        #                              click filter (a click where another window covers us
+        #                              is allowed through).
         self._agent_foreground = False  # an agent window has OS focus -> drop injected keys
         self._clip_last = None        # last clipboard text reconciled with the viewer (sent
         #                               OR received); echo-guards the bidirectional sync. None
@@ -2210,6 +2242,8 @@ class App:
                     except Exception:
                         pass
             self._agent_foreground = u.GetForegroundWindow() in our_hwnds
+            # Captured on the Tk thread; the net thread reads it for the click filter.
+            self._our_hwnds = frozenset(our_hwnds)
         except Exception:
             pass
         if rects:
