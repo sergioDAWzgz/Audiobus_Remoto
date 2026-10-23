@@ -385,6 +385,48 @@ def _in_rects(x, y, rects):
     return False
 
 
+def _subtract_rect(rects, c):
+    """Subtract rect c (l,t,r,b) from each rect in `rects`, returning the remaining pieces
+    (up to four per input rect). Pure geometry; used to carve covering windows out of the
+    agent's frame so only its visible parts remain."""
+    cl, ct, cr, cb = c
+    out = []
+    for (l, t, r, b) in rects:
+        xl, yt, xr, yb = max(l, cl), max(t, ct), min(r, cr), min(b, cb)
+        if xr <= xl or yb <= yt:
+            out.append((l, t, r, b))      # no real overlap -> keep whole
+            continue
+        if yt > t:
+            out.append((l, t, r, yt))     # strip above the cover
+        if yb < b:
+            out.append((l, yb, r, b))     # strip below the cover
+        if xl > l:
+            out.append((l, yt, xl, yb))   # strip left of the cover
+        if xr < r:
+            out.append((xr, yt, r, yb))   # strip right of the cover
+    return out
+
+
+def _visible_subrects(full_rect, higher_rects):
+    """The parts of full_rect not covered by any of higher_rects (windows above it)."""
+    vis = [full_rect]
+    for c in higher_rects:
+        vis = _subtract_rect(vis, c)
+        if not vis:
+            break
+    return vis
+
+
+def _window_title(hwnd):
+    try:
+        import ctypes
+        buf = ctypes.create_unicode_buffer(160)
+        ctypes.windll.user32.GetWindowTextW(hwnd, buf, 160)
+        return buf.value
+    except Exception:
+        return ""
+
+
 # Opt-in click-filter diagnostics: set AUDIOBUS_DEBUG_CLICKS=1 to append each click's
 # decision to ~/audiobus-click.log. Off (and zero-cost) by default.
 _CLICK_DEBUG = bool(os.environ.get("AUDIOBUS_DEBUG_CLICKS"))
@@ -440,7 +482,8 @@ def _click_on_agent(x, y, rects):
         on_agent = (pid == os.getpid())
         if _CLICK_DEBUG:
             _click_log(f"({x},{y}) in rect; WindowFromPoint hwnd={hwnd} pid={pid} "
-                       f"our_pid={os.getpid()} -> {'BLOCK' if on_agent else 'allow'}")
+                       f"title={_window_title(hwnd)!r} our_pid={os.getpid()} -> "
+                       f"{'BLOCK' if on_agent else 'allow'}")
         return on_agent
     except Exception as e:
         if _CLICK_DEBUG:
@@ -2249,29 +2292,60 @@ class App:
             from ctypes import wintypes
 
             u = ctypes.windll.user32
+            u.GetWindow.restype = wintypes.HWND
+            u.GetWindow.argtypes = [wintypes.HWND, wintypes.UINT]
+            u.IsWindowVisible.argtypes = [wintypes.HWND]
+            u.GetWindowRect.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.RECT)]
 
-            def _rect_for(widget):
+            def _hwnd_rect(widget):
                 try:
                     hwnd = u.GetAncestor(widget.winfo_id(), 2)  # GA_ROOT
                     if not hwnd:
-                        return None
+                        return None, None
                     r = wintypes.RECT()
                     if u.GetWindowRect(wintypes.HWND(hwnd), ctypes.byref(r)):
-                        return (r.left, r.top, r.right, r.bottom)
+                        return hwnd, (r.left, r.top, r.right, r.bottom)
                 except Exception:
                     pass
-                return None
+                return None, None
 
-            main = _rect_for(self.root)
-            if main:
-                rects.append(main)
+            def _higher_rects(hwnd, full):
+                # Visible windows stacked ABOVE hwnd (GW_HWNDPREV walks UP the Z-order)
+                # that overlap `full` — these cover part of the agent window.
+                res = []
+                fl, ft, fr, fb = full
+                w = wintypes.HWND(hwnd)
+                for _ in range(500):  # bounded walk
+                    w = u.GetWindow(w, 3)  # GW_HWNDPREV
+                    if not w:
+                        break
+                    if not u.IsWindowVisible(w):
+                        continue
+                    wr = wintypes.RECT()
+                    if not u.GetWindowRect(w, ctypes.byref(wr)):
+                        continue
+                    if (wr.right <= fl or wr.left >= fr
+                            or wr.bottom <= ft or wr.top >= fb):
+                        continue  # no overlap
+                    res.append((wr.left, wr.top, wr.right, wr.bottom))
+                return res
+
+            def _add_visible(widget):
+                # Report only the window's VISIBLE parts (frame minus whatever covers it),
+                # so the click filter and the viewer's blocked-cursor hint don't treat a
+                # covered area — where a click now reaches the window on top — as blocked.
+                hwnd, full = _hwnd_rect(widget)
+                if not full:
+                    return
+                for vr in _visible_subrects(full, _higher_rects(hwnd, full)):
+                    rects.append(vr)
+
+            _add_visible(self.root)
             for w in self.root.winfo_children():  # ActionDialog Toplevels
                 if isinstance(w, tk.Toplevel):
                     try:
                         if w.winfo_exists() and w.winfo_viewable():
-                            dr = _rect_for(w)
-                            if dr:
-                                rects.append(dr)
+                            _add_visible(w)
                     except Exception:
                         pass
             # Are WE the foreground app? Compare by owning process (handle identity is
