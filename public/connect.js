@@ -15,7 +15,7 @@ const statusEl = $("status");
 const joinEl = $("join");
 const stageEl = $("stage");
 const screensEl = $("screens");
-const kbToggle = $("kbToggle");
+const kbBtn = $("kbBtn");
 const fsBtn = $("fsBtn");
 const disconnectBtn = $("disconnectBtn");
 const viewControls = $("viewControls");
@@ -32,7 +32,6 @@ const fileInput = $("fileInput");
 const dropHint = $("dropHint");
 const transfersEl = $("transfers");
 const barActions = document.querySelector(".bar-actions");
-const kbLabel = document.querySelector(".bar-actions .toggle");
 const topBar = document.querySelector(".bar");
 const joinStatusSlot = $("joinStatusSlot");
 
@@ -43,6 +42,7 @@ let ws = null;
 let monitors = []; // [{ i, w, h }, ...] in the order the agent sent them
 let screens = new Map(); // monitor index -> { canvas, ctx, handlers, mon }
 let inSession = false;
+let kbEnabled = true; // keyboard input is forwarded to the remote (the kbBtn toggle)
 let viewMode = "grid"; // "grid" | "single"
 let selectedIndex = 0; // monitor index shown in single mode
 let activeDown = null; // { canvas, mon } held between mousedown and mouseup
@@ -1314,7 +1314,7 @@ function moveControlsToFsBar() {
 
 function restoreControlsToBar() {
   if (viewControls.parentElement !== barActions) {
-    barActions.insertBefore(viewControls, kbLabel);
+    barActions.insertBefore(viewControls, kbBtn);
   }
   viewControls.hidden = monitors.length <= 1;
 }
@@ -1455,14 +1455,26 @@ function onWindowMouseUp(e) {
 }
 
 function onKeyDown(e) {
-  if (modalOpen || !inSession || !kbToggle.checked) return;
+  if (modalOpen || !inSession || !kbEnabled) return;
   e.preventDefault();
   send({ t: "kd", key: e.key, code: e.code });
 }
 function onKeyUp(e) {
-  if (modalOpen || !inSession || !kbToggle.checked) return;
+  if (modalOpen || !inSession || !kbEnabled) return;
   e.preventDefault();
   send({ t: "ku", key: e.key, code: e.code });
+}
+
+// The keyboard-forwarding toggle button: brand-filled when on, muted when off.
+function updateKbToggle() {
+  if (!kbBtn) return;
+  kbBtn.classList.toggle("active", kbEnabled);
+  kbBtn.setAttribute("aria-pressed", kbEnabled ? "true" : "false");
+}
+function toggleKeyboard() {
+  kbEnabled = !kbEnabled;
+  updateKbToggle();
+  if (kbBtn) kbBtn.blur(); // so Space/Enter don't re-toggle it while it holds focus
 }
 
 function bindWindowListeners() {
@@ -1588,6 +1600,11 @@ async function requestDisconnect() {
 }
 disconnectBtn.addEventListener("click", requestDisconnect);
 fsDisconnectBtn.addEventListener("click", requestDisconnect);
+
+if (kbBtn) {
+  kbBtn.addEventListener("click", toggleKeyboard);
+  updateKbToggle(); // reflect the initial on state
+}
 
 if (sendFileBtn) sendFileBtn.addEventListener("click", onSendFileClick);
 if (fsSendFileBtn) fsSendFileBtn.addEventListener("click", onSendFileClick);

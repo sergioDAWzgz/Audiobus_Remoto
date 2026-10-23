@@ -58,6 +58,12 @@
         <path d="M4.8 6.4 8 3.2l3.2 3.2" />
         <path d="M2.6 11v1.6a1 1 0 0 0 1 1h8.8a1 1 0 0 0 1-1V11" />
       </symbol>
+      <symbol id="ico-keyboard" viewBox="0 0 16 16">
+        <rect x="1.3" y="4" width="13.4" height="8" rx="1.4" />
+        <path d="M3.7 6.6h.01M6 6.6h.01M8.3 6.6h.01M10.6 6.6h.01M12.3 6.6h.01" />
+        <path d="M3.7 8.7h.01M6 8.7h.01M8.3 8.7h.01M10.6 8.7h.01M12.3 8.7h.01" />
+        <path d="M5.2 10.5h5.6" />
+      </symbol>
     </svg>
     <header class="bar">
       <a class="brand" href="/"
@@ -80,10 +86,10 @@
           </div>
           <div id="monitorPicker" class="monitor-picker" hidden></div>
         </div>
-        <label class="toggle" title="Send keyboard input to the remote computer">
-          <input type="checkbox" id="kbToggle" checked />
-          <span data-i18n="connect.toggle.keyboard">Keyboard</span>
-        </label>
+        <button id="kbBtn" class="btn kb-toggle active" type="button" aria-pressed="true" data-i18n-attr="title:connect.toggle.keyboard">
+          <svg class="btn-ico"><use href="#ico-keyboard" /></svg>
+          <span class="btn-label" data-i18n="connect.toggle.keyboard">Keyboard</span>
+        </button>
         <button id="fsBtn" class="btn" hidden type="button" data-i18n-attr="title:connect.btn.fullscreen">
           <svg class="btn-ico"><use href="#ico-expand" /></svg>
           <span class="btn-label" data-i18n="connect.btn.fullscreen">Fullscreen</span>
