@@ -53,6 +53,11 @@
         <path d="M8 1.6V8" />
         <path d="M4.7 4.1a5 5 0 1 0 6.6 0" />
       </symbol>
+      <symbol id="ico-upload" viewBox="0 0 16 16">
+        <path d="M8 10.8V3.2" />
+        <path d="M4.8 6.4 8 3.2l3.2 3.2" />
+        <path d="M2.6 11v1.6a1 1 0 0 0 1 1h8.8a1 1 0 0 0 1-1V11" />
+      </symbol>
     </svg>
     <header class="bar">
       <a class="brand" href="/"
@@ -83,6 +88,11 @@
           <svg class="btn-ico"><use href="#ico-expand" /></svg>
           <span class="btn-label" data-i18n="connect.btn.fullscreen">Fullscreen</span>
         </button>
+        <button id="sendFileBtn" class="btn" hidden type="button" data-i18n-attr="title:connect.btn.sendFile">
+          <svg class="btn-ico"><use href="#ico-upload" /></svg>
+          <span class="btn-label" data-i18n="connect.btn.sendFile">Send file</span>
+        </button>
+        <input id="fileInput" type="file" multiple hidden />
         <button id="disconnectBtn" class="btn danger" hidden type="button" data-i18n-attr="title:connect.btn.disconnect">
           <svg class="btn-ico"><use href="#ico-disconnect" /></svg>
           <span class="btn-label" data-i18n="connect.btn.disconnect">Disconnect</span>
@@ -148,6 +158,10 @@
           <svg class="btn-ico"><use href="#ico-disconnect" /></svg>
           <span class="btn-label" data-i18n="connect.btn.disconnect">Disconnect</span>
         </button>
+        <button id="fsSendFileBtn" class="btn" hidden type="button" data-i18n-attr="title:connect.btn.sendFile">
+          <svg class="btn-ico"><use href="#ico-upload" /></svg>
+          <span class="btn-label" data-i18n="connect.btn.sendFile">Send file</span>
+        </button>
         <button
           id="fsHint"
           class="fs-hint"
@@ -160,6 +174,14 @@
         </button>
       </div>
       <div id="screens" class="screens"></div>
+      <!-- File-transfer overlays (inside #stage so they also render in fullscreen). -->
+      <div id="dropHint" class="drop-hint" hidden>
+        <div class="drop-hint-box">
+          <svg class="drop-hint-ico" aria-hidden="true"><use href="#ico-upload" /></svg>
+          <span data-i18n="connect.file.dropHere">Drop files to send them to the remote computer</span>
+        </div>
+      </div>
+      <div id="transfers" class="transfers" hidden></div>
     </section>
 
     <script src="/translations.js"></script>
