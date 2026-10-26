@@ -2638,11 +2638,6 @@ class App:
 
         self._drain_after = None
         self._build_ui()
-        # Keep the agent's OWN window out of the captured/streamed screen. It shows the
-        # session code, the auto-accept PIN and status — none of which a viewer should
-        # read off the stream (the PIN is meant to be an out-of-band second factor). The
-        # owner still sees the window locally; only screen capture is affected.
-        self._exclude_from_capture()
         # Refresh our window rects / focus state immediately on move/resize/focus
         # change (the 80ms drain is only the backstop), so the click/key filter
         # can't be beaten by a fast window move.
@@ -3454,32 +3449,6 @@ class App:
         on = bool(self.auto_accept and self.pin)
         self.pin_caption.config(text=tr("agent.pin.caption") if on else "")
         self.pin_label.config(text=self.pin if on else "")
-
-    def _exclude_from_capture(self):
-        """Mark the agent's top-level window so screen capture (mss/DXGI/WGC) does not
-        record it — the session code, PIN and banner then never appear in the streamed
-        screen. Uses the OS window (GA_ROOT of the Tk window; the child handle is rejected).
-        Prefers WDA_EXCLUDEFROMCAPTURE (Win10 2004+, window excluded entirely); falls back
-        to WDA_MONITOR (older Windows, window captured as black). Best-effort: if the API is
-        unavailable it degrades to the previous behavior (window visible in the stream)."""
-        try:
-            import ctypes
-            from ctypes import wintypes
-            WDA_MONITOR = 0x01
-            WDA_EXCLUDEFROMCAPTURE = 0x11
-            u = ctypes.windll.user32
-            u.GetAncestor.argtypes = [wintypes.HWND, wintypes.UINT]
-            u.GetAncestor.restype = wintypes.HWND
-            u.SetWindowDisplayAffinity.argtypes = [wintypes.HWND, wintypes.DWORD]
-            u.SetWindowDisplayAffinity.restype = wintypes.BOOL
-            self.root.update_idletasks()
-            hwnd = u.GetAncestor(self.root.winfo_id(), 2)  # GA_ROOT
-            if not hwnd:
-                return
-            if not u.SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE):
-                u.SetWindowDisplayAffinity(hwnd, WDA_MONITOR)
-        except Exception:
-            pass
 
     def _toggle_auto(self):
         # Order the two writes so the net thread (which reads auto_accept then pin in
