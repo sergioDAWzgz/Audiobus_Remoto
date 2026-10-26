@@ -478,7 +478,11 @@ body.app {
 .card h1 { margin: 0 0 8px; font-size: 24px; }
 .card .muted { margin: 0 0 22px; }
 
-#joinForm { display: flex; flex-direction: column; gap: 14px; }
+#joinForm,
+#pinForm { display: flex; flex-direction: column; gap: 14px; }
+/* On the PIN card the Connect button is centered and sits a little lower, below the
+   full-width PIN field (the join card keeps its full-width button). */
+#pinForm .btn { align-self: center; margin-top: 12px; }
 .code-input {
   font-family: ui-monospace, SFMono-Regular, "Cascadia Code", Consolas, monospace;
   font-size: 26px;
