@@ -1122,13 +1122,14 @@ class NetClient:
         self._viewer_lock = asyncio.Lock()
         self._clip_img_lock = asyncio.Lock()  # one clipboard-image send in flight at a time
 
-        # NOTE on coordinates: instantiating mss (ScreenGrabber) makes the PROCESS
-        # per-monitor DPI-aware as a side effect, so from here on screen capture,
-        # the reported monitor origins, pynput cursor positioning, and Win32
-        # GetWindowRect (used for the window-click filter) are ALL in the same
-        # PHYSICAL pixel space — which is why the filter's rects line up with the
-        # injected click coordinates. We don't set awareness ourselves; if that mss
-        # behavior ever changed, these would need to be reconciled explicitly.
+        # NOTE on coordinates: the process is made per-monitor DPI-aware up front, before
+        # any window or grabber exists (see _set_dpi_awareness in main). So screen capture,
+        # the reported monitor origins, pynput cursor positioning, and Win32 GetWindowRect
+        # (used for the window-click filter) are ALL in the same PHYSICAL pixel space, on
+        # every thread — which is why the filter's rects line up with the injected click
+        # coordinates even on a scaled display. (mss would also flip DPI awareness as a
+        # side effect, but only here on the net thread and after the GUI thread's windows
+        # already existed, which split the coordinate spaces on scaled displays.)
         with ScreenGrabber() as sct:
             raw_mons = [dict(m) for m in sct.monitors]
         # sct.monitors[0] is the virtual "all monitors" rectangle; the physical
@@ -2262,6 +2263,7 @@ class App:
         self._clip_after = None       # after() id for the clipboard poll loop
 
         self.root = tk.Tk()
+        self._apply_dpi_scaling()  # keep the UI sized correctly now the process is DPI-aware
         self.root.title(tr("agent.window.title"))
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
 
@@ -3094,6 +3096,18 @@ class App:
         if self._connected and c and not (c._recv_files or c._send_files):
             self.set_status(tr("agent.status.connected"), GOOD)
 
+    def _apply_dpi_scaling(self):
+        """Match Tk's point->pixel scaling to the display DPI. The process is now DPI-aware
+        (see _set_dpi_awareness), so without this, point-sized fonts would render tiny on a
+        scaled display (the OS no longer bitmap-stretches the window). At 100% this equals
+        Tk's default, so it is a no-op there."""
+        try:
+            dpi = ctypes.windll.user32.GetDpiForSystem()  # Windows 10 1607+
+            if dpi and dpi > 0:
+                self.root.tk.call("tk", "scaling", dpi / 72.0)
+        except Exception:
+            pass
+
     def _refresh_pin_label(self):
         """Show the PIN under the auto-accept box when auto-accept is on, else blank."""
         on = bool(self.auto_accept and self.pin)
@@ -3237,7 +3251,38 @@ def parse_args(argv):
     return p.parse_args(argv)
 
 
+def _set_dpi_awareness():
+    """Make the whole process per-monitor DPI-aware BEFORE any Tk window or ScreenGrabber
+    exists, so every thread shares ONE coordinate space.
+
+    Without this, Tk windows are created while the process is still DPI-unaware and mss
+    later flips the process to per-monitor aware on the NETWORK thread (see the note at
+    ScreenGrabber() in NetClient._run). On a SCALED display (e.g. 125%) that leaves the GUI
+    thread's window rects in LOGICAL pixels while the click hit-test (WindowFromPoint) and
+    pynput injection run in PHYSICAL pixels — so the blocked region and the actual block
+    land in different places and the filter wrongly blocks clicks that reach a foreground
+    app. At 100% the two spaces coincide, which is why it only shows up when scaled.
+
+    Best-effort across Windows versions; a harmless no-op where the APIs are missing."""
+    try:
+        # Per-Monitor-Aware v2 (Windows 10 1703+): DPI_AWARENESS_CONTEXT = (HANDLE)-4.
+        if ctypes.windll.user32.SetProcessDpiAwarenessContext(ctypes.c_void_p(-4)):
+            return
+    except Exception:
+        pass
+    try:
+        ctypes.windll.shcore.SetProcessDpiAwareness(2)  # PROCESS_PER_MONITOR_DPI_AWARE
+        return
+    except Exception:
+        pass
+    try:
+        ctypes.windll.user32.SetProcessDPIAware()  # system-aware fallback (Vista+)
+    except Exception:
+        pass
+
+
 def main(argv=None):
+    _set_dpi_awareness()  # must run before the first Tk window / ScreenGrabber
     args = parse_args(argv if argv is not None else sys.argv[1:])
     try:
         App(args).run()
