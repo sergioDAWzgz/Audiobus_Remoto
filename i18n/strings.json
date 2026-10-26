@@ -100,7 +100,16 @@
     "theme.auto": "Auto",
     "theme.light": "Light",
     "theme.dark": "Dark",
-    "connect.toggle.input": "Input"
+    "connect.toggle.input": "Input",
+    "agent.pin.caption": "Auto-accept PIN",
+    "connect.pin.title": "Enter the PIN",
+    "connect.pin.desc": "This computer auto-accepts connections protected by a PIN. Enter the {len}-digit PIN shown in the Audiobus agent on that computer.",
+    "connect.pin.checking": "Checking PIN…",
+    "connect.pin.bad": "Wrong PIN — {left} attempts left.",
+    "connect.pin.failed": "PIN rejected. Ask for the current PIN and try again.",
+    "connect.err.pinLen": "Enter the {len}-digit PIN.",
+    "connect.pin.submit": "Connect",
+    "agent.status.pinBlocked": "Too many wrong PINs — connection blocked."
   },
   "es": {
     "doc.title.home": "Audiobus Remote",
@@ -203,7 +212,16 @@
     "agent.file.sent": "Enviado {name}",
     "agent.file.received": "Recibido {name}",
     "agent.file.failed": "Transferencia fallida: {name}",
-    "connect.toggle.input": "Entrada"
+    "connect.toggle.input": "Entrada",
+    "connect.pin.submit": "Conectar",
+    "agent.pin.caption": "PIN de aceptación automática",
+    "connect.pin.title": "Introduce el PIN",
+    "connect.pin.desc": "Este ordenador acepta automáticamente las conexiones protegidas con un PIN. Introduce el PIN de {len} dígitos que muestra el agente Audiobus en ese ordenador.",
+    "connect.pin.checking": "Comprobando el PIN…",
+    "connect.pin.bad": "PIN incorrecto — quedan {left} intentos.",
+    "connect.pin.failed": "PIN rechazado. Pide el PIN actual e inténtalo de nuevo.",
+    "connect.err.pinLen": "Introduce el PIN de {len} dígitos.",
+    "agent.status.pinBlocked": "Demasiados PIN incorrectos — conexión bloqueada."
   },
   "fr": {
     "doc.title.home": "Audiobus Remote",
@@ -296,7 +314,16 @@
     "agent.file.sent": "{name} envoyé",
     "agent.file.received": "{name} reçu",
     "agent.file.failed": "Échec du transfert : {name}",
-    "connect.toggle.input": "Entrée"
+    "connect.toggle.input": "Entrée",
+    "connect.pin.submit": "Se connecter",
+    "agent.pin.caption": "PIN d'acceptation automatique",
+    "connect.pin.title": "Saisissez le PIN",
+    "connect.pin.desc": "Cet ordinateur accepte automatiquement les connexions protégées par un PIN. Saisissez le PIN à {len} chiffres affiché dans l'agent Audiobus sur cet ordinateur.",
+    "connect.pin.checking": "Vérification du PIN…",
+    "connect.pin.bad": "PIN incorrect — {left} tentatives restantes.",
+    "connect.pin.failed": "PIN refusé. Demandez le PIN actuel et réessayez.",
+    "connect.err.pinLen": "Saisissez le PIN à {len} chiffres.",
+    "agent.status.pinBlocked": "Trop de PIN incorrects — connexion bloquée."
   },
   "de": {
     "doc.title.home": "Audiobus Remote",
@@ -389,7 +416,16 @@
     "agent.file.sent": "{name} gesendet",
     "agent.file.received": "{name} empfangen",
     "agent.file.failed": "Übertragung fehlgeschlagen: {name}",
-    "connect.toggle.input": "Eingabe"
+    "connect.toggle.input": "Eingabe",
+    "connect.pin.submit": "Verbinden",
+    "agent.pin.caption": "PIN für automatische Annahme",
+    "connect.pin.title": "PIN eingeben",
+    "connect.pin.desc": "Dieser Computer nimmt durch eine PIN geschützte Verbindungen automatisch an. Gib die {len}-stellige PIN ein, die im Audiobus-Agenten auf diesem Computer angezeigt wird.",
+    "connect.pin.checking": "PIN wird überprüft…",
+    "connect.pin.bad": "Falsche PIN — noch {left} Versuche übrig.",
+    "connect.pin.failed": "PIN abgelehnt. Frage nach der aktuellen PIN und versuche es erneut.",
+    "connect.err.pinLen": "Gib die {len}-stellige PIN ein.",
+    "agent.status.pinBlocked": "Zu viele falsche PINs — Verbindung blockiert."
   },
   "it": {
     "doc.title.home": "Audiobus Remote",
@@ -482,7 +518,16 @@
     "agent.file.sent": "{name} inviato",
     "agent.file.received": "{name} ricevuto",
     "agent.file.failed": "Trasferimento fallito: {name}",
-    "connect.toggle.input": "Input"
+    "connect.toggle.input": "Input",
+    "connect.pin.submit": "Connetti",
+    "agent.pin.caption": "PIN di accettazione automatica",
+    "connect.pin.title": "Inserisci il PIN",
+    "connect.pin.desc": "Questo computer accetta automaticamente le connessioni protette da un PIN. Inserisci il PIN di {len} cifre mostrato nell'agente Audiobus su quel computer.",
+    "connect.pin.checking": "Verifica del PIN…",
+    "connect.pin.bad": "PIN errato — {left} tentativi rimasti.",
+    "connect.pin.failed": "PIN rifiutato. Chiedi il PIN attuale e riprova.",
+    "connect.err.pinLen": "Inserisci il PIN di {len} cifre.",
+    "agent.status.pinBlocked": "Troppi PIN errati — connessione bloccata."
   },
   "pt": {
     "doc.title.home": "Audiobus Remote",
@@ -575,7 +620,16 @@
     "agent.file.sent": "{name} enviado",
     "agent.file.received": "{name} recebido",
     "agent.file.failed": "Falha na transferência: {name}",
-    "connect.toggle.input": "Entrada"
+    "connect.toggle.input": "Entrada",
+    "connect.pin.submit": "Ligar",
+    "agent.pin.caption": "PIN de aceitação automática",
+    "connect.pin.title": "Introduza o PIN",
+    "connect.pin.desc": "Este computador aceita automaticamente as ligações protegidas por um PIN. Introduza o PIN de {len} dígitos apresentado no agente Audiobus nesse computador.",
+    "connect.pin.checking": "A verificar o PIN…",
+    "connect.pin.bad": "PIN incorreto — restam {left} tentativas.",
+    "connect.pin.failed": "PIN rejeitado. Peça o PIN atual e tente novamente.",
+    "connect.err.pinLen": "Introduza o PIN de {len} dígitos.",
+    "agent.status.pinBlocked": "Demasiados PIN incorretos — ligação bloqueada."
   },
   "pt-br": {
     "doc.title.home": "Audiobus Remote",
@@ -668,7 +722,16 @@
     "agent.file.sent": "{name} enviado",
     "agent.file.received": "{name} recebido",
     "agent.file.failed": "Falha na transferência: {name}",
-    "connect.toggle.input": "Entrada"
+    "connect.toggle.input": "Entrada",
+    "connect.pin.submit": "Conectar",
+    "agent.pin.caption": "PIN de aceitação automática",
+    "connect.pin.title": "Digite o PIN",
+    "connect.pin.desc": "Este computador aceita automaticamente conexões protegidas por um PIN. Digite o PIN de {len} dígitos mostrado no agente Audiobus desse computador.",
+    "connect.pin.checking": "Verificando o PIN…",
+    "connect.pin.bad": "PIN incorreto — restam {left} tentativas.",
+    "connect.pin.failed": "PIN rejeitado. Peça o PIN atual e tente novamente.",
+    "connect.err.pinLen": "Digite o PIN de {len} dígitos.",
+    "agent.status.pinBlocked": "PINs incorretos demais — conexão bloqueada."
   },
   "nl": {
     "doc.title.home": "Audiobus Remote",
@@ -761,7 +824,16 @@
     "agent.file.sent": "{name} verzonden",
     "agent.file.received": "{name} ontvangen",
     "agent.file.failed": "Overdracht mislukt: {name}",
-    "connect.toggle.input": "Invoer"
+    "connect.toggle.input": "Invoer",
+    "connect.pin.submit": "Verbinden",
+    "agent.pin.caption": "PIN voor automatisch accepteren",
+    "connect.pin.title": "Voer de PIN in",
+    "connect.pin.desc": "Deze computer accepteert automatisch verbindingen die met een PIN zijn beveiligd. Voer de {len}-cijferige PIN in die in de Audiobus-agent op die computer wordt getoond.",
+    "connect.pin.checking": "PIN controleren…",
+    "connect.pin.bad": "Onjuiste PIN — nog {left} pogingen over.",
+    "connect.pin.failed": "PIN geweigerd. Vraag om de huidige PIN en probeer het opnieuw.",
+    "connect.err.pinLen": "Voer de {len}-cijferige PIN in.",
+    "agent.status.pinBlocked": "Te veel onjuiste PIN's — verbinding geblokkeerd."
   },
   "ru": {
     "doc.title.home": "Audiobus Remote",
@@ -854,7 +926,16 @@
     "agent.file.sent": "Отправлено: {name}",
     "agent.file.received": "Получено: {name}",
     "agent.file.failed": "Ошибка передачи: {name}",
-    "connect.toggle.input": "Ввод"
+    "connect.toggle.input": "Ввод",
+    "connect.pin.submit": "Подключиться",
+    "agent.pin.caption": "PIN автоприёма",
+    "connect.pin.title": "Введите PIN",
+    "connect.pin.desc": "Этот компьютер автоматически принимает подключения, защищённые PIN-кодом. Введите PIN из {len} цифр, показанный в агенте Audiobus на том компьютере.",
+    "connect.pin.checking": "Проверка PIN…",
+    "connect.pin.bad": "Неверный PIN — осталось {left} попыток.",
+    "connect.pin.failed": "PIN отклонён. Запросите текущий PIN и повторите попытку.",
+    "connect.err.pinLen": "Введите PIN из {len} цифр.",
+    "agent.status.pinBlocked": "Слишком много неверных PIN — подключение заблокировано."
   },
   "uk": {
     "doc.title.home": "Audiobus Remote",
@@ -947,7 +1028,16 @@
     "agent.file.sent": "Надіслано: {name}",
     "agent.file.received": "Отримано: {name}",
     "agent.file.failed": "Помилка передавання: {name}",
-    "connect.toggle.input": "Ввід"
+    "connect.toggle.input": "Ввід",
+    "connect.pin.submit": "Підключитися",
+    "agent.pin.caption": "PIN автоприйняття",
+    "connect.pin.title": "Введіть PIN",
+    "connect.pin.desc": "Цей комп'ютер автоматично приймає підключення, захищені PIN-кодом. Введіть PIN із {len} цифр, показаний в агенті Audiobus на тому комп'ютері.",
+    "connect.pin.checking": "Перевірка PIN…",
+    "connect.pin.bad": "Неправильний PIN — залишилося {left} спроб.",
+    "connect.pin.failed": "PIN відхилено. Запитайте поточний PIN і повторіть спробу.",
+    "connect.err.pinLen": "Введіть PIN із {len} цифр.",
+    "agent.status.pinBlocked": "Забагато неправильних PIN — підключення заблоковано."
   },
   "pl": {
     "doc.title.home": "Audiobus Remote",
@@ -1040,7 +1130,16 @@
     "agent.file.sent": "Wysłano: {name}",
     "agent.file.received": "Odebrano: {name}",
     "agent.file.failed": "Błąd przesyłania: {name}",
-    "connect.toggle.input": "Sterowanie"
+    "connect.toggle.input": "Sterowanie",
+    "connect.pin.submit": "Połącz",
+    "agent.pin.caption": "PIN automatycznej akceptacji",
+    "connect.pin.title": "Wpisz PIN",
+    "connect.pin.desc": "Ten komputer automatycznie akceptuje połączenia chronione PIN-em. Wpisz {len}-cyfrowy PIN wyświetlony w agencie Audiobus na tym komputerze.",
+    "connect.pin.checking": "Sprawdzanie PIN-u…",
+    "connect.pin.bad": "Nieprawidłowy PIN — pozostało {left} prób.",
+    "connect.pin.failed": "PIN odrzucony. Poproś o aktualny PIN i spróbuj ponownie.",
+    "connect.err.pinLen": "Wpisz {len}-cyfrowy PIN.",
+    "agent.status.pinBlocked": "Zbyt wiele błędnych PIN-ów — połączenie zablokowane."
   },
   "cs": {
     "doc.title.home": "Audiobus Remote",
@@ -1133,7 +1232,16 @@
     "agent.file.sent": "Odesláno: {name}",
     "agent.file.received": "Přijato: {name}",
     "agent.file.failed": "Přenos selhal: {name}",
-    "connect.toggle.input": "Vstup"
+    "connect.toggle.input": "Vstup",
+    "connect.pin.submit": "Připojit",
+    "agent.pin.caption": "PIN pro automatické přijetí",
+    "connect.pin.title": "Zadejte PIN",
+    "connect.pin.desc": "Tento počítač automaticky přijímá připojení chráněná PINem. Zadejte {len}místný PIN zobrazený v agentovi Audiobus na tom počítači.",
+    "connect.pin.checking": "Ověřování PINu…",
+    "connect.pin.bad": "Nesprávný PIN — zbývá {left} pokusů.",
+    "connect.pin.failed": "PIN byl odmítnut. Vyžádejte si aktuální PIN a zkuste to znovu.",
+    "connect.err.pinLen": "Zadejte {len}místný PIN.",
+    "agent.status.pinBlocked": "Příliš mnoho nesprávných PINů — připojení zablokováno."
   },
   "sv": {
     "doc.title.home": "Audiobus Remote",
@@ -1226,7 +1334,16 @@
     "agent.file.sent": "Skickat {name}",
     "agent.file.received": "Mottagit {name}",
     "agent.file.failed": "Överföringen misslyckades: {name}",
-    "connect.toggle.input": "Inmatning"
+    "connect.toggle.input": "Inmatning",
+    "connect.pin.submit": "Anslut",
+    "agent.pin.caption": "PIN för automatisk acceptans",
+    "connect.pin.title": "Ange PIN",
+    "connect.pin.desc": "Den här datorn accepterar automatiskt anslutningar som skyddas av en PIN. Ange den {len}-siffriga PIN som visas i Audiobus-agenten på den datorn.",
+    "connect.pin.checking": "Kontrollerar PIN…",
+    "connect.pin.bad": "Fel PIN — {left} försök kvar.",
+    "connect.pin.failed": "PIN avvisades. Fråga efter den aktuella PIN och försök igen.",
+    "connect.err.pinLen": "Ange den {len}-siffriga PIN.",
+    "agent.status.pinBlocked": "För många felaktiga PIN-koder — anslutning blockerad."
   },
   "da": {
     "doc.title.home": "Audiobus Remote",
@@ -1319,7 +1436,16 @@
     "agent.file.sent": "Sendt {name}",
     "agent.file.received": "Modtaget {name}",
     "agent.file.failed": "Overførsel mislykkedes: {name}",
-    "connect.toggle.input": "Input"
+    "connect.toggle.input": "Input",
+    "connect.pin.submit": "Opret forbindelse",
+    "agent.pin.caption": "PIN til automatisk accept",
+    "connect.pin.title": "Indtast PIN",
+    "connect.pin.desc": "Denne computer accepterer automatisk forbindelser, der er beskyttet med en PIN. Indtast den {len}-cifrede PIN, der vises i Audiobus-agenten på den computer.",
+    "connect.pin.checking": "Kontrollerer PIN…",
+    "connect.pin.bad": "Forkert PIN — {left} forsøg tilbage.",
+    "connect.pin.failed": "PIN afvist. Bed om den aktuelle PIN, og prøv igen.",
+    "connect.err.pinLen": "Indtast den {len}-cifrede PIN.",
+    "agent.status.pinBlocked": "For mange forkerte PIN-koder — forbindelse blokeret."
   },
   "fi": {
     "doc.title.home": "Audiobus Remote",
@@ -1412,7 +1538,16 @@
     "agent.file.sent": "Lähetetty {name}",
     "agent.file.received": "Vastaanotettu {name}",
     "agent.file.failed": "Siirto epäonnistui: {name}",
-    "connect.toggle.input": "Syöte"
+    "connect.toggle.input": "Syöte",
+    "connect.pin.submit": "Yhdistä",
+    "agent.pin.caption": "Automaattisen hyväksynnän PIN",
+    "connect.pin.title": "Syötä PIN",
+    "connect.pin.desc": "Tämä tietokone hyväksyy automaattisesti PIN-koodilla suojatut yhteydet. Syötä {len}-numeroinen PIN, joka näkyy Audiobus-agentissa kyseisellä tietokoneella.",
+    "connect.pin.checking": "Tarkistetaan PIN-koodia…",
+    "connect.pin.bad": "Väärä PIN — {left} yritystä jäljellä.",
+    "connect.pin.failed": "PIN hylätty. Pyydä nykyinen PIN ja yritä uudelleen.",
+    "connect.err.pinLen": "Syötä {len}-numeroinen PIN.",
+    "agent.status.pinBlocked": "Liian monta väärää PIN-koodia — yhteys estetty."
   },
   "no": {
     "doc.title.home": "Audiobus Remote",
@@ -1505,7 +1640,16 @@
     "agent.file.sent": "Sendt {name}",
     "agent.file.received": "Mottatt {name}",
     "agent.file.failed": "Overføringen mislyktes: {name}",
-    "connect.toggle.input": "Input"
+    "connect.toggle.input": "Input",
+    "connect.pin.submit": "Koble til",
+    "agent.pin.caption": "PIN for automatisk godtakelse",
+    "connect.pin.title": "Skriv inn PIN-en",
+    "connect.pin.desc": "Denne datamaskinen godtar automatisk tilkoblinger som er beskyttet med en PIN. Skriv inn den {len}-sifrede PIN-en som vises i Audiobus-agenten på den datamaskinen.",
+    "connect.pin.checking": "Kontrollerer PIN…",
+    "connect.pin.bad": "Feil PIN — {left} forsøk igjen.",
+    "connect.pin.failed": "PIN avvist. Be om den gjeldende PIN-en, og prøv igjen.",
+    "connect.err.pinLen": "Skriv inn den {len}-sifrede PIN-en.",
+    "agent.status.pinBlocked": "For mange feil PIN-koder — tilkobling blokkert."
   },
   "tr": {
     "doc.title.home": "Audiobus Remote",
@@ -1598,7 +1742,16 @@
     "agent.file.sent": "{name} gönderildi",
     "agent.file.received": "{name} alındı",
     "agent.file.failed": "Aktarım başarısız: {name}",
-    "connect.toggle.input": "Giriş"
+    "connect.toggle.input": "Giriş",
+    "connect.pin.submit": "Bağlan",
+    "agent.pin.caption": "Otomatik kabul PIN'i",
+    "connect.pin.title": "PIN'i girin",
+    "connect.pin.desc": "Bu bilgisayar, PIN ile korunan bağlantıları otomatik olarak kabul eder. O bilgisayardaki Audiobus ajanında gösterilen {len} haneli PIN'i girin.",
+    "connect.pin.checking": "PIN kontrol ediliyor…",
+    "connect.pin.bad": "Yanlış PIN — {left} deneme kaldı.",
+    "connect.pin.failed": "PIN reddedildi. Güncel PIN'i isteyip tekrar deneyin.",
+    "connect.err.pinLen": "{len} haneli PIN'i girin.",
+    "agent.status.pinBlocked": "Çok fazla yanlış PIN — bağlantı engellendi."
   },
   "el": {
     "doc.title.home": "Audiobus Remote",
@@ -1691,7 +1844,16 @@
     "agent.file.sent": "Στάλθηκε {name}",
     "agent.file.received": "Λήφθηκε {name}",
     "agent.file.failed": "Η μεταφορά απέτυχε: {name}",
-    "connect.toggle.input": "Είσοδος"
+    "connect.toggle.input": "Είσοδος",
+    "connect.pin.submit": "Σύνδεση",
+    "agent.pin.caption": "PIN αυτόματης αποδοχής",
+    "connect.pin.title": "Εισαγάγετε το PIN",
+    "connect.pin.desc": "Αυτός ο υπολογιστής αποδέχεται αυτόματα συνδέσεις που προστατεύονται με PIN. Εισαγάγετε το PIN {len} ψηφίων που εμφανίζεται στον πράκτορα Audiobus σε εκείνον τον υπολογιστή.",
+    "connect.pin.checking": "Έλεγχος PIN…",
+    "connect.pin.bad": "Λάθος PIN — απομένουν {left} προσπάθειες.",
+    "connect.pin.failed": "Το PIN απορρίφθηκε. Ζητήστε το τρέχον PIN και δοκιμάστε ξανά.",
+    "connect.err.pinLen": "Εισαγάγετε το PIN {len} ψηφίων.",
+    "agent.status.pinBlocked": "Πάρα πολλά λανθασμένα PIN — η σύνδεση αποκλείστηκε."
   },
   "ro": {
     "doc.title.home": "Audiobus Remote",
@@ -1784,7 +1946,16 @@
     "agent.file.sent": "S-a trimis {name}",
     "agent.file.received": "S-a primit {name}",
     "agent.file.failed": "Transfer eșuat: {name}",
-    "connect.toggle.input": "Intrare"
+    "connect.toggle.input": "Intrare",
+    "connect.pin.submit": "Conectare",
+    "agent.pin.caption": "PIN de acceptare automată",
+    "connect.pin.title": "Introduceți PIN-ul",
+    "connect.pin.desc": "Acest computer acceptă automat conexiunile protejate printr-un PIN. Introduceți PIN-ul de {len} cifre afișat în agentul Audiobus de pe acel computer.",
+    "connect.pin.checking": "Se verifică PIN-ul…",
+    "connect.pin.bad": "PIN incorect — au mai rămas {left} încercări.",
+    "connect.pin.failed": "PIN respins. Cereți PIN-ul curent și încercați din nou.",
+    "connect.err.pinLen": "Introduceți PIN-ul de {len} cifre.",
+    "agent.status.pinBlocked": "Prea multe PIN-uri greșite — conexiune blocată."
   },
   "hu": {
     "doc.title.home": "Audiobus Remote",
@@ -1877,7 +2048,16 @@
     "agent.file.sent": "Elküldve: {name}",
     "agent.file.received": "Fogadva: {name}",
     "agent.file.failed": "Az átvitel sikertelen: {name}",
-    "connect.toggle.input": "Bevitel"
+    "connect.toggle.input": "Bevitel",
+    "connect.pin.submit": "Csatlakozás",
+    "agent.pin.caption": "Automatikus elfogadási PIN-kód",
+    "connect.pin.title": "Írja be a PIN-kódot",
+    "connect.pin.desc": "Ez a számítógép automatikusan elfogadja a PIN-kóddal védett kapcsolatokat. Írja be azt a {len} számjegyű PIN-kódot, amely a másik számítógép Audiobus ügynökében látható.",
+    "connect.pin.checking": "PIN-kód ellenőrzése…",
+    "connect.pin.bad": "Hibás PIN-kód — {left} próbálkozás maradt.",
+    "connect.pin.failed": "PIN-kód elutasítva. Kérje el az aktuális PIN-kódot, és próbálja újra.",
+    "connect.err.pinLen": "Írjon be egy {len} számjegyű PIN-kódot.",
+    "agent.status.pinBlocked": "Túl sok hibás PIN — a kapcsolat letiltva."
   },
   "id": {
     "doc.title.home": "Audiobus Remote",
@@ -1970,7 +2150,16 @@
     "agent.file.sent": "Terkirim {name}",
     "agent.file.received": "Diterima {name}",
     "agent.file.failed": "Transfer gagal: {name}",
-    "connect.toggle.input": "Input"
+    "connect.toggle.input": "Input",
+    "connect.pin.submit": "Hubungkan",
+    "agent.pin.caption": "PIN terima otomatis",
+    "connect.pin.title": "Masukkan PIN",
+    "connect.pin.desc": "Komputer ini otomatis menerima koneksi yang dilindungi PIN. Masukkan PIN {len} digit yang ditampilkan di agen Audiobus pada komputer tersebut.",
+    "connect.pin.checking": "Memeriksa PIN…",
+    "connect.pin.bad": "PIN salah — sisa {left} percobaan.",
+    "connect.pin.failed": "PIN ditolak. Tanyakan PIN saat ini lalu coba lagi.",
+    "connect.err.pinLen": "Masukkan PIN {len} digit.",
+    "agent.status.pinBlocked": "Terlalu banyak PIN salah — koneksi diblokir."
   },
   "vi": {
     "doc.title.home": "Audiobus Remote",
@@ -2063,7 +2252,16 @@
     "agent.file.sent": "Đã gửi {name}",
     "agent.file.received": "Đã nhận {name}",
     "agent.file.failed": "Truyền tệp thất bại: {name}",
-    "connect.toggle.input": "Đầu vào"
+    "connect.toggle.input": "Đầu vào",
+    "connect.pin.submit": "Kết nối",
+    "agent.pin.caption": "PIN tự động chấp nhận",
+    "connect.pin.title": "Nhập PIN",
+    "connect.pin.desc": "Máy tính này tự động chấp nhận các kết nối được bảo vệ bằng PIN. Nhập mã PIN gồm {len} chữ số hiển thị trong agent Audiobus trên máy tính đó.",
+    "connect.pin.checking": "Đang kiểm tra PIN…",
+    "connect.pin.bad": "PIN sai — còn {left} lần thử.",
+    "connect.pin.failed": "PIN bị từ chối. Hãy hỏi mã PIN hiện tại và thử lại.",
+    "connect.err.pinLen": "Nhập mã PIN gồm {len} chữ số.",
+    "agent.status.pinBlocked": "Quá nhiều PIN sai — đã chặn kết nối."
   },
   "th": {
     "doc.title.home": "Audiobus Remote",
@@ -2156,7 +2354,16 @@
     "agent.file.sent": "ส่ง {name} แล้ว",
     "agent.file.received": "รับ {name} แล้ว",
     "agent.file.failed": "การถ่ายโอนล้มเหลว: {name}",
-    "connect.toggle.input": "อินพุต"
+    "connect.toggle.input": "อินพุต",
+    "connect.pin.submit": "เชื่อมต่อ",
+    "agent.pin.caption": "PIN ยอมรับอัตโนมัติ",
+    "connect.pin.title": "ป้อน PIN",
+    "connect.pin.desc": "คอมพิวเตอร์เครื่องนี้ยอมรับการเชื่อมต่อที่ป้องกันด้วย PIN โดยอัตโนมัติ ป้อน PIN {len} หลักที่แสดงในเอเจนต์ Audiobus บนคอมพิวเตอร์เครื่องนั้น",
+    "connect.pin.checking": "กำลังตรวจสอบ PIN…",
+    "connect.pin.bad": "PIN ไม่ถูกต้อง — เหลือ {left} ครั้ง",
+    "connect.pin.failed": "PIN ถูกปฏิเสธ ขอ PIN ปัจจุบันแล้วลองอีกครั้ง",
+    "connect.err.pinLen": "ป้อน PIN {len} หลัก",
+    "agent.status.pinBlocked": "ใส่ PIN ผิดหลายครั้งเกินไป — การเชื่อมต่อถูกบล็อก"
   },
   "zh": {
     "doc.title.home": "Audiobus Remote",
@@ -2249,7 +2456,16 @@
     "agent.file.sent": "已发送 {name}",
     "agent.file.received": "已接收 {name}",
     "agent.file.failed": "传输失败：{name}",
-    "connect.toggle.input": "输入"
+    "connect.toggle.input": "输入",
+    "connect.pin.submit": "连接",
+    "agent.pin.caption": "自动接受 PIN",
+    "connect.pin.title": "输入 PIN",
+    "connect.pin.desc": "这台电脑会自动接受受 PIN 保护的连接。请输入那台电脑上 Audiobus 代理程序中显示的 {len} 位 PIN。",
+    "connect.pin.checking": "正在检查 PIN…",
+    "connect.pin.bad": "PIN 错误 — 还剩 {left} 次尝试。",
+    "connect.pin.failed": "PIN 被拒绝。请询问当前的 PIN 后重试。",
+    "connect.err.pinLen": "请输入 {len} 位 PIN。",
+    "agent.status.pinBlocked": "错误 PIN 次数过多 — 已阻止连接。"
   },
   "zh-tw": {
     "doc.title.home": "Audiobus Remote",
@@ -2342,7 +2558,16 @@
     "agent.file.sent": "已傳送 {name}",
     "agent.file.received": "已接收 {name}",
     "agent.file.failed": "傳輸失敗：{name}",
-    "connect.toggle.input": "輸入"
+    "connect.toggle.input": "輸入",
+    "connect.pin.submit": "連線",
+    "agent.pin.caption": "自動接受 PIN",
+    "connect.pin.title": "輸入 PIN",
+    "connect.pin.desc": "這台電腦會自動接受受 PIN 保護的連線。請輸入那台電腦上 Audiobus 代理程式中顯示的 {len} 位 PIN。",
+    "connect.pin.checking": "正在檢查 PIN…",
+    "connect.pin.bad": "PIN 錯誤 — 還剩 {left} 次嘗試。",
+    "connect.pin.failed": "PIN 被拒絕。請詢問目前的 PIN 後重試。",
+    "connect.err.pinLen": "請輸入 {len} 位 PIN。",
+    "agent.status.pinBlocked": "錯誤 PIN 次數過多 — 已封鎖連線。"
   },
   "ja": {
     "doc.title.home": "Audiobus Remote",
@@ -2435,7 +2660,16 @@
     "agent.file.sent": "{name} を送信しました",
     "agent.file.received": "{name} を受信しました",
     "agent.file.failed": "転送に失敗しました：{name}",
-    "connect.toggle.input": "入力"
+    "connect.toggle.input": "入力",
+    "connect.pin.submit": "接続",
+    "agent.pin.caption": "自動承認PIN",
+    "connect.pin.title": "PINを入力",
+    "connect.pin.desc": "このコンピューターは、PINで保護された接続を自動的に承認します。そのコンピューターの Audiobus エージェントに表示されている{len}桁のPINを入力してください。",
+    "connect.pin.checking": "PINを確認中…",
+    "connect.pin.bad": "PINが違います — 残り{left}回です。",
+    "connect.pin.failed": "PINが拒否されました。現在のPINを確認して、もう一度お試しください。",
+    "connect.err.pinLen": "{len}桁のPINを入力してください。",
+    "agent.status.pinBlocked": "PINの誤入力が多すぎます — 接続をブロックしました。"
   },
   "ko": {
     "doc.title.home": "Audiobus Remote",
@@ -2528,7 +2762,16 @@
     "agent.file.sent": "{name} 보냄",
     "agent.file.received": "{name} 받음",
     "agent.file.failed": "전송 실패: {name}",
-    "connect.toggle.input": "입력"
+    "connect.toggle.input": "입력",
+    "connect.pin.submit": "연결",
+    "agent.pin.caption": "자동 수락 PIN",
+    "connect.pin.title": "PIN 입력",
+    "connect.pin.desc": "이 컴퓨터는 PIN으로 보호된 연결을 자동으로 수락합니다. 해당 컴퓨터의 Audiobus 에이전트에 표시된 {len}자리 PIN을 입력하세요.",
+    "connect.pin.checking": "PIN 확인 중…",
+    "connect.pin.bad": "PIN이 틀렸습니다 — {left}번 남았습니다.",
+    "connect.pin.failed": "PIN이 거부되었습니다. 현재 PIN을 물어본 후 다시 시도하세요.",
+    "connect.err.pinLen": "{len}자리 PIN을 입력하세요.",
+    "agent.status.pinBlocked": "잘못된 PIN이 너무 많습니다 — 연결이 차단되었습니다."
   },
   "ar": {
     "doc.title.home": "Audiobus Remote",
@@ -2621,7 +2864,16 @@
     "agent.file.sent": "تم إرسال {name}",
     "agent.file.received": "تم استقبال {name}",
     "agent.file.failed": "فشل النقل: {name}",
-    "connect.toggle.input": "الإدخال"
+    "connect.toggle.input": "الإدخال",
+    "connect.pin.submit": "اتصال",
+    "agent.pin.caption": "PIN القبول التلقائي",
+    "connect.pin.title": "أدخل رمز PIN",
+    "connect.pin.desc": "يقبل هذا الكمبيوتر الاتصالات المحمية برمز PIN تلقائيًا. أدخل رمز PIN المكوّن من {len} أرقام المعروض في وكيل Audiobus على ذلك الكمبيوتر.",
+    "connect.pin.checking": "جارٍ التحقق من رمز PIN…",
+    "connect.pin.bad": "رمز PIN غير صحيح — تبقّت {left} محاولات.",
+    "connect.pin.failed": "رُفض رمز PIN. اطلب رمز PIN الحالي وحاول مرة أخرى.",
+    "connect.err.pinLen": "أدخل رمز PIN المكوّن من {len} أرقام.",
+    "agent.status.pinBlocked": "عدد كبير جدًا من محاولات PIN الخاطئة — تم حظر الاتصال."
   },
   "he": {
     "doc.title.home": "Audiobus Remote",
@@ -2714,7 +2966,16 @@
     "agent.file.sent": "{name} נשלח",
     "agent.file.received": "{name} התקבל",
     "agent.file.failed": "ההעברה נכשלה: {name}",
-    "connect.toggle.input": "קלט"
+    "connect.toggle.input": "קלט",
+    "connect.pin.submit": "התחבר",
+    "agent.pin.caption": "PIN לקבלה אוטומטית",
+    "connect.pin.title": "הזן את ה-PIN",
+    "connect.pin.desc": "מחשב זה מקבל אוטומטית חיבורים המוגנים ב-PIN. הזן את ה-PIN בן {len} הספרות המוצג בסוכן Audiobus במחשב ההוא.",
+    "connect.pin.checking": "בודק PIN…",
+    "connect.pin.bad": "PIN שגוי — נותרו {left} ניסיונות.",
+    "connect.pin.failed": "ה-PIN נדחה. בקש את ה-PIN הנוכחי ונסה שוב.",
+    "connect.err.pinLen": "הזן את ה-PIN בן {len} הספרות.",
+    "agent.status.pinBlocked": "יותר מדי קודי PIN שגויים — החיבור נחסם."
   },
   "fa": {
     "doc.title.home": "Audiobus Remote",
@@ -2807,7 +3068,16 @@
     "agent.file.sent": "{name} ارسال شد",
     "agent.file.received": "{name} دریافت شد",
     "agent.file.failed": "انتقال ناموفق بود: {name}",
-    "connect.toggle.input": "ورودی"
+    "connect.toggle.input": "ورودی",
+    "connect.pin.submit": "اتصال",
+    "agent.pin.caption": "PIN پذیرش خودکار",
+    "connect.pin.title": "PIN را وارد کنید",
+    "connect.pin.desc": "این رایانه اتصال‌های محافظت‌شده با PIN را به‌طور خودکار می‌پذیرد. PIN ‏{len} رقمی نمایش‌داده‌شده در عامل Audiobus روی آن رایانه را وارد کنید.",
+    "connect.pin.checking": "در حال بررسی PIN…",
+    "connect.pin.bad": "PIN نادرست — {left} تلاش باقی مانده.",
+    "connect.pin.failed": "PIN رد شد. PIN فعلی را بخواهید و دوباره تلاش کنید.",
+    "connect.err.pinLen": "PIN ‏{len} رقمی را وارد کنید.",
+    "agent.status.pinBlocked": "تعداد زیادی PIN اشتباه — اتصال مسدود شد."
   },
   "hi": {
     "doc.title.home": "Audiobus Remote",
@@ -2900,6 +3170,15 @@
     "agent.file.sent": "{name} भेजी गई",
     "agent.file.received": "{name} प्राप्त हुई",
     "agent.file.failed": "स्थानांतरण विफल: {name}",
-    "connect.toggle.input": "इनपुट"
+    "connect.toggle.input": "इनपुट",
+    "connect.pin.submit": "कनेक्ट करें",
+    "agent.pin.caption": "स्वतः-स्वीकार PIN",
+    "connect.pin.title": "PIN दर्ज करें",
+    "connect.pin.desc": "यह कंप्यूटर PIN से सुरक्षित कनेक्शन स्वतः स्वीकार करता है। उस कंप्यूटर पर Audiobus एजेंट में दिखाया गया {len}-अंकों का PIN दर्ज करें।",
+    "connect.pin.checking": "PIN जाँचा जा रहा है…",
+    "connect.pin.bad": "गलत PIN — {left} प्रयास शेष।",
+    "connect.pin.failed": "PIN अस्वीकृत। मौजूदा PIN माँगें और फिर से कोशिश करें।",
+    "connect.err.pinLen": "{len}-अंकों का PIN दर्ज करें।",
+    "agent.status.pinBlocked": "बहुत अधिक गलत PIN — कनेक्शन अवरुद्ध।"
   }
 }

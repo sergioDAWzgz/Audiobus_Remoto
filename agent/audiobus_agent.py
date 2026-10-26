@@ -29,6 +29,7 @@ import io
 import json
 import os
 import queue
+import secrets
 import ssl
 import sys
 import threading
@@ -107,6 +108,25 @@ CLIP_IMG_MAX_BYTES = 16 * 1024 * 1024  # cap on a synced clipboard image (PNG); 
 FILE_CHUNK_BYTES = 128 * 1024  # raw bytes per file-chunk (base64 inflates ~33% on the wire)
 FILE_MAX_BYTES = 2 * 1024 * 1024 * 1024  # hard cap per received/sent file (2 GiB)
 FILE_WINDOW = 8                # unacked file-chunks allowed in flight (sender flow control)
+
+# Auto-accept PIN. When the owner turns on auto-accept, a short numeric PIN is generated
+# and shown in the agent; a fresh viewer must present it to be admitted silently. This
+# keeps a *leaked session code alone* from granting silent access — the code-holder also
+# needs the out-of-band PIN. Brute force is bounded: PIN_LOCKOUT cumulative wrong answers
+# refuse all challenges for a cooldown that DOUBLES on every repeat lockout (up to
+# PIN_COOLDOWN_MAX_S), so a reconnecting code-holder can't grind the space at a fixed rate
+# (and still needs the code). The owner is alerted on each lockout. 6 digits (10^6) with
+# escalating backoff makes a realistic brute-force attempt take months.
+PIN_LEN = 6                    # digits in the generated PIN (short, shared out-of-band)
+PIN_LOCKOUT = 10               # cumulative wrong PINs before challenges are refused...
+PIN_COOLDOWN_S = 60            # ...for this base cooldown, doubling on each repeat lockout...
+PIN_COOLDOWN_MAX_S = 3600      # ...up to this cap (1 hour)
+PIN_TIMEOUT_S = 90             # whole-challenge deadline: a viewer must finish within this
+
+
+def _new_pin():
+    """A fresh, cryptographically-random numeric PIN of PIN_LEN digits (zero-padded)."""
+    return f"{secrets.randbelow(10 ** PIN_LEN):0{PIN_LEN}d}"
 
 # --------------------------------------------------------------------------- #
 # Localization: show the UI in the user's OS language, falling back to English.
@@ -1006,6 +1026,17 @@ class NetClient:
         self._send_files = {}
         self._clip_img_rx = None  # in-flight incoming clipboard image: {"id","buf"}
         self._clip_img_lock = None  # serializes outgoing clipboard-image sends (net loop)
+        # Auto-accept PIN gating (see _challenge_pin). A challenge runs inside _serve_viewer
+        # while it holds the viewer lock, so a single queue/event/counter set is enough.
+        self._pin_queue = None       # asyncio.Queue of a viewer's PIN answers during a
+        #                              challenge; None when no challenge is in progress
+        self._pin_cancel = None      # asyncio.Event: abort the active challenge (the viewer
+        #                              left, or a newer viewer-joined superseded it)
+        self._pin_superseded = False # the last challenge ended by cancel, not a real deny
+        #                              (so _serve_viewer skips the spurious 'denied' send)
+        self._pin_fails = 0          # cumulative wrong PINs in the current lockout window
+        self._pin_backoff = 0        # repeat-lockout count -> exponential cooldown
+        self._pin_lock_until = 0.0   # loop.time() until which challenges are refused
 
     def start(self):
         threading.Thread(target=self._thread_main, daemon=True).start()
@@ -1591,6 +1622,11 @@ class NetClient:
                 )
             )
         elif mtype == "peer-left" and msg.get("who") == "viewer":
+            # If a PIN challenge is in progress for this viewer, abort it so the lock is
+            # released at once instead of waiting out the challenge deadline.
+            c = self._pin_cancel
+            if c is not None:
+                c.set()
             await self._stop_stream()
             self._viewer_approved = False  # viewer relationship ended; re-consent next
             local = self.ended_locally
@@ -1668,6 +1704,12 @@ class NetClient:
                 except (TypeError, ValueError):
                     pass
                 st["event"].set()
+        elif mtype == "pin":
+            # A viewer's answer to a PIN challenge (auto-accept gating). Hand it to the
+            # waiting _challenge_pin; ignored if no challenge is in progress.
+            q = self._pin_queue
+            if q is not None:
+                q.put_nowait(str(msg.get("pin", "")))
 
     def _report_peer_left(self, local):
         """Report the viewer gone to the UI exactly once per session. Two paths can
@@ -1704,6 +1746,11 @@ class NetClient:
         # of prompts.
         self._viewer_gen += 1
         gen = self._viewer_gen
+        # Abort any in-flight PIN challenge so a newer join doesn't wait out the old
+        # challenge's deadline behind the viewer lock (the old one bails as superseded).
+        c = self._pin_cancel
+        if c is not None:
+            c.set()
         async with self._viewer_lock:
             if gen != self._viewer_gen:
                 return
@@ -1763,12 +1810,22 @@ class NetClient:
         self._blocked_btns.clear()
         self._pressed_btns.clear()
         self._last_blockrects = None  # force a fresh blockrects send to this viewer
-        # Auto-accept if the user set it, OR this is the same approved viewer resuming
-        # (by vid on our own reconnect, or by vtok across the viewer's own reconnect — see
-        # above). Everyone else — a first-time viewer, or a different code-holder who took
-        # over the slot — is prompted.
-        if self.app.auto_accept or is_resume:
+        # Decide consent. The same approved viewer resuming (by vid on our own reconnect,
+        # or by vtok across the viewer's own reconnect — see above) is re-admitted silently;
+        # it already earned trust, so no prompt and no PIN. A fresh viewer under auto-accept
+        # must present the PIN (if one is set) before it is admitted; everyone else — a
+        # first-time viewer with auto-accept off, or a different code-holder who took over
+        # the slot — is prompted for manual approval.
+        self._pin_superseded = False
+        # Snapshot (auto_accept, pin) with a single read of each, and FAIL SAFE: if
+        # auto-accept is on but somehow no PIN is set, fall back to the manual prompt
+        # rather than silently admitting (never weaken the gate to "code only").
+        auto = self.app.auto_accept
+        pin = self.app.pin
+        if is_resume:
             allowed = True
+        elif auto and pin:
+            allowed = await self._challenge_pin(ws, pin)
         else:
             allowed = await self.loop.run_in_executor(None, self._ask_approval)
         if not allowed:
@@ -1777,10 +1834,11 @@ class NetClient:
             await self._stop_stream()
             # If our link dropped (or this is no longer the current socket) while the
             # owner was deciding, the approval unblocked because the drop force-closed
-            # the dialog — not because the owner denied. The connection is gone, so
-            # don't send 'denied' or flash a spurious 'Denied' status over the
-            # reconnection (the re-served viewer is re-prompted afresh anyway).
-            if ws is self.ws and not self._link_down:
+            # the dialog — not because the owner denied. Likewise a PIN challenge that was
+            # cancelled (viewer left / superseded) must not fire a 'denied' at whoever now
+            # holds the slot. In those cases the connection is gone / re-served, so don't
+            # send 'denied' or flash a spurious 'Denied' status over the reconnection.
+            if ws is self.ws and not self._link_down and not self._pin_superseded:
                 try:
                     await ws.send(json.dumps({"type": "denied"}))
                 except Exception:
@@ -1926,6 +1984,85 @@ class NetClient:
             await self.pc.addIceCandidate(ice)
         except Exception:
             pass
+
+    async def _challenge_pin(self, ws, pin):
+        """Auto-accept is on with a PIN set: admit only a viewer that presents it.
+
+        Returns True to admit, False to deny. We send `pin-required`, then read the
+        viewer's `pin` answers (delivered via _pin_queue from _handle_msg) and compare in
+        constant time. Hardening:
+          - brute force is bounded by a CUMULATIVE wrong-answer count that survives
+            reconnects; once it reaches PIN_LOCKOUT the agent refuses every challenge for a
+            cooldown that DOUBLES on each repeat lockout (up to PIN_COOLDOWN_MAX_S), and the
+            owner is alerted — so a code-holder can't grind the PIN at a fixed rate.
+          - the WHOLE challenge has one wall-clock deadline (PIN_TIMEOUT_S), so a drip of
+            wrong answers can't hold the viewer-admission lock open indefinitely.
+          - the wait is cancellable: if the viewer leaves (peer-left) or a newer viewer
+            supersedes it, _pin_cancel is set and we bail without a spurious 'denied'.
+          - a non-ASCII / malformed answer counts as a wrong attempt (never crashes the
+            compare). The PIN itself is never logged or echoed."""
+        now = self.loop.time()
+        if self._pin_fails >= PIN_LOCKOUT:
+            if now < self._pin_lock_until:
+                return False          # still cooling down from too many wrong PINs
+            self._pin_fails = 0       # cooldown elapsed — allow guesses again (backoff kept)
+        self._pin_queue = asyncio.Queue()
+        self._pin_cancel = asyncio.Event()
+        self._pin_superseded = False
+        deadline = self.loop.time() + PIN_TIMEOUT_S
+        try:
+            try:
+                await ws.send(json.dumps({"type": "pin-required", "len": len(pin)}))
+            except Exception:
+                return False
+            while True:
+                remaining = deadline - self.loop.time()
+                if remaining <= 0:
+                    return False      # whole-challenge deadline hit
+                getter = asyncio.ensure_future(self._pin_queue.get())
+                canceller = asyncio.ensure_future(self._pin_cancel.wait())
+                try:
+                    done, _ = await asyncio.wait(
+                        {getter, canceller}, timeout=remaining,
+                        return_when=asyncio.FIRST_COMPLETED)
+                finally:
+                    for task in (getter, canceller):
+                        if not task.done():
+                            task.cancel()
+                if canceller in done:
+                    self._pin_superseded = True
+                    return False      # viewer left / superseded: bail without 'denied'
+                if getter not in done:
+                    return False      # timed out waiting for an answer
+                sub = getter.result()
+                if ws is not self.ws or self._link_down:
+                    return False      # our link dropped while we waited
+                ok = False
+                if isinstance(sub, str) and sub.isascii():
+                    try:
+                        ok = secrets.compare_digest(sub, str(pin))
+                    except Exception:
+                        ok = False    # defensive: never let a bad value crash the compare
+                if ok:
+                    self._pin_fails = 0
+                    self._pin_backoff = 0
+                    return True
+                self._pin_fails += 1
+                if self._pin_fails >= PIN_LOCKOUT:
+                    cooldown = min(PIN_COOLDOWN_S * (2 ** self._pin_backoff),
+                                   PIN_COOLDOWN_MAX_S)
+                    self._pin_backoff += 1
+                    self._pin_lock_until = self.loop.time() + cooldown
+                    self.app.post(self.app.on_pin_blocked)  # alert the owner
+                    return False      # too many wrong PINs: lock out and deny
+                left = PIN_LOCKOUT - self._pin_fails
+                try:
+                    await ws.send(json.dumps({"type": "pin-bad", "left": left}))
+                except Exception:
+                    return False
+        finally:
+            self._pin_queue = None
+            self._pin_cancel = None
 
     def _ask_approval(self):
         ev = threading.Event()
@@ -2447,6 +2584,9 @@ class App:
     def __init__(self, args):
         self.args = args
         self.auto_accept = bool(args.auto_accept)
+        # PIN that gates auto-accept (generated whenever auto-accept is on; None when off).
+        # A fresh viewer must present it to be admitted silently (see NetClient._challenge_pin).
+        self.pin = _new_pin() if self.auto_accept else None
         self.q = queue.Queue()
         self.client = None
         self._anims = {}  # key -> pending after-id, for cancellable fade animations
@@ -2498,6 +2638,11 @@ class App:
 
         self._drain_after = None
         self._build_ui()
+        # Keep the agent's OWN window out of the captured/streamed screen. It shows the
+        # session code, the auto-accept PIN and status — none of which a viewer should
+        # read off the stream (the PIN is meant to be an out-of-band second factor). The
+        # owner still sees the window locally; only screen capture is affected.
+        self._exclude_from_capture()
         # Refresh our window rects / focus state immediately on move/resize/focus
         # change (the 80ms drain is only the backstop), so the click/key filter
         # can't be beaten by a fast window move.
@@ -2612,6 +2757,21 @@ class App:
         )
         self.auto_wrap.create_window(_abw / 2, _abh / 2, window=self.auto_chk)
         self.auto_wrap.pack(pady=(2, 6))
+
+        # Auto-accept PIN, shown under the checkbox while auto-accept is on so the owner
+        # can share it. Both lines keep a fixed height so toggling the PIN on/off never
+        # changes the (fixed-size) window: height=1 each reserves the line even when blank.
+        self.pin_caption = tk.Label(
+            self.root, text="", bg=BG, fg=MUTED,
+            font=("Segoe UI", 8, "bold"), height=1,
+        )
+        self.pin_caption.pack()
+        self.pin_label = tk.Label(
+            self.root, text="", bg=BG, fg=TEXT,
+            font=("Consolas", 16, "bold"), height=1,
+        )
+        self.pin_label.pack(pady=(0, 6))
+        self._refresh_pin_label()
 
         # Theme selector (Auto / Light / Dark), applied live.
         self._build_theme_selector()
@@ -2968,6 +3128,13 @@ class App:
         self._fade_stop(False)
         self.set_status(tr("agent.status.denied"), WARN)
 
+    def on_pin_blocked(self):
+        # Someone entered too many wrong PINs and tripped the lockout — make the owner
+        # aware (an attack, or a viewer who was given the wrong/old PIN). Don't disturb a
+        # live controlling session's status.
+        if not self._connected:
+            self.set_status(tr("agent.status.pinBlocked"), WARN)
+
     def on_peer_left(self, local=False):
         # local=True  -> we ended the session (Stop button / window): "you closed it"
         # local=False -> the viewer disconnected on their own.
@@ -3282,8 +3449,55 @@ class App:
         if self._connected and c and not (c._recv_files or c._send_files):
             self.set_status(tr("agent.status.connected"), GOOD)
 
+    def _refresh_pin_label(self):
+        """Show the PIN under the auto-accept box when auto-accept is on, else blank."""
+        on = bool(self.auto_accept and self.pin)
+        self.pin_caption.config(text=tr("agent.pin.caption") if on else "")
+        self.pin_label.config(text=self.pin if on else "")
+
+    def _exclude_from_capture(self):
+        """Mark the agent's top-level window so screen capture (mss/DXGI/WGC) does not
+        record it — the session code, PIN and banner then never appear in the streamed
+        screen. Uses the OS window (GA_ROOT of the Tk window; the child handle is rejected).
+        Prefers WDA_EXCLUDEFROMCAPTURE (Win10 2004+, window excluded entirely); falls back
+        to WDA_MONITOR (older Windows, window captured as black). Best-effort: if the API is
+        unavailable it degrades to the previous behavior (window visible in the stream)."""
+        try:
+            import ctypes
+            from ctypes import wintypes
+            WDA_MONITOR = 0x01
+            WDA_EXCLUDEFROMCAPTURE = 0x11
+            u = ctypes.windll.user32
+            u.GetAncestor.argtypes = [wintypes.HWND, wintypes.UINT]
+            u.GetAncestor.restype = wintypes.HWND
+            u.SetWindowDisplayAffinity.argtypes = [wintypes.HWND, wintypes.DWORD]
+            u.SetWindowDisplayAffinity.restype = wintypes.BOOL
+            self.root.update_idletasks()
+            hwnd = u.GetAncestor(self.root.winfo_id(), 2)  # GA_ROOT
+            if not hwnd:
+                return
+            if not u.SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE):
+                u.SetWindowDisplayAffinity(hwnd, WDA_MONITOR)
+        except Exception:
+            pass
+
     def _toggle_auto(self):
-        self.auto_accept = self.auto_var.get()
+        # Order the two writes so the net thread (which reads auto_accept then pin in
+        # _serve_viewer) can never observe the unsafe transient auto_accept=True / pin=None:
+        # when ENABLING, set the PIN first; when DISABLING, clear auto_accept first.
+        on = self.auto_var.get()
+        if on:
+            self.pin = _new_pin()      # mint a fresh PIN before enabling
+            self.auto_accept = True
+        else:
+            self.auto_accept = False   # disable before dropping the PIN
+            self.pin = None
+        # A fresh enable/disable forgives any accumulated wrong-attempt lockout + backoff.
+        if self.client is not None:
+            self.client._pin_fails = 0
+            self.client._pin_backoff = 0
+            self.client._pin_lock_until = 0.0
+        self._refresh_pin_label()
 
     def end_session_click(self):
         # "Stop session": confirm first in a separate window; only end the session
