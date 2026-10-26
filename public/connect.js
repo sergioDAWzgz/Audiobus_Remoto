@@ -36,6 +36,12 @@ const barActions = document.querySelector(".bar-actions");
 const barLeft = document.querySelector(".bar-left");
 const topBar = document.querySelector(".bar");
 const joinStatusSlot = $("joinStatusSlot");
+const joinCard = $("joinCard");
+const pinCard = $("pinCard");
+const pinForm = $("pinForm");
+const pinInput = $("pinInput");
+const pinError = $("pinError");
+const pinDesc = $("pinDesc");
 
 // Translation helper (i18n.js loads first; falls back to the key if missing).
 const t = (k) => (window.I18N ? window.I18N.t(k) : k);
@@ -44,6 +50,8 @@ let ws = null;
 let monitors = []; // [{ i, w, h }, ...] in the order the agent sent them
 let screens = new Map(); // monitor index -> { canvas, ctx, handlers, mon }
 let inSession = false;
+let pinActive = false; // showing the PIN gate (host auto-accepts behind a PIN)
+let pinLen = 4; // digits expected, per the agent's pin-required message
 let viewMode = "grid"; // "grid" | "single"
 let selectedIndex = 0; // monitor index shown in single mode
 let activeDown = null; // { canvas, mon } held between mousedown and mouseup
@@ -609,6 +617,51 @@ function showJoinError(msg) {
   e.hidden = false;
 }
 
+// ---------------- PIN gate (host auto-accepts behind a PIN) ----------------
+// When the agent auto-accepts but requires a PIN, it answers our join with
+// "pin-required" instead of "monitors". We swap the code card for a PIN card; a
+// correct PIN yields "monitors" (session starts), a wrong one "pin-bad" (retry).
+function showPinGate(len) {
+  pinActive = true;
+  pinLen = Number.isInteger(len) && len > 0 ? len : 4;
+  pinInput.maxLength = pinLen;
+  pinInput.placeholder = "·".repeat(pinLen);
+  pinInput.value = "";
+  pinDesc.textContent = t("connect.pin.desc").replace("{len}", pinLen);
+  pinError.hidden = true;
+  joinCard.hidden = true;
+  pinCard.hidden = false;
+  setStatus(t("connect.pin.title"), "warn");
+  try {
+    pinInput.focus();
+  } catch {
+    /* ignore */
+  }
+}
+
+function hidePinGate() {
+  pinActive = false;
+  pinCard.hidden = true;
+  joinCard.hidden = false;
+}
+
+function showPinError(msg) {
+  pinError.textContent = msg;
+  pinError.hidden = false;
+}
+
+pinForm.addEventListener("submit", (e) => {
+  e.preventDefault();
+  const pin = pinInput.value.trim();
+  if (pin.length !== pinLen || ![...pin].every((c) => c >= "0" && c <= "9")) {
+    showPinError(t("connect.err.pinLen").replace("{len}", pinLen));
+    return;
+  }
+  pinError.hidden = true;
+  send({ type: "pin", pin });
+  setStatus(t("connect.pin.checking"), "warn");
+});
+
 // Session-code alphabet (must match the Worker's CODE_ALPHABET): uppercase letters +
 // digits minus the visually ambiguous 0/O/1/I/L. Validated client-side so a malformed
 // code shows a clear "invalid code" instead of failing the WS upgrade (a generic close
@@ -639,6 +692,7 @@ function connect(code) {
   // "connection interrupted" and spin on reconnect until the timeout.
   interruptionActive = false;
   stopReconnecting();
+  hidePinGate(); // a fresh user-initiated join always starts on the code card
   if (dialogTimer) {
     clearTimeout(dialogTimer);
     dialogTimer = null;
@@ -749,9 +803,43 @@ async function onMessage(ev) {
     case "agent-restored":
       agentDown = false; // the agent reconnected; fresh frames will follow
       break;
+    case "pin-required":
+      // The host auto-accepts but gates admission behind a PIN. Ignore for an already
+      // live session (control messages relay to all viewers). If the gate is already up
+      // (e.g. the agent re-served us after an own-link blip), just re-assert the status —
+      // don't re-render, which would wipe any digits already typed.
+      if (!inSession) {
+        if (pinActive) setStatus(t("connect.pin.title"), "warn");
+        else showPinGate(msg.len);
+      }
+      break;
+    case "pin-bad":
+      // Wrong PIN, but attempts remain: let the user retry in place.
+      if (pinActive) {
+        const left = Number.isInteger(msg.left) ? msg.left : 0;
+        showPinError(t("connect.pin.bad").replace("{left}", left));
+        pinInput.value = "";
+        try {
+          pinInput.focus();
+        } catch {
+          /* ignore */
+        }
+        setStatus(t("connect.pin.title"), "warn");
+      }
+      break;
     case "denied":
-      setStatus(t("connect.status.declined"), "bad");
-      endSession(true);
+      if (pinActive) {
+        // The PIN challenge ended in refusal (too many wrong tries, a lockout, or a
+        // timeout). Return to the code form with a clear message; a fresh join restarts
+        // the challenge (the host may have changed the PIN).
+        setStatus(t("connect.pin.failed"), "bad");
+        hidePinGate();
+        showJoinError(t("connect.pin.failed"));
+        abortConnect();
+      } else {
+        setStatus(t("connect.status.declined"), "bad");
+        endSession(true);
+      }
       break;
     case "error": {
       // During a reconnection the agent may not be back yet (no-agent / busy): keep
@@ -1047,6 +1135,7 @@ function tryReconnect() {
 function abortConnect() {
   live = false;
   interruptionActive = false;
+  hidePinGate(); // a terminal join failure (no-agent/busy/agent gone) returns to the code card
   stopHeartbeat();
   stopReconnecting();
   intentionalClose = true;
@@ -1079,6 +1168,7 @@ function startSession(mons) {
   viewMode = monitors.length > 1 ? "grid" : "single";
   selectedIndex = monitors.length ? monitors[0].i : 0;
 
+  hidePinGate(); // correct PIN (or no PIN): leave the gate and show the stage
   joinEl.hidden = true;
   stageEl.hidden = false;
   fsBtn.hidden = false;
@@ -1143,6 +1233,7 @@ function endSession(keepStatus) {
     }
     ws = null;
   }
+  hidePinGate(); // never leave the PIN card over the code form
   stageEl.hidden = true;
   joinEl.hidden = false;
   fsBtn.hidden = true;

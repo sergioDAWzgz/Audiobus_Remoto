@@ -142,7 +142,7 @@
     </header>
 
     <main id="join" class="join">
-      <div class="card">
+      <div id="joinCard" class="card">
         <h1 data-i18n="connect.card.title">Connect to a computer</h1>
         <p class="muted" data-i18n="connect.card.desc">
           Type the 10-character code shown in the Audiobus agent on the computer you
@@ -162,6 +162,28 @@
           <button class="btn big" type="submit" data-i18n="connect.btn.connect">Connect</button>
         </form>
         <p id="joinError" class="error" hidden></p>
+      </div>
+      <!-- Shown in place of the code card when the host auto-accepts behind a PIN. -->
+      <div id="pinCard" class="card" hidden>
+        <h1 data-i18n="connect.pin.title">Enter the PIN</h1>
+        <p class="muted" id="pinDesc" data-i18n="connect.pin.desc">
+          This computer auto-accepts connections protected by a PIN. Enter the PIN shown
+          in the Audiobus agent on that computer.
+        </p>
+        <form id="pinForm">
+          <input
+            id="pinInput"
+            class="code-input"
+            inputmode="numeric"
+            autocomplete="off"
+            spellcheck="false"
+            maxlength="4"
+            placeholder="····"
+            aria-label="PIN"
+          />
+          <button class="btn big" type="submit" data-i18n="connect.pin.submit">Connect</button>
+        </form>
+        <p id="pinError" class="error" hidden></p>
       </div>
       <!-- Status sits here (below the center card) while not connected; it moves
            up to the top bar once a session is live. -->
