@@ -468,6 +468,11 @@ def _window_title(hwnd):
 # Opt-in click-filter diagnostics: set AUDIOBUS_DEBUG_CLICKS=1 to append each click's
 # decision to ~/audiobus-click.log. Off (and zero-cost) by default.
 _CLICK_DEBUG = bool(os.environ.get("AUDIOBUS_DEBUG_CLICKS"))
+_NET_DPI_LOGGED = False   # one-time net-thread DPI-awareness diagnostic
+_GUI_DPI_LOGGED = False   # one-time GUI-thread DPI-awareness + raw-rect diagnostic
+
+
+_AGENT_BUILD = "2026-10-26-dpidiag"  # bumped per diagnostic build; appears in the click log
 
 
 def _click_log(msg):
@@ -477,6 +482,35 @@ def _click_log(msg):
             f.write(time.strftime("%H:%M:%S ") + msg + "\n")
     except Exception:
         pass
+
+
+def _dpi_awareness_name():
+    """The CURRENT thread's DPI awareness, for diagnostics (Win10 1607+)."""
+    try:
+        u = ctypes.windll.user32
+        u.GetThreadDpiAwarenessContext.restype = ctypes.c_void_p
+        u.GetAwarenessFromDpiAwarenessContext.restype = ctypes.c_int
+        u.GetAwarenessFromDpiAwarenessContext.argtypes = [ctypes.c_void_p]
+        ctx = u.GetThreadDpiAwarenessContext()
+        val = u.GetAwarenessFromDpiAwarenessContext(ctx)
+        return {0: "UNAWARE", 1: "SYSTEM", 2: "PER_MONITOR",
+                3: "PER_MONITOR_V2", 4: "UNAWARE_GDISCALED"}.get(val, f"val={val}")
+    except Exception as e:
+        return f"?({e!r})"
+
+
+def _win_diag(hwnd):
+    """root hwnd / title / rect of hwnd, for diagnosing what WindowFromPoint returned."""
+    try:
+        u = ctypes.windll.user32
+        u.GetAncestor.restype = ctypes.c_void_p
+        u.GetAncestor.argtypes = [ctypes.c_void_p, ctypes.c_uint]
+        root = u.GetAncestor(hwnd, 2)  # GA_ROOT
+        r = wintypes.RECT()
+        u.GetWindowRect(wintypes.HWND(root), ctypes.byref(r))
+        return f"root={root} title={_window_title(root)!r} rect=({r.left},{r.top},{r.right},{r.bottom})"
+    except Exception as e:
+        return f"?({e!r})"
 
 
 def _window_owner_pid(hwnd):
@@ -511,6 +545,11 @@ def _click_on_agent(x, y, rects):
 
         u = ctypes.windll.user32
         u.WindowFromPoint.argtypes = [wintypes.POINT]  # POINT is passed BY VALUE
+        u.WindowFromPoint.restype = ctypes.c_void_p    # HWND is 64-bit; don't truncate it
+        global _NET_DPI_LOGGED
+        if _CLICK_DEBUG and not _NET_DPI_LOGGED:
+            _NET_DPI_LOGGED = True
+            _click_log(f"[diag net-thread DPI={_dpi_awareness_name()}]")
         hwnd = u.WindowFromPoint(wintypes.POINT(int(x), int(y)))
         if not hwnd:
             if _CLICK_DEBUG:
@@ -520,8 +559,8 @@ def _click_on_agent(x, y, rects):
         on_agent = (pid == os.getpid())
         if _CLICK_DEBUG:
             _click_log(f"({x},{y}) in rect; WindowFromPoint hwnd={hwnd} pid={pid} "
-                       f"title={_window_title(hwnd)!r} our_pid={os.getpid()} -> "
-                       f"{'BLOCK' if on_agent else 'allow'}")
+                       f"title={_window_title(hwnd)!r} our_pid={os.getpid()} "
+                       f"[{_win_diag(hwnd)}] -> {'BLOCK' if on_agent else 'allow'}")
         return on_agent
     except Exception as e:
         if _CLICK_DEBUG:
@@ -1330,6 +1369,15 @@ class NetClient:
         self.primary = self.monitors[0] if self.monitors else None
         # Default: stream every monitor until the viewer sends a "want" message.
         self.wanted = [m["i"] for m in self.monitors]
+        if _CLICK_DEBUG:
+            try:
+                aw = ctypes.c_int()
+                ctypes.windll.shcore.GetProcessDpiAwareness(0, ctypes.byref(aw))
+                pa = aw.value
+            except Exception:
+                pa = "?"
+            _click_log(f"[diag session start: process_awareness={pa}(2=permon) "
+                       f"mss_monitors={self.monitors}]")
 
         http_base, ws_base = normalize_server(self.args.server)
         self._http_base = http_base
@@ -2979,6 +3027,13 @@ class App:
                     rects.append(vr)
 
             _add_visible(self.root)
+            global _GUI_DPI_LOGGED
+            if _CLICK_DEBUG and not _GUI_DPI_LOGGED:
+                _GUI_DPI_LOGGED = True
+                mh, mr = _hwnd_rect(self.root)
+                _click_log(f"[diag gui-thread DPI={_dpi_awareness_name()} "
+                           f"main_hwnd={mh} GetWindowRect={mr} tk_scaling="
+                           f"{self.root.tk.call('tk', 'scaling')}]")
             for w in self.root.winfo_children():  # ActionDialog Toplevels
                 if isinstance(w, tk.Toplevel):
                     try:
@@ -3694,21 +3749,30 @@ def _set_dpi_awareness():
     app. At 100% the two spaces coincide, which is why it only shows up when scaled.
 
     Best-effort across Windows versions; a harmless no-op where the APIs are missing."""
+    how = "none"
     try:
         # Per-Monitor-Aware v2 (Windows 10 1703+): DPI_AWARENESS_CONTEXT = (HANDLE)-4.
         if ctypes.windll.user32.SetProcessDpiAwarenessContext(ctypes.c_void_p(-4)):
-            return
-    except Exception:
-        pass
-    try:
-        ctypes.windll.shcore.SetProcessDpiAwareness(2)  # PROCESS_PER_MONITOR_DPI_AWARE
-        return
-    except Exception:
-        pass
-    try:
-        ctypes.windll.user32.SetProcessDPIAware()  # system-aware fallback (Vista+)
-    except Exception:
-        pass
+            how = "ctx-v2"
+        else:
+            raise OSError(ctypes.get_last_error())
+    except Exception as e1:
+        try:
+            ctypes.windll.shcore.SetProcessDpiAwareness(2)  # PROCESS_PER_MONITOR_DPI_AWARE
+            how = "shcore-2"
+        except Exception as e2:
+            try:
+                ctypes.windll.user32.SetProcessDPIAware()  # system-aware fallback (Vista+)
+                how = "user32-system"
+            except Exception:
+                how = f"FAILED ({e1!r})"
+    if _CLICK_DEBUG:
+        try:
+            dpi = ctypes.windll.user32.GetDpiForSystem()
+        except Exception:
+            dpi = "?"
+        _click_log(f"[diag build={_AGENT_BUILD} set_dpi_awareness={how} "
+                   f"thread_dpi_ctx={_dpi_awareness_name()} GetDpiForSystem={dpi}]")
 
 
 def main(argv=None):
