@@ -274,23 +274,77 @@ def _config_path():
     return os.path.join(base, "AudiobusRemote", "config.json")
 
 
-def _load_theme_choice():
+def _read_config():
+    """The whole persisted config as a dict ({} if missing/unreadable). Several
+    independent settings share this one file (theme, the auto-accept preference, and
+    the stable-code identity), so every writer MERGES rather than overwrites."""
     try:
         with open(_config_path(), encoding="utf-8") as f:
-            v = json.load(f).get("theme", "auto")
-            return v if v in ("auto", "light", "dark") else "auto"
+            d = json.load(f)
+            return d if isinstance(d, dict) else {}
     except Exception:
-        return "auto"
+        return {}
 
 
-def _save_theme_choice(choice):
+def _write_config(updates):
+    """Merge `updates` into the config file (read-modify-write) so one setting's save
+    never clobbers another's. Best-effort: a read-only disk just means it isn't kept."""
     try:
         p = _config_path()
         os.makedirs(os.path.dirname(p), exist_ok=True)
+        d = _read_config()
+        d.update(updates)
         with open(p, "w", encoding="utf-8") as f:
-            json.dump({"theme": choice}, f)
+            json.dump(d, f)
     except Exception:
         pass
+
+
+def _load_theme_choice():
+    v = _read_config().get("theme", "auto")
+    return v if v in ("auto", "light", "dark") else "auto"
+
+
+def _save_theme_choice(choice):
+    _write_config({"theme": choice})
+
+
+# ---- Stable code + auto-accept preference ---------------------------------- #
+# With auto-accept ON, the agent keeps the SAME session code (and the SAME PIN)
+# across restarts, so an approved browser's remembered PIN keeps auto-connecting.
+# The code is held server-side against a high-entropy secret we store here; see
+# claim_session and SessionDO.claim. With auto-accept OFF, each run gets a fresh
+# throwaway code (today's behaviour) and no identity is kept.
+
+def _new_code_secret():
+    """A high-entropy token that proves ownership of the stable code to the server."""
+    return secrets.token_urlsafe(32)
+
+
+def _load_auto_pref():
+    """Whether auto-accept was left ON last run (so it persists across launches)."""
+    return bool(_read_config().get("auto_accept", False))
+
+
+def _save_auto_pref(on):
+    _write_config({"auto_accept": bool(on)})
+
+
+def _load_stable():
+    """The saved stable identity {code, secret, pin}, or None if not established."""
+    s = _read_config().get("stable")
+    if (isinstance(s, dict) and isinstance(s.get("code"), str)
+            and isinstance(s.get("secret"), str)):
+        return s
+    return None
+
+
+def _save_stable(code, secret, pin):
+    _write_config({"stable": {"code": code, "secret": secret, "pin": pin}})
+
+
+def _clear_stable():
+    _write_config({"stable": None})
 
 
 def _resolve_theme(choice):
@@ -499,7 +553,7 @@ _GUI_DPI_LOGGED = False   # one-time GUI-thread DPI-awareness + raw-rect diagnos
 _SHOT_SAVED = False       # one-time: save an mss screenshot on the first blocked click
 
 
-_AGENT_BUILD = "2026-10-27-selfheal"  # bumped per diagnostic build; appears in the click log
+_AGENT_BUILD = "2026-10-27-stablecode"  # bumped per diagnostic build; appears in the click log
 
 
 def _save_debug_shot(x, y):
@@ -1086,6 +1140,25 @@ def request_session(http_base, ctx):
         return json.loads(resp.read().decode("utf-8"))["code"]
 
 
+def claim_session(http_base, ctx, code, secret):
+    """Reclaim a SPECIFIC stable code (auto-accept) by presenting its secret. Returns
+    the code on success, or None if the server refused it (409 — taken by another
+    session with a different secret) or was unreachable. On None the caller falls
+    back to a fresh random code, so a lost claim degrades to a new code, never a crash."""
+    body = json.dumps({"code": code, "secret": secret}).encode("utf-8")
+    req = urllib.request.Request(
+        f"{http_base}/api/claim-session",
+        data=body,
+        method="POST",
+        headers={"User-Agent": USER_AGENT, "Content-Type": "application/json"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=15, context=ctx) as resp:
+            return json.loads(resp.read().decode("utf-8")).get("code")
+    except Exception:
+        return None
+
+
 STUN_FALLBACK = [{"urls": ["stun:stun.cloudflare.com:3478"]}]
 
 
@@ -1539,6 +1612,74 @@ class NetClient:
         except Exception as e:
             self.app.post(lambda: self.app.set_status(f"Error: {e}", BAD))
 
+    async def _acquire_code(self, http_base):
+        """Return this run's session code.
+
+        Auto-accept ON  -> a STABLE code: reclaim the saved one (so an approved
+          browser's remembered PIN keeps working across restarts), or, the first time
+          (or after a lost claim), bind a fresh code to a new secret and remember
+          {code, secret, pin}.
+        Auto-accept OFF -> a throwaway random code; no identity is kept.
+
+        Being unable to REACH the server propagates (the caller reports it as
+        unreachable); a merely REFUSED claim (someone else holds the code) degrades to
+        a fresh code instead of failing."""
+        ctx = self.ssl_ctx
+        want_stable = bool(self.app.auto_accept)
+        if want_stable:
+            saved = _load_stable()
+            if saved:
+                code = await self.loop.run_in_executor(
+                    None,
+                    lambda: claim_session(http_base, ctx, saved["code"], saved["secret"]),
+                )
+                if code:
+                    # Keep the store consistent with the PIN the agent actually enforces
+                    # (the App loaded saved['pin'] at startup, re-minting only if absent).
+                    _save_stable(code, saved["secret"], self.app.pin)
+                    return code
+                # Refused/unreachable claim: fall through to establish a fresh identity.
+        code = await self.loop.run_in_executor(
+            None, lambda: request_session(http_base, ctx)
+        )
+        if want_stable:
+            # Bind this fresh code to a new secret so future launches reclaim it, and
+            # remember it. Best-effort: if the bind can't complete we still use the code
+            # this run (it just won't be stable until a later successful bind).
+            secret = _new_code_secret()
+            bound = await self.loop.run_in_executor(
+                None, lambda: claim_session(http_base, ctx, code, secret)
+            )
+            if bound:
+                _save_stable(code, secret, self.app.pin)
+        return code
+
+    def request_stable_bind(self, pin):
+        """GUI thread -> schedule binding the CURRENT live code into a stable identity on
+        the net loop (auto-accept was just turned on at runtime). Best-effort/idempotent:
+        the current code becomes this machine's stable code so future launches reclaim it."""
+        loop = self.loop
+        if loop is None:
+            return
+        try:
+            asyncio.run_coroutine_threadsafe(self._bind_stable(pin), loop)
+        except Exception:
+            pass
+
+    async def _bind_stable(self, pin):
+        code = self.code
+        http_base = getattr(self, "_http_base", None)
+        if not code or not http_base:
+            return
+        saved = _load_stable()
+        secret = ((saved.get("secret") if saved and saved.get("code") == code else None)
+                  or _new_code_secret())
+        ok = await self.loop.run_in_executor(
+            None, lambda: claim_session(http_base, self.ssl_ctx, code, secret)
+        )
+        if ok:
+            _save_stable(code, secret, pin)
+
     async def _run(self):
         self.loop = asyncio.get_event_loop()
         self.stop_event = asyncio.Event()
@@ -1582,9 +1723,7 @@ class NetClient:
         self._http_base = http_base
         self.app.post(lambda: self.app.set_status(tr("agent.status.requesting"), MUTED))
         try:
-            code = await self.loop.run_in_executor(
-                None, lambda: request_session(http_base, self.ssl_ctx)
-            )
+            code = await self._acquire_code(http_base)
         except Exception as e:
             # Capture the message NOW: `e` is cleared when this except block exits, so a
             # lambda that referenced it would raise NameError when the GUI thread runs it.
@@ -1691,13 +1830,14 @@ class NetClient:
                 self.app.post(lambda: self.app.on_fatal(tr("agent.error.unreachable")))
                 return
             if code_expired and not self.app._connected:
-                # Idle and our code expired (very long outage): request a fresh code and
-                # carry on with it, rather than retrying a dead code forever. (A short
-                # outage keeps the SAME code — the server holds the reservation.)
+                # Idle and our code expired (very long outage): acquire a code and carry
+                # on with it, rather than retrying a dead code forever. (A short outage
+                # keeps the SAME code — the server holds the reservation.) With auto-accept
+                # on, _acquire_code RECLAIMS the same stable code (the server forgot it on
+                # teardown, but our secret re-binds it) so a browser's remembered PIN still
+                # works; otherwise it's a fresh throwaway code.
                 try:
-                    new_code = await self.loop.run_in_executor(
-                        None, lambda: request_session(http_base, self.ssl_ctx)
-                    )
+                    new_code = await self._acquire_code(http_base)
                 except Exception:
                     new_code = None
                 if new_code:
@@ -2877,10 +3017,18 @@ class RoundedBanner(tk.Canvas):
 class App:
     def __init__(self, args):
         self.args = args
-        self.auto_accept = bool(args.auto_accept)
+        # Auto-accept persists across launches: the --auto-accept flag OR the saved
+        # preference turns it on, so a computer left on auto-accept comes back up that way.
+        self.auto_accept = bool(args.auto_accept) or _load_auto_pref()
         # PIN that gates auto-accept (generated whenever auto-accept is on; None when off).
         # A fresh viewer must present it to be admitted silently (see NetClient._challenge_pin).
-        self.pin = _new_pin() if self.auto_accept else None
+        # With auto-accept on we REUSE the saved PIN so a browser's remembered PIN still
+        # matches after a restart; only without a saved one do we mint a fresh PIN.
+        if self.auto_accept:
+            saved = _load_stable()
+            self.pin = (saved.get("pin") if saved and saved.get("pin") else None) or _new_pin()
+        else:
+            self.pin = None
         self.q = queue.Queue()
         self.client = None
         self._anims = {}  # key -> pending after-id, for cancellable fade animations
@@ -3687,6 +3835,18 @@ class App:
         else:
             self.auto_accept = False   # disable before dropping the PIN
             self.pin = None
+        # Persist the preference so the computer comes back up the same way, and keep the
+        # stable-code identity in step: ENABLING binds the CURRENT code (so future launches
+        # reclaim the same code and a browser's remembered PIN keeps working) and remembers
+        # its PIN; DISABLING forgets the identity (next launch gets a fresh throwaway code).
+        _save_auto_pref(on)
+        if on:
+            if self.client is not None:
+                self.client.request_stable_bind(self.pin)
+            # else: no net client yet — startup's _acquire_code establishes the stable
+            # identity now that the preference is on.
+        else:
+            _clear_stable()
         # A fresh enable/disable forgives any accumulated wrong-attempt lockout + backoff.
         if self.client is not None:
             self.client._pin_fails = 0

@@ -58,6 +58,27 @@ export class SessionDO extends DurableObject {
     return (await this.ctx.storage.get<boolean>("reserved")) === true;
   }
 
+  /** Claim a SPECIFIC code for a stable (auto-accept) session, protected by a
+   *  caller-held secret so the owning agent can reclaim the SAME code on a later
+   *  launch — which `reserve()` (random code) can't do. Returns true if the caller
+   *  now holds the reservation.
+   *
+   *  A code bound to a DIFFERENT secret is refused (false), so once an agent has
+   *  claimed its code nobody else can take it. A code that is free, or reserved but
+   *  not yet bound to a secret (a plain `reserve()`), is adopted and bound to this
+   *  secret: that matches the app's existing trust model where the 10-char code is
+   *  itself an unguessable per-machine secret. `teardown()` deleteAll()s on expiry,
+   *  so an abandoned code is forgotten and becomes freely claimable again. */
+  async claim(secret: string): Promise<boolean> {
+    if (!secret) return false;
+    const bound = await this.ctx.storage.get<string>("claimSecret");
+    if (bound !== undefined && bound !== secret) return false;
+    await this.ctx.storage.put("reserved", true);
+    await this.ctx.storage.put("claimSecret", secret);
+    await this.ctx.storage.setAlarm(Date.now() + SESSION_TTL_MS);
+    return true;
+  }
+
   async fetch(request: Request): Promise<Response> {
     const url = new URL(request.url);
     if (url.pathname !== "/connect") {
