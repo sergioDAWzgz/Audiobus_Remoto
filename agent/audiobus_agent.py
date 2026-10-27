@@ -473,7 +473,7 @@ _GUI_DPI_LOGGED = False   # one-time GUI-thread DPI-awareness + raw-rect diagnos
 _SHOT_SAVED = False       # one-time: save an mss screenshot on the first blocked click
 
 
-_AGENT_BUILD = "2026-10-27-rectfix"  # bumped per diagnostic build; appears in the click log
+_AGENT_BUILD = "2026-10-27-enumfix"  # bumped per diagnostic build; appears in the click log
 
 
 def _save_debug_shot(x, y):
@@ -3026,13 +3026,14 @@ class App:
             u.GetWindow.argtypes = [wintypes.HWND, wintypes.UINT]
             u.IsWindowVisible.argtypes = [wintypes.HWND]
             u.GetWindowRect.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.RECT)]
-            # Query window rects in PHYSICAL pixels so they line up with the mss capture /
-            # stream and the per-monitor-aware hit-test (and the injected click coords).
-            # Our window is deliberately DPI-UNAWARE (which keeps the screen capture correct
-            # — making it DPI-aware shifts where it lands in the BitBlt capture), so by
-            # default GetWindowRect on THIS Tk thread would return LOGICAL pixels and the
-            # viewer's blocked-cursor rects would be offset on a scaled display. Switch just
-            # this thread to per-monitor-v2 for the GetWindowRect calls below, then restore.
+            u.GetWindowThreadProcessId.argtypes = [
+                wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
+            # Query rects in PHYSICAL pixels so they line up with the mss capture / stream
+            # and the per-monitor-aware hit-test (and the injected click coords). Our window
+            # is deliberately DPI-UNAWARE (making it DPI-aware shifts where it lands in the
+            # BitBlt capture), so by default GetWindowRect on this Tk thread would return
+            # LOGICAL pixels and the viewer's blocked-cursor rects would be offset on a
+            # scaled display. Switch just this thread to per-monitor-v2 for the calls below.
             try:
                 u.SetThreadDpiAwarenessContext.restype = ctypes.c_void_p
                 u.SetThreadDpiAwarenessContext.argtypes = [ctypes.c_void_p]
@@ -3040,17 +3041,34 @@ class App:
             except Exception:
                 prev_ctx = None
 
-            def _hwnd_rect(widget):
+            # Find OUR OWN visible top-level windows straight from the OS, by owning process
+            # (main window + any open dialog). This uses the DECORATED windows the OS
+            # actually stacks and hit-tests — unlike GetAncestor(winfo_id, GA_ROOT), which can
+            # return a hidden Tk wrapper window at a different Z-order position, which made the
+            # covering-window walk below miss some apps (so a covered area was wrongly flagged
+            # as blocked and showed the forbidden cursor). Identify ours by pid, as the click
+            # filter does. Hidden helper windows (ttk monitor, IME) are skipped by size/visibility.
+            our_pid = os.getpid()
+            our_windows = []
+            def _enum_cb(h, lp):
                 try:
-                    hwnd = u.GetAncestor(widget.winfo_id(), 2)  # GA_ROOT
-                    if not hwnd:
-                        return None, None
+                    if not u.IsWindowVisible(h):
+                        return True
+                    pid = wintypes.DWORD()
+                    u.GetWindowThreadProcessId(h, ctypes.byref(pid))
+                    if pid.value != our_pid:
+                        return True
                     r = wintypes.RECT()
-                    if u.GetWindowRect(wintypes.HWND(hwnd), ctypes.byref(r)):
-                        return hwnd, (r.left, r.top, r.right, r.bottom)
+                    if not u.GetWindowRect(h, ctypes.byref(r)):
+                        return True
+                    if (r.right - r.left) < 8 or (r.bottom - r.top) < 8:
+                        return True  # skip tiny/hidden helper windows
+                    our_windows.append((int(h), (r.left, r.top, r.right, r.bottom)))
                 except Exception:
                     pass
-                return None, None
+                return True
+            _EnumProc = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+            u.EnumWindows(_EnumProc(_enum_cb), 0)
 
             def _higher_rects(hwnd, full):
                 # Visible windows stacked ABOVE hwnd (GW_HWNDPREV walks UP the Z-order)
@@ -3073,36 +3091,25 @@ class App:
                     res.append((wr.left, wr.top, wr.right, wr.bottom))
                 return res
 
-            def _add_visible(widget):
-                # Report only the window's VISIBLE parts (frame minus whatever covers it),
-                # so the click filter and the viewer's blocked-cursor hint don't treat a
-                # covered area — where a click now reaches the window on top — as blocked.
-                hwnd, full = _hwnd_rect(widget)
-                if not full:
-                    return
+            for hwnd, full in our_windows:
+                # Report only each window's VISIBLE parts (frame minus whatever covers it),
+                # so a covered area — where a click now reaches the window on top — is not
+                # treated as blocked and doesn't show the forbidden cursor.
                 for vr in _visible_subrects(full, _higher_rects(hwnd, full)):
                     rects.append(vr)
 
-            _add_visible(self.root)
             global _GUI_DPI_LOGGED
             if _CLICK_DEBUG and not _GUI_DPI_LOGGED:
                 _GUI_DPI_LOGGED = True
-                mh, mr = _hwnd_rect(self.root)
                 _click_log(f"[diag gui-thread DPI={_dpi_awareness_name()} "
-                           f"main_hwnd={mh} GetWindowRect={mr} tk_scaling="
+                           f"our_windows={our_windows} tk_scaling="
                            f"{self.root.tk.call('tk', 'scaling')}]")
-            for w in self.root.winfo_children():  # ActionDialog Toplevels
-                if isinstance(w, tk.Toplevel):
-                    try:
-                        if w.winfo_exists() and w.winfo_viewable():
-                            _add_visible(w)
-                    except Exception:
-                        pass
+
             # Are WE the foreground app? Compare by owning process (handle identity is
             # unreliable with Tk's wrapper windows — see _click_on_agent), so injected
             # keys are dropped whenever any of our windows has focus.
             self._agent_foreground = (
-                _window_owner_pid(u.GetForegroundWindow()) == os.getpid())
+                _window_owner_pid(u.GetForegroundWindow()) == our_pid)
         except Exception:
             pass
         finally:
