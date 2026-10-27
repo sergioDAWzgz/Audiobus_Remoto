@@ -473,7 +473,7 @@ _GUI_DPI_LOGGED = False   # one-time GUI-thread DPI-awareness + raw-rect diagnos
 _SHOT_SAVED = False       # one-time: save an mss screenshot on the first blocked click
 
 
-_AGENT_BUILD = "2026-10-27-enumfix"  # bumped per diagnostic build; appears in the click log
+_AGENT_BUILD = "2026-10-27-sampfix"  # bumped per diagnostic build; appears in the click log
 
 
 def _save_debug_shot(x, y):
@@ -3070,33 +3070,64 @@ class App:
             _EnumProc = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
             u.EnumWindows(_EnumProc(_enum_cb), 0)
 
-            def _higher_rects(hwnd, full):
-                # Visible windows stacked ABOVE hwnd (GW_HWNDPREV walks UP the Z-order)
-                # that overlap `full` — these cover part of the agent window.
-                res = []
-                fl, ft, fr, fb = full
-                w = wintypes.HWND(hwnd)
-                for _ in range(500):  # bounded walk
-                    w = u.GetWindow(w, 3)  # GW_HWNDPREV
-                    if not w:
-                        break
-                    if not u.IsWindowVisible(w):
-                        continue
-                    wr = wintypes.RECT()
-                    if not u.GetWindowRect(w, ctypes.byref(wr)):
-                        continue
-                    if (wr.right <= fl or wr.left >= fr
-                            or wr.bottom <= ft or wr.top >= fb):
-                        continue  # no overlap
-                    res.append((wr.left, wr.top, wr.right, wr.bottom))
-                return res
+            u.WindowFromPoint.argtypes = [wintypes.POINT]  # POINT passed BY VALUE
+            u.WindowFromPoint.restype = ctypes.c_void_p    # HWND is 64-bit; don't truncate
 
-            for hwnd, full in our_windows:
-                # Report only each window's VISIBLE parts (frame minus whatever covers it),
-                # so a covered area — where a click now reaches the window on top — is not
-                # treated as blocked and doesn't show the forbidden cursor.
-                for vr in _visible_subrects(full, _higher_rects(hwnd, full)):
-                    rects.append(vr)
+            def _sampled_visible(full):
+                # The sub-rectangles of `full` where one of OUR windows is actually the TOP
+                # window, found by sampling WindowFromPoint on a grid — the SAME test the
+                # click filter (_click_on_agent) uses. This guarantees the viewer's blocked-
+                # cursor region matches exactly where clicks are refused, and is robust to
+                # DPI and Tk's wrapper windows (a Z-order walk from a cached handle gave the
+                # wrong covering set). Cells are STEP px; adjacent rows with the same spans
+                # are merged into taller rects to keep the list small.
+                fl, ft, fr, fb = full
+                STEP = 16
+
+                def _row_spans(y):
+                    spans = []
+                    start = None
+                    x = fl
+                    while x < fr:
+                        on = False
+                        try:
+                            h = u.WindowFromPoint(wintypes.POINT(int(x), int(y)))
+                            if h:
+                                pid = wintypes.DWORD()
+                                u.GetWindowThreadProcessId(h, ctypes.byref(pid))
+                                on = (pid.value == our_pid)
+                        except Exception:
+                            on = False
+                        if on and start is None:
+                            start = x
+                        elif not on and start is not None:
+                            spans.append((start, x))
+                            start = None
+                        x += STEP
+                    if start is not None:
+                        spans.append((start, fr))
+                    return spans
+
+                out = []
+                prev = None
+                top = ft
+                y = ft
+                while y < fb:
+                    s = _row_spans(y)
+                    if s != prev:
+                        if prev:
+                            for (x0, x1) in prev:
+                                out.append((x0, top, x1, y))
+                        prev = s
+                        top = y
+                    y += STEP
+                if prev:
+                    for (x0, x1) in prev:
+                        out.append((x0, top, x1, fb))
+                return out
+
+            for _hwnd, full in our_windows:
+                rects.extend(_sampled_visible(full))
 
             global _GUI_DPI_LOGGED
             if _CLICK_DEBUG and not _GUI_DPI_LOGGED:
