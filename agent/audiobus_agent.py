@@ -470,9 +470,30 @@ def _window_title(hwnd):
 _CLICK_DEBUG = bool(os.environ.get("AUDIOBUS_DEBUG_CLICKS"))
 _NET_DPI_LOGGED = False   # one-time net-thread DPI-awareness diagnostic
 _GUI_DPI_LOGGED = False   # one-time GUI-thread DPI-awareness + raw-rect diagnostic
+_SHOT_SAVED = False       # one-time: save an mss screenshot on the first blocked click
 
 
-_AGENT_BUILD = "2026-10-27-pxdiag"  # bumped per diagnostic build; appears in the click log
+_AGENT_BUILD = "2026-10-27-shotdiag"  # bumped per diagnostic build; appears in the click log
+
+
+def _save_debug_shot(x, y):
+    """One-time: save an mss screenshot (exactly what the stream shows) plus the agent's
+    window rect, so a blocked click the viewer disputes can be checked visually — where the
+    agent actually appears in the capture vs the rect the hit-test uses. Writes
+    ~/audiobus-shot.png."""
+    global _SHOT_SAVED
+    if _SHOT_SAVED:
+        return
+    _SHOT_SAVED = True
+    try:
+        import mss.tools
+        with ScreenGrabber() as sct:
+            img = sct.grab(sct.monitors[1] if len(sct.monitors) > 1 else sct.monitors[0])
+        path = os.path.join(os.path.expanduser("~"), "audiobus-shot.png")
+        mss.tools.to_png(img.rgb, img.size, output=path)
+        _click_log(f"[diag saved screenshot {path} size={img.size} for blocked click ({x},{y})]")
+    except Exception as e:
+        _click_log(f"[diag screenshot failed: {e!r}]")
 
 
 def _click_log(msg):
@@ -582,6 +603,8 @@ def _click_on_agent(x, y, rects):
                        f"title={_window_title(hwnd)!r} our_pid={os.getpid()} "
                        f"screen_px={_screen_pixel(x, y)} [{_win_diag(hwnd)}] -> "
                        f"{'BLOCK' if on_agent else 'allow'}")
+            if on_agent:
+                _save_debug_shot(x, y)  # one-time: capture what the stream shows here
         return on_agent
     except Exception as e:
         if _CLICK_DEBUG:
@@ -2682,7 +2705,6 @@ class App:
         self._clip_after = None       # after() id for the clipboard poll loop
 
         self.root = tk.Tk()
-        self._apply_dpi_scaling()  # keep the UI sized correctly now the process is DPI-aware
         self.root.title(tr("agent.window.title"))
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
 
@@ -3797,7 +3819,6 @@ def _set_dpi_awareness():
 
 
 def main(argv=None):
-    _set_dpi_awareness()  # must run before the first Tk window / ScreenGrabber
     args = parse_args(argv if argv is not None else sys.argv[1:])
     if getattr(args, "selfcheck", None):
         print(run_selfcheck(args.selfcheck))
