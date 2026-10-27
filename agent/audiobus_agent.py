@@ -473,7 +473,7 @@ _GUI_DPI_LOGGED = False   # one-time GUI-thread DPI-awareness + raw-rect diagnos
 _SHOT_SAVED = False       # one-time: save an mss screenshot on the first blocked click
 
 
-_AGENT_BUILD = "2026-10-27-nohover"  # bumped per diagnostic build; appears in the click log
+_AGENT_BUILD = "2026-10-27-netrects"  # bumped per diagnostic build; appears in the click log
 
 
 def _save_debug_shot(x, y):
@@ -855,6 +855,108 @@ class ScreenTrack(MediaStreamTrack):
         return arr
 
 
+def _compute_window_rects(our_pid):
+    """Return (block_rects, agent_foreground) for the agent's own windows, in PHYSICAL
+    screen pixels. MUST run on a per-monitor-DPI-aware thread — the NET thread is (mss makes
+    the process per-monitor), which is exactly why this lives here and not on the Tk GUI
+    thread: toggling the GUI thread's DPI context every tick made the window's caption
+    buttons flicker on a scaled display. The net thread doesn't own the window, so its
+    GetWindowRect/WindowFromPoint queries never repaint it.
+
+    Finds our visible top-level windows by owning process (robust to Tk's hidden wrapper
+    window) and marks the region where one of them is actually the TOP window by sampling
+    WindowFromPoint on a grid — the SAME test the click filter uses, so the viewer's
+    blocked-cursor region matches exactly where clicks are refused."""
+    rects = []
+    foreground = False
+    try:
+        u = ctypes.windll.user32
+        u.IsWindowVisible.argtypes = [wintypes.HWND]
+        u.GetWindowRect.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.RECT)]
+        u.GetWindowThreadProcessId.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
+        u.WindowFromPoint.argtypes = [wintypes.POINT]
+        u.WindowFromPoint.restype = ctypes.c_void_p
+
+        our_windows = []
+
+        def _enum_cb(h, lp):
+            try:
+                if not u.IsWindowVisible(h):
+                    return True
+                pid = wintypes.DWORD()
+                u.GetWindowThreadProcessId(h, ctypes.byref(pid))
+                if pid.value != our_pid:
+                    return True
+                r = wintypes.RECT()
+                if not u.GetWindowRect(h, ctypes.byref(r)):
+                    return True
+                if (r.right - r.left) < 8 or (r.bottom - r.top) < 8:
+                    return True  # skip tiny/hidden helper windows
+                our_windows.append((r.left, r.top, r.right, r.bottom))
+            except Exception:
+                pass
+            return True
+        _EnumProc = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+        u.EnumWindows(_EnumProc(_enum_cb), 0)
+
+        def _sampled_visible(full):
+            fl, ft, fr, fb = full
+            STEP = 16
+
+            def _row_spans(y):
+                spans = []
+                start = None
+                x = fl
+                while x < fr:
+                    on = False
+                    try:
+                        h = u.WindowFromPoint(wintypes.POINT(int(x), int(y)))
+                        if h:
+                            pid = wintypes.DWORD()
+                            u.GetWindowThreadProcessId(h, ctypes.byref(pid))
+                            on = (pid.value == our_pid)
+                    except Exception:
+                        on = False
+                    if on and start is None:
+                        start = x
+                    elif not on and start is not None:
+                        spans.append((start, x))
+                        start = None
+                    x += STEP
+                if start is not None:
+                    spans.append((start, fr))
+                return spans
+
+            out = []
+            prev = None
+            top = ft
+            y = ft
+            while y < fb:
+                s = _row_spans(y)
+                if s != prev:
+                    if prev:
+                        for (x0, x1) in prev:
+                            out.append((x0, top, x1, y))
+                    prev = s
+                    top = y
+                y += STEP
+            if prev:
+                for (x0, x1) in prev:
+                    out.append((x0, top, x1, fb))
+            return out
+
+        for full in our_windows:
+            rects.extend(_sampled_visible(full))
+
+        fg = u.GetForegroundWindow()
+        fpid = wintypes.DWORD()
+        u.GetWindowThreadProcessId(fg, ctypes.byref(fpid))
+        foreground = (fpid.value == our_pid)
+    except Exception:
+        pass
+    return tuple(rects), foreground
+
+
 def _compute_blockrects(client):
     """The agent's own windows, each expressed per-monitor in that monitor's local
     pixel space (the same space the viewer's canvas uses), so the viewer can show a
@@ -882,18 +984,33 @@ async def _maybe_send_blockrects(ws, client):
 
 
 async def blockrects_loop(ws, client):
-    """Keep the viewer's 'blocked cursor' regions (where the agent's own windows
-    are) up to date over the WebSocket, for as long as a session is live. Sends
-    only when the rects change (see _maybe_send_blockrects)."""
+    """On the NET thread, refresh the agent's own-window rects (physical pixels; drives the
+    click/key filter AND the viewer's blocked-cursor hint) and push them to the viewer when
+    they change, for as long as a session is live. Computing here — not on the Tk GUI thread
+    — is deliberate: it keeps the rects in the net thread's per-monitor DPI space (so they
+    line up with the capture/stream on a scaled display) and avoids the GUI-thread DPI-context
+    toggling that made the window's caption buttons flicker."""
     try:
+        # One-time, idempotent: ensure THIS thread is per-monitor DPI-aware (mss already made
+        # the process per-monitor; this is a safety net, and never touches the window's thread).
+        try:
+            ctypes.windll.user32.SetThreadDpiAwarenessContext.restype = ctypes.c_void_p
+            ctypes.windll.user32.SetThreadDpiAwarenessContext.argtypes = [ctypes.c_void_p]
+            ctypes.windll.user32.SetThreadDpiAwarenessContext(ctypes.c_void_p(-4))
+        except Exception:
+            pass
+        our_pid = os.getpid()
         while client.streaming:
             try:
+                rects, fg = _compute_window_rects(our_pid)
+                client.app._window_rects = rects
+                client.app._agent_foreground = fg
                 await _maybe_send_blockrects(ws, client)
             except asyncio.CancelledError:
                 break
             except Exception:
                 break
-            await asyncio.sleep(0.4)
+            await asyncio.sleep(0.12)
     except asyncio.CancelledError:
         pass
 
@@ -3016,157 +3133,12 @@ class App:
         self._drain_after = self.root.after(80, self._drain)
 
     def _update_window_rects(self):
-        """Refresh the on-screen rects of ALL our windows (main window + any open
-        dialog, full frames incl. the title bar, in physical screen coords) and
-        whether one of them currently has OS focus. apply_event() (network thread)
-        reads these to ignore injected clicks on us and injected keys while we are
-        focused. Runs on the Tk thread (GetWindowRect must not run off it)."""
-        rects = []
-        prev_ctx = None
-        try:
-            import ctypes
-            from ctypes import wintypes
-
-            u = ctypes.windll.user32
-            u.GetWindow.restype = wintypes.HWND
-            u.GetWindow.argtypes = [wintypes.HWND, wintypes.UINT]
-            u.IsWindowVisible.argtypes = [wintypes.HWND]
-            u.GetWindowRect.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.RECT)]
-            u.GetWindowThreadProcessId.argtypes = [
-                wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
-            # Query rects in PHYSICAL pixels so they line up with the mss capture / stream
-            # and the per-monitor-aware hit-test (and the injected click coords). Our window
-            # is deliberately DPI-UNAWARE (making it DPI-aware shifts where it lands in the
-            # BitBlt capture), so by default GetWindowRect on this Tk thread would return
-            # LOGICAL pixels and the viewer's blocked-cursor rects would be offset on a
-            # scaled display. Switch just this thread to per-monitor-v2 for the calls below.
-            try:
-                u.SetThreadDpiAwarenessContext.restype = ctypes.c_void_p
-                u.SetThreadDpiAwarenessContext.argtypes = [ctypes.c_void_p]
-                prev_ctx = u.SetThreadDpiAwarenessContext(ctypes.c_void_p(-4))
-            except Exception:
-                prev_ctx = None
-
-            # Find OUR OWN visible top-level windows straight from the OS, by owning process
-            # (main window + any open dialog). This uses the DECORATED windows the OS
-            # actually stacks and hit-tests — unlike GetAncestor(winfo_id, GA_ROOT), which can
-            # return a hidden Tk wrapper window at a different Z-order position, which made the
-            # covering-window walk below miss some apps (so a covered area was wrongly flagged
-            # as blocked and showed the forbidden cursor). Identify ours by pid, as the click
-            # filter does. Hidden helper windows (ttk monitor, IME) are skipped by size/visibility.
-            our_pid = os.getpid()
-            our_windows = []
-            def _enum_cb(h, lp):
-                try:
-                    if not u.IsWindowVisible(h):
-                        return True
-                    pid = wintypes.DWORD()
-                    u.GetWindowThreadProcessId(h, ctypes.byref(pid))
-                    if pid.value != our_pid:
-                        return True
-                    r = wintypes.RECT()
-                    if not u.GetWindowRect(h, ctypes.byref(r)):
-                        return True
-                    if (r.right - r.left) < 8 or (r.bottom - r.top) < 8:
-                        return True  # skip tiny/hidden helper windows
-                    our_windows.append((int(h), (r.left, r.top, r.right, r.bottom)))
-                except Exception:
-                    pass
-                return True
-            _EnumProc = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
-            u.EnumWindows(_EnumProc(_enum_cb), 0)
-
-            u.WindowFromPoint.argtypes = [wintypes.POINT]  # POINT passed BY VALUE
-            u.WindowFromPoint.restype = ctypes.c_void_p    # HWND is 64-bit; don't truncate
-
-            def _sampled_visible(full):
-                # The sub-rectangles of `full` where one of OUR windows is actually the TOP
-                # window, found by sampling WindowFromPoint on a grid — the SAME test the
-                # click filter (_click_on_agent) uses. This guarantees the viewer's blocked-
-                # cursor region matches exactly where clicks are refused, and is robust to
-                # DPI and Tk's wrapper windows (a Z-order walk from a cached handle gave the
-                # wrong covering set). Cells are STEP px; adjacent rows with the same spans
-                # are merged into taller rects to keep the list small.
-                fl, ft, fr, fb = full
-                STEP = 16
-
-                def _row_spans(y):
-                    spans = []
-                    start = None
-                    x = fl
-                    while x < fr:
-                        on = False
-                        try:
-                            h = u.WindowFromPoint(wintypes.POINT(int(x), int(y)))
-                            if h:
-                                pid = wintypes.DWORD()
-                                u.GetWindowThreadProcessId(h, ctypes.byref(pid))
-                                on = (pid.value == our_pid)
-                        except Exception:
-                            on = False
-                        if on and start is None:
-                            start = x
-                        elif not on and start is not None:
-                            spans.append((start, x))
-                            start = None
-                        x += STEP
-                    if start is not None:
-                        spans.append((start, fr))
-                    return spans
-
-                out = []
-                prev = None
-                top = ft
-                y = ft
-                while y < fb:
-                    s = _row_spans(y)
-                    if s != prev:
-                        if prev:
-                            for (x0, x1) in prev:
-                                out.append((x0, top, x1, y))
-                        prev = s
-                        top = y
-                    y += STEP
-                if prev:
-                    for (x0, x1) in prev:
-                        out.append((x0, top, x1, fb))
-                return out
-
-            for _hwnd, full in our_windows:
-                rects.extend(_sampled_visible(full))
-
-            global _GUI_DPI_LOGGED
-            if _CLICK_DEBUG and not _GUI_DPI_LOGGED:
-                _GUI_DPI_LOGGED = True
-                _click_log(f"[diag gui-thread DPI={_dpi_awareness_name()} "
-                           f"our_windows={our_windows} tk_scaling="
-                           f"{self.root.tk.call('tk', 'scaling')}]")
-
-            # Are WE the foreground app? Compare by owning process (handle identity is
-            # unreliable with Tk's wrapper windows — see _click_on_agent), so injected
-            # keys are dropped whenever any of our windows has focus.
-            self._agent_foreground = (
-                _window_owner_pid(u.GetForegroundWindow()) == our_pid)
-        except Exception:
-            pass
-        finally:
-            if prev_ctx:
-                try:
-                    ctypes.windll.user32.SetThreadDpiAwarenessContext(prev_ctx)
-                except Exception:
-                    pass
-        if rects:
-            self._window_rects = tuple(rects)
-        elif not self._window_rects:
-            # No rect yet and the API failed: fall back to Tk client bounds so some
-            # protection exists (misses the title bar, but better than nothing).
-            try:
-                x, y = self.root.winfo_rootx(), self.root.winfo_rooty()
-                self._window_rects = ((x, y, x + self.root.winfo_width(),
-                                       y + self.root.winfo_height()),)
-            except Exception:
-                pass
-        # else: keep the last good rects rather than clearing them.
+        """No-op on the Tk GUI thread. The agent's own-window rects (for the click/key
+        filter and the viewer's blocked-cursor hint) are computed on the NETWORK thread in
+        blockrects_loop, in per-monitor-aware PHYSICAL pixels. Doing it there avoids toggling
+        this (window-owning) thread's DPI context every tick, which made the window's caption
+        buttons flicker on a scaled display. Kept because window-event bindings still call it."""
+        return
 
     # ---- fade animations (color interpolation; Tk has no per-widget alpha) ----
     def _animate(self, key, draw, duration=170, steps=12, on_done=None):
