@@ -101,6 +101,22 @@ HB_WARN_SECS = 2.0          # reconnect starts at once; show the Wait/Cut dialog
 HB_MAX_RECONNECT_SECS = 65.0  # > the DO's 60s grace: give up reconnecting after this
 INTERRUPT_REASK_MS = 10000  # re-ask the Wait/Cut dialog this long after "Wait"
 
+# WebRTC media self-heal. When the peer connection fails mid-session but our control
+# link (the WebSocket) is still healthy, the media path died on its own — e.g. a TURN
+# allocation expiring, or an ICE path dropping — which used to END the session (the long
+# stable sessions dropped "after 15 minutes or so"). Instead we REBUILD the media with
+# fresh ICE/TURN credentials and a new offer, so the session self-heals. Bounded so a
+# permanently-broken path eventually falls back to ending cleanly rather than looping.
+MEDIA_REOFFER_MAX = 6        # consecutive rebuilds without the media reaching "connected"
+
+# Mouse-wheel sensitivity. Browsers fire many small wheel deltas per gesture (smooth
+# scroll / trackpad); the viewer normalizes each to a pixel-ish unit and the agent sums
+# them, emitting one scroll "click" per this many normalized pixels. Chrome sends ~100
+# px per physical notch, so 100 keeps one notch ~= one click (responsive) while the many
+# fractional smooth-scroll/trackpad events COLLAPSE into that one click instead of each
+# flooring to a full click — which is what made scrolling hypersensitive. Larger = less.
+WHEEL_PX_PER_STEP = 100.0
+
 # Clipboard sync + file transfer tuning.
 CLIP_POLL_MS = 500             # how often the GUI thread polls the OS clipboard for changes
 CLIP_MAX_BYTES = 256 * 1024    # cap on synced clipboard text (UTF-8); larger is skipped
@@ -406,11 +422,21 @@ def resolve_key(ev):
     return None
 
 
-def _wheel_steps(delta):
-    if not delta:
-        return 0
-    steps = int(round(delta / 100.0))
-    return steps if steps else (1 if delta > 0 else -1)
+def _accumulate_wheel(dx, dy, accum):
+    """Convert normalized wheel pixel deltas into integer scroll steps, carrying the
+    fractional remainder in `accum` (a mutable {"x","y"} dict kept per session) so many
+    small events — smooth scrolling, a trackpad — SUM into whole steps instead of each
+    flooring to a full click. Flooring every event made scrolling hypersensitive; this
+    keeps one physical notch to roughly one step while staying smooth for fine scrolls."""
+    if accum is None:
+        accum = {"x": 0.0, "y": 0.0}
+    accum["x"] += (dx or 0) / WHEEL_PX_PER_STEP
+    accum["y"] += (dy or 0) / WHEEL_PX_PER_STEP
+    sx = int(accum["x"])  # truncates toward zero, so the remainder carries its sign
+    sy = int(accum["y"])
+    accum["x"] -= sx
+    accum["y"] -= sy
+    return sx, sy
 
 
 def _in_rects(x, y, rects):
@@ -473,7 +499,7 @@ _GUI_DPI_LOGGED = False   # one-time GUI-thread DPI-awareness + raw-rect diagnos
 _SHOT_SAVED = False       # one-time: save an mss screenshot on the first blocked click
 
 
-_AGENT_BUILD = "2026-10-27-netrects"  # bumped per diagnostic build; appears in the click log
+_AGENT_BUILD = "2026-10-27-selfheal"  # bumped per diagnostic build; appears in the click log
 
 
 def _save_debug_shot(x, y):
@@ -613,7 +639,7 @@ def _click_on_agent(x, y, rects):
 
 
 def apply_event(ev, monitors=None, window_rects=None, blocked=None,
-                pressed=None, agent_foreground=False):
+                pressed=None, agent_foreground=False, wheel_accum=None):
     """Apply one remote input event, while protecting the agent's OWN windows so a
     remote user can't close it or drive its controls:
 
@@ -680,8 +706,7 @@ def apply_event(ev, monitors=None, window_rects=None, blocked=None,
             if _click_on_agent(ax, ay, window_rects):
                 return  # don't scroll an agent window that is actually on top here
             mouse.position = (ax, ay)
-            sx = _wheel_steps(ev.get("dx", 0))
-            sy = _wheel_steps(ev.get("dy", 0))
+            sx, sy = _accumulate_wheel(ev.get("dx", 0), ev.get("dy", 0), wheel_accum)
             if sx or sy:
                 mouse.scroll(sx, -sy)
         elif t == "kd":
@@ -1243,6 +1268,13 @@ class NetClient:
         self._pin_fails = 0          # cumulative wrong PINs in the current lockout window
         self._pin_backoff = 0        # repeat-lockout count -> exponential cooldown
         self._pin_lock_until = 0.0   # loop.time() until which challenges are refused
+        # Mouse-wheel accumulation: sum many small per-event deltas into whole scroll
+        # steps (see _accumulate_wheel) instead of flooring each event to a full click.
+        self._wheel_accum = {"x": 0.0, "y": 0.0}
+        # WebRTC media self-heal (see _renegotiate_media): rebuild a failed peer
+        # connection with fresh ICE/TURN credentials rather than ending the session.
+        self._media_gen = 0          # bumps per rebuild so a stale pc's handler bails out
+        self._reneg_attempts = 0     # consecutive rebuilds without reaching "connected"
 
     def start(self):
         threading.Thread(target=self._thread_main, daemon=True).start()
@@ -1816,6 +1848,7 @@ class NetClient:
                 getattr(self.app, "_window_rects", None),
                 self._blocked_btns, self._pressed_btns,
                 getattr(self.app, "_agent_foreground", False),
+                self._wheel_accum,
             )
             return
         mtype = msg.get("type")
@@ -2077,6 +2110,8 @@ class NetClient:
         except Exception:
             return
         self.streaming = True
+        self._reneg_attempts = 0           # fresh session: full media self-heal budget
+        self._wheel_accum["x"] = self._wheel_accum["y"] = 0.0  # no carried scroll fraction
         # Advertise optional capabilities so a newer viewer enables its clipboard/file UI
         # only against an agent that supports them (older agents just ignore these types).
         try:
@@ -2120,6 +2155,12 @@ class NetClient:
                 pc = self.pc
                 if not pc or not self.streaming:
                     return
+                if pc.connectionState == "connected":
+                    # Media is flowing. Refresh the self-heal budget so a LATER failure
+                    # (the next credential/allocation expiry) gets a full set of rebuild
+                    # attempts of its own rather than inheriting this one's count.
+                    self._reneg_attempts = 0
+                    return
                 if pc.connectionState in ("failed", "closed"):
                     # If OUR link to the server is interrupted (reconnecting), the media
                     # failing is part of that same drop — don't tear the session down as
@@ -2130,19 +2171,21 @@ class NetClient:
                     # Media failed but the control link isn't CONFIRMED down yet. On a
                     # whole-network drop (the shared computer loses internet) ICE can reach
                     # "failed" within a second or two — ahead of the heartbeat's ~3s
-                    # confirmation. Tearing down here would close the pc, drop _connected,
-                    # and report "viewer left" for what is really our own interruption.
-                    # So wait briefly: if the heartbeat flags the control link down, defer
-                    # and let the reconnect flow drive the warn + re-serve. Only a lasting
-                    # media failure with a still-healthy control link is a real "viewer
-                    # gone" (also normally signalled faster by a relayed peer-left).
+                    # confirmation. So wait briefly: if the heartbeat flags the control link
+                    # down, defer and let the reconnect flow drive the warn + re-serve.
                     for _ in range(int(HB_INTERRUPT_SECS / 0.25) + 2):
                         await asyncio.sleep(0.25)
                         if self._link_down or not self.streaming or self.pc is not pc:
                             return
-                    if self._link_down:
+                    if self._link_down or self.pc is not pc:
                         return
-                    # The media path died on its own; fall back to waiting for a viewer.
+                    # The media path died on its own but our control link is healthy — the
+                    # classic "stable session drops after ~15 min" (a TURN allocation
+                    # expiring, an ICE path dropping). REBUILD the media with fresh
+                    # ICE/TURN credentials and a new offer so the session self-heals; only
+                    # if the rebuild gives up do we fall back to ending it as viewer-gone.
+                    if await self._renegotiate_media(pc):
+                        return
                     await self._stop_stream()
                     self._report_peer_left(False)
 
@@ -2167,6 +2210,41 @@ class NetClient:
             return True
         except Exception:
             return False
+
+    async def _renegotiate_media(self, failed_pc):
+        """A mid-session WebRTC media failure with a HEALTHY control link: tear down the
+        dead peer connection (keeping the capture and the approved viewer) and build a
+        fresh one with new ICE/TURN credentials, sending a new offer the viewer answers.
+
+        Returns True if a rebuild offer was sent — the session continues and the new pc's
+        own connectionstatechange drives recovery (or the next attempt) — or False if we
+        should give up: the budget (MEDIA_REOFFER_MAX) is spent, the session is ending, or
+        the rebuild couldn't start. The bound stops a permanently-broken path from looping."""
+        if (not self.streaming or self.ws is None or self.pc is not failed_pc
+                or self._link_down or self._ended):
+            return False
+        if self._reneg_attempts >= MEDIA_REOFFER_MAX:
+            return False  # keeps failing; let the caller end the session as viewer-gone
+        self._reneg_attempts += 1
+        self._media_gen += 1
+        gen = self._media_gen
+        ws = self.ws
+        # Close the dead pc — its UDP sockets first, so close() can't wedge the net loop
+        # (see _stop_stream) — but leave self.capture and the blockrects task running.
+        old = self.pc
+        self.pc = None
+        if old is not None:
+            _force_close_ice_sockets(old)
+            try:
+                await asyncio.wait_for(old.close(), timeout=HB_INTERRUPT_SECS)
+            except Exception:
+                pass
+        # A newer rebuild / teardown / reconnect superseded us while we closed the old pc:
+        # it now owns the session, so report success without ending anything ourselves.
+        if (gen != self._media_gen or not self.streaming or ws is not self.ws
+                or self._link_down or self._ended):
+            return True
+        return await self._start_webrtc(ws)
 
     def _apply_bitrate(self):
         """Best-effort per-sender max bitrate from --bitrate (kbps). aiortc may not

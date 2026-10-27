@@ -971,6 +971,14 @@ async function handleOffer(msg) {
   pc = new RTCPeerConnection({ iceServers });
 
   pc.ontrack = (e) => {
+    // Minimize the receiver's jitter buffer: for remote CONTROL, low latency matters
+    // far more than smoothing out jitter, so target ~0 playout delay. jitterBufferTarget
+    // is the current API; playoutDelayHint is the older Chromium fallback. Both no-op
+    // where unsupported (Firefox), leaving the browser's adaptive default.
+    try { e.receiver.jitterBufferTarget = 0; } catch { /* unsupported */ }
+    try {
+      if ("playoutDelayHint" in e.receiver) e.receiver.playoutDelayHint = 0;
+    } catch { /* unsupported */ }
     const mid = e.transceiver && e.transceiver.mid;
     let idx =
       mid != null && trackMids[mid] != null ? Number(trackMids[mid]) : NaN;
@@ -1706,10 +1714,10 @@ function attachInput(el, mon) {
     }
     const p = mediaXY(el, mon, e);
     // Over the agent's own window the agent ignores clicks, so hint with a
-    // "not-allowed" cursor (updated every move; "" reverts to the CSS crosshair).
+    // "not-allowed" cursor (updated every move; "" reverts to the CSS arrow cursor).
     el.style.cursor = inBlockRect(mon.i, p.x, p.y) ? "not-allowed" : "";
     const now = performance.now();
-    if (now - lastMove < 25) return; // ~40 moves/sec max
+    if (now - lastMove < 15) return; // ~66 moves/sec max (snappier remote cursor)
     lastMove = now;
     send({ t: "mm", m: mon.i, x: p.x, y: p.y });
   };
@@ -1725,7 +1733,12 @@ function attachInput(el, mon) {
     e.preventDefault();
     if (!kbToggle.checked) return; // input off: view-only
     const p = mediaXY(el, mon, e);
-    send({ t: "scroll", m: mon.i, x: p.x, y: p.y, dx: e.deltaX, dy: e.deltaY });
+    // Normalize the delta to a pixel-ish unit regardless of deltaMode (0=pixel,
+    // 1=line, 2=page) so the agent applies a consistent amount across browsers and
+    // devices; the agent sums these deltas into whole scroll steps (not one click
+    // per event), which is what keeps scrolling from being hypersensitive.
+    const unit = e.deltaMode === 1 ? 33 : e.deltaMode === 2 ? 800 : 1;
+    send({ t: "scroll", m: mon.i, x: p.x, y: p.y, dx: e.deltaX * unit, dy: e.deltaY * unit });
   };
   const onCtx = (e) => {
     e.preventDefault(); // let right-click flow through as md/mu instead

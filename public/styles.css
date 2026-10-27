@@ -657,7 +657,10 @@ body.app {
 
 .screen {
   display: block;
-  cursor: crosshair;
+  /* The remote cursor is the system arrow (white fill + dark outline, so it stays
+     visible on any background), not a crosshair. "not-allowed" is applied inline
+     over the agent's own windows (connect.js). */
+  cursor: default;
   background: var(--stage-bg);
   image-rendering: auto;
 }
