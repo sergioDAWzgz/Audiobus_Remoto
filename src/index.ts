@@ -111,6 +111,11 @@ export default {
       } catch {
         return new Response("Expected a JSON body.", { status: 400 });
       }
+      // `null` is valid JSON, so request.json() can return null without throwing;
+      // guard before dereferencing so it falls through to a clean 400, not a 500.
+      if (!body || typeof body !== "object") {
+        return new Response("Invalid claim.", { status: 400 });
+      }
       const code = String(body.code || "").toUpperCase();
       const secret = String(body.secret || "");
       // The secret is a client-generated token (secrets.token_urlsafe(32) ~= 43 chars);

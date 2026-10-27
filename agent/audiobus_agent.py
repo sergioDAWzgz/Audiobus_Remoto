@@ -270,8 +270,19 @@ def _detect_os_theme():
 # Theme choice persisted across runs: "auto" (follow the OS), "light", or "dark".
 
 def _config_path():
-    base = os.environ.get("APPDATA") or os.path.expanduser("~")
+    # LOCALAPPDATA (not roaming APPDATA): the file now holds the stable-code secret and
+    # PIN, so keep it OFF domain roaming profiles and roaming-profile backups. Falls back
+    # to APPDATA then ~ on the rare box without LOCALAPPDATA.
+    base = (os.environ.get("LOCALAPPDATA") or os.environ.get("APPDATA")
+            or os.path.expanduser("~"))
     return os.path.join(base, "AudiobusRemote", "config.json")
+
+
+# The config file is written from BOTH the Tk GUI thread (theme, auto-accept toggle) and
+# the asyncio net thread (stable-identity saves in _acquire_code / _bind_stable). Serialize
+# the read-modify-write under one lock and write atomically (temp + os.replace) so the two
+# threads can never interleave a truncating write with the other's read and drop keys.
+_CONFIG_LOCK = threading.Lock()
 
 
 def _read_config():
@@ -288,14 +299,20 @@ def _read_config():
 
 def _write_config(updates):
     """Merge `updates` into the config file (read-modify-write) so one setting's save
-    never clobbers another's. Best-effort: a read-only disk just means it isn't kept."""
+    never clobbers another's. Locked + atomic so concurrent GUI/net writes can't lose
+    keys or expose a truncated file. Best-effort: a read-only disk just means it isn't kept."""
     try:
         p = _config_path()
         os.makedirs(os.path.dirname(p), exist_ok=True)
-        d = _read_config()
-        d.update(updates)
-        with open(p, "w", encoding="utf-8") as f:
-            json.dump(d, f)
+        with _CONFIG_LOCK:
+            d = _read_config()
+            d.update(updates)
+            tmp = p + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(d, f)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp, p)   # atomic swap: a reader sees the whole old or new file
     except Exception:
         pass
 
@@ -316,6 +333,36 @@ def _save_theme_choice(choice):
 # claim_session and SessionDO.claim. With auto-accept OFF, each run gets a fresh
 # throwaway code (today's behaviour) and no identity is kept.
 
+
+class _DATA_BLOB(ctypes.Structure):
+    _fields_ = [("cbData", ctypes.c_uint32), ("pbData", ctypes.c_void_p)]
+
+
+def _dpapi(func_name, data):
+    """Run CryptProtectData / CryptUnprotectData (current-user scope) over `data` bytes.
+    Returns the result bytes, or None if DPAPI is unavailable/failed. Used to encrypt the
+    stable-code secret + PIN at rest so a copied/backed-up config.json is useless on
+    another account or machine."""
+    try:
+        crypt32 = ctypes.windll.crypt32
+        kernel32 = ctypes.windll.kernel32
+        kernel32.LocalFree.argtypes = [ctypes.c_void_p]
+        buf = ctypes.create_string_buffer(bytes(data), len(data))
+        blob_in = _DATA_BLOB(len(data), ctypes.cast(buf, ctypes.c_void_p))
+        blob_out = _DATA_BLOB()
+        fn = getattr(crypt32, func_name)
+        # (pDataIn, szDataDescr, pOptionalEntropy, pvReserved, pPromptStruct, dwFlags, pDataOut)
+        ok = fn(ctypes.byref(blob_in), None, None, None, None, 0, ctypes.byref(blob_out))
+        if not ok:
+            return None
+        try:
+            return ctypes.string_at(blob_out.pbData, blob_out.cbData)
+        finally:
+            kernel32.LocalFree(blob_out.pbData)
+    except Exception:
+        return None
+
+
 def _new_code_secret():
     """A high-entropy token that proves ownership of the stable code to the server."""
     return secrets.token_urlsafe(32)
@@ -331,16 +378,37 @@ def _save_auto_pref(on):
 
 
 def _load_stable():
-    """The saved stable identity {code, secret, pin}, or None if not established."""
+    """The saved stable identity {code, secret, pin}, or None if not established. The
+    sensitive fields are DPAPI-encrypted at rest (an {"enc": ...} blob); a cleartext
+    shape is still read as a fallback (DPAPI-unavailable saves)."""
     s = _read_config().get("stable")
-    if (isinstance(s, dict) and isinstance(s.get("code"), str)
-            and isinstance(s.get("secret"), str)):
+    if not isinstance(s, dict):
+        return None
+    if isinstance(s.get("enc"), str):
+        try:
+            raw = _dpapi("CryptUnprotectData", base64.b64decode(s["enc"]))
+            d = json.loads(raw.decode("utf-8")) if raw else None
+        except Exception:
+            d = None
+        if (isinstance(d, dict) and isinstance(d.get("code"), str)
+                and isinstance(d.get("secret"), str)):
+            return d
+        return None
+    if isinstance(s.get("code"), str) and isinstance(s.get("secret"), str):
         return s
     return None
 
 
 def _save_stable(code, secret, pin):
-    _write_config({"stable": {"code": code, "secret": secret, "pin": pin}})
+    """Persist the stable identity, DPAPI-encrypting the secret + PIN so a leaked/copied
+    config.json can't be used on another account. Falls back to cleartext only if DPAPI
+    is somehow unavailable (never expected on Windows) so the feature still works."""
+    payload = json.dumps({"code": code, "secret": secret, "pin": pin}).encode("utf-8")
+    enc = _dpapi("CryptProtectData", payload)
+    if enc is not None:
+        _write_config({"stable": {"enc": base64.b64encode(enc).decode("ascii")}})
+    else:
+        _write_config({"stable": {"code": code, "secret": secret, "pin": pin}})
 
 
 def _clear_stable():
@@ -1642,7 +1710,12 @@ class NetClient:
         code = await self.loop.run_in_executor(
             None, lambda: request_session(http_base, ctx)
         )
-        if want_stable:
+        # Re-read the preference LIVE (not the entry snapshot): the owner may have enabled
+        # auto-accept during the request round-trip (while the window showed 'requesting',
+        # self.code still None), in which case _bind_stable no-op'd. Binding the fresh code
+        # here makes it this machine's stable code, so the viewer's remembered PIN keys to
+        # a code that recurs.
+        if self.app.auto_accept:
             # Bind this fresh code to a new secret so future launches reclaim it, and
             # remember it. Best-effort: if the bind can't complete we still use the code
             # this run (it just won't be stable until a later successful bind).

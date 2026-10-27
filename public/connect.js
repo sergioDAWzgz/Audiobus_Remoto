@@ -672,10 +672,11 @@ function showPinGate(len) {
   pinInput.value = "";
   pinDesc.textContent = t("connect.pin.desc").replace("{len}", pinLen);
   pinError.hidden = true;
-  // Default the "remember" box on — auto-connect is the point of this gate. It reflects
-  // whether a PIN is already remembered for this code (e.g. after a wrong remembered PIN
-  // sent us here) so the user sees its current state.
-  if (pinRemember) pinRemember.checked = true;
+  // Default the "remember" box OFF: storing the PIN is an explicit opt-in, so it is never
+  // persisted by default on a shared/kiosk browser. Ticking it once makes later connects
+  // to this code auto-submit. (When a PIN is already remembered the gate isn't shown at
+  // all — we auto-submit — so a shown gate always means "no stored PIN for this code".)
+  if (pinRemember) pinRemember.checked = false;
   joinCard.hidden = true;
   pinCard.hidden = false;
   setStatus(t("connect.pin.title"), "warn");
