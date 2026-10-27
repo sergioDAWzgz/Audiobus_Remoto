@@ -473,7 +473,7 @@ _GUI_DPI_LOGGED = False   # one-time GUI-thread DPI-awareness + raw-rect diagnos
 _SHOT_SAVED = False       # one-time: save an mss screenshot on the first blocked click
 
 
-_AGENT_BUILD = "2026-10-27-shotdiag"  # bumped per diagnostic build; appears in the click log
+_AGENT_BUILD = "2026-10-27-rectfix"  # bumped per diagnostic build; appears in the click log
 
 
 def _save_debug_shot(x, y):
@@ -3016,6 +3016,7 @@ class App:
         reads these to ignore injected clicks on us and injected keys while we are
         focused. Runs on the Tk thread (GetWindowRect must not run off it)."""
         rects = []
+        prev_ctx = None
         try:
             import ctypes
             from ctypes import wintypes
@@ -3025,6 +3026,19 @@ class App:
             u.GetWindow.argtypes = [wintypes.HWND, wintypes.UINT]
             u.IsWindowVisible.argtypes = [wintypes.HWND]
             u.GetWindowRect.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.RECT)]
+            # Query window rects in PHYSICAL pixels so they line up with the mss capture /
+            # stream and the per-monitor-aware hit-test (and the injected click coords).
+            # Our window is deliberately DPI-UNAWARE (which keeps the screen capture correct
+            # — making it DPI-aware shifts where it lands in the BitBlt capture), so by
+            # default GetWindowRect on THIS Tk thread would return LOGICAL pixels and the
+            # viewer's blocked-cursor rects would be offset on a scaled display. Switch just
+            # this thread to per-monitor-v2 for the GetWindowRect calls below, then restore.
+            try:
+                u.SetThreadDpiAwarenessContext.restype = ctypes.c_void_p
+                u.SetThreadDpiAwarenessContext.argtypes = [ctypes.c_void_p]
+                prev_ctx = u.SetThreadDpiAwarenessContext(ctypes.c_void_p(-4))
+            except Exception:
+                prev_ctx = None
 
             def _hwnd_rect(widget):
                 try:
@@ -3091,6 +3105,12 @@ class App:
                 _window_owner_pid(u.GetForegroundWindow()) == os.getpid())
         except Exception:
             pass
+        finally:
+            if prev_ctx:
+                try:
+                    ctypes.windll.user32.SetThreadDpiAwarenessContext(prev_ctx)
+                except Exception:
+                    pass
         if rects:
             self._window_rects = tuple(rects)
         elif not self._window_rects:
