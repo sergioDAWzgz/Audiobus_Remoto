@@ -53,6 +53,39 @@ export default {
       });
     }
 
+    // An agent with auto-accept on reclaims its STABLE code: the same code it was
+    // assigned before, so a viewer's remembered PIN keeps working across restarts.
+    // The agent holds a high-entropy secret (stored locally alongside the code); only
+    // a caller presenting the bound secret may reclaim a code already in use. See
+    // SessionDO.claim. Body: { code, secret }.
+    if (path === "/api/claim-session" && request.method === "POST") {
+      let body: { code?: unknown; secret?: unknown };
+      try {
+        body = await request.json();
+      } catch {
+        return new Response("Expected a JSON body.", { status: 400 });
+      }
+      // `null` is valid JSON, so request.json() can return null without throwing;
+      // guard before dereferencing so it falls through to a clean 400, not a 500.
+      if (!body || typeof body !== "object") {
+        return new Response("Invalid claim.", { status: 400 });
+      }
+      const code = String(body.code || "").toUpperCase();
+      const secret = String(body.secret || "");
+      // The secret is a client-generated token (secrets.token_urlsafe(32) ~= 43 chars);
+      // bound the length so a caller can't stash arbitrary data in DO storage.
+      if (!isValidCode(code) || secret.length < 20 || secret.length > 200) {
+        return new Response("Invalid claim.", { status: 400 });
+      }
+      const stub = env.SESSIONS.getByName(code);
+      if (!(await stub.claim(secret))) {
+        return new Response("That code is in use by another session.", {
+          status: 409,
+        });
+      }
+      return Response.json({ code, ws: `/ws/agent?code=${code}` });
+    }
+
     // WebSocket endpoints for the agent (screen owner) and the viewer (browser).
     if (path === "/ws/agent" || path === "/ws/viewer") {
       if (request.headers.get("Upgrade") !== "websocket") {

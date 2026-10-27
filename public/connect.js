@@ -42,6 +42,7 @@ const pinForm = $("pinForm");
 const pinInput = $("pinInput");
 const pinError = $("pinError");
 const pinDesc = $("pinDesc");
+const pinRemember = $("pinRemember"); // "Remember on this device" checkbox on the PIN gate
 
 // Translation helper (i18n.js loads first; falls back to the key if missing).
 const t = (k) => (window.I18N ? window.I18N.t(k) : k);
@@ -52,6 +53,41 @@ let screens = new Map(); // monitor index -> { canvas, ctx, handlers, mon }
 let inSession = false;
 let pinActive = false; // showing the PIN gate (host auto-accepts behind a PIN)
 let pinLen = 4; // digits expected, per the agent's pin-required message
+// Remembered-PIN auto-connect. When a host auto-accepts behind a PIN, the viewer may
+// remember that PIN (per session code, on this device) so a later connect to the SAME
+// code submits it automatically — the browser half of the agent's stable-code feature.
+let autoPinSent = false; // we auto-submitted a remembered PIN this attempt (await its result)
+let pendingPin = null; // the PIN just submitted, committed to storage on a successful join
+let rememberOnSuccess = false; // persist pendingPin for this code once the session starts
+
+// The PIN is kept in localStorage, NOT a cookie, so it stays on this device and is never
+// sent to the server. Keyed by the (uppercased) session code. All access is guarded: a
+// private window or blocked storage must degrade to "no remembered PIN", never throw.
+const PIN_STORE_PREFIX = "abr.pin.";
+function storedPin(code) {
+  if (!code) return null;
+  try {
+    return localStorage.getItem(PIN_STORE_PREFIX + code) || null;
+  } catch {
+    return null;
+  }
+}
+function setStoredPin(code, pin) {
+  if (!code || !pin) return;
+  try {
+    localStorage.setItem(PIN_STORE_PREFIX + code, pin);
+  } catch {
+    /* ignore: storage unavailable */
+  }
+}
+function clearStoredPin(code) {
+  if (!code) return;
+  try {
+    localStorage.removeItem(PIN_STORE_PREFIX + code);
+  } catch {
+    /* ignore */
+  }
+}
 let viewMode = "grid"; // "grid" | "single"
 let selectedIndex = 0; // monitor index shown in single mode
 let activeDown = null; // { canvas, mon } held between mousedown and mouseup
@@ -629,6 +665,11 @@ function showPinGate(len) {
   pinInput.value = "";
   pinDesc.textContent = t("connect.pin.desc").replace("{len}", pinLen);
   pinError.hidden = true;
+  // Default the "remember" box OFF: storing the PIN is an explicit opt-in, so it is never
+  // persisted by default on a shared/kiosk browser. Ticking it once makes later connects
+  // to this code auto-submit. (When a PIN is already remembered the gate isn't shown at
+  // all — we auto-submit — so a shown gate always means "no stored PIN for this code".)
+  if (pinRemember) pinRemember.checked = false;
   joinCard.hidden = true;
   pinCard.hidden = false;
   setStatus(t("connect.pin.title"), "warn");
@@ -658,6 +699,11 @@ pinForm.addEventListener("submit", (e) => {
     return;
   }
   pinError.hidden = true;
+  // Remember this PIN for this code on success if the box is checked; if it's unchecked,
+  // forget any PIN previously stored for this code (the user opted out).
+  pendingPin = pin;
+  rememberOnSuccess = !!(pinRemember && pinRemember.checked);
+  if (!rememberOnSuccess) clearStoredPin(currentCode);
   send({ type: "pin", pin });
   setStatus(t("connect.pin.checking"), "warn");
 });
@@ -719,6 +765,11 @@ function connect(code) {
   // pre-session interruption can't make the first heartbeat tick re-enter an
   // interruption and swallow this attempt's no-agent/busy error.
   agentDown = false;
+  // Fresh attempt: clear last attempt's remembered-PIN state so a prior auto-submit
+  // can't be mistaken for this one (and this code's own remembered PIN is retried once).
+  autoPinSent = false;
+  pendingPin = null;
+  rememberOnSuccess = false;
   currentCode = code;
   // A user-initiated join is a NEW session relationship: mint a fresh resume token. The
   // reconnect path reuses it (via openWs) so a dropped session resumes without a new
@@ -809,13 +860,27 @@ async function onMessage(ev) {
       // (e.g. the agent re-served us after an own-link blip), just re-assert the status —
       // don't re-render, which would wipe any digits already typed.
       if (!inSession) {
-        if (pinActive) setStatus(t("connect.pin.title"), "warn");
-        else showPinGate(msg.len);
+        pinLen = Number.isInteger(msg.len) && msg.len > 0 ? msg.len : pinLen;
+        const remembered = storedPin(currentCode);
+        if (pinActive) {
+          setStatus(t("connect.pin.title"), "warn");
+        } else if (remembered && !autoPinSent) {
+          // Auto-connect: submit the remembered PIN for this code without showing the gate.
+          // If it's wrong/refused we fall back to the manual gate (pin-bad / denied below).
+          autoPinSent = true;
+          pendingPin = remembered;
+          rememberOnSuccess = true; // keep it remembered when it works
+          send({ type: "pin", pin: remembered });
+          setStatus(t("connect.pin.checking"), "warn");
+        } else {
+          showPinGate(msg.len);
+        }
       }
       break;
     case "pin-bad":
-      // Wrong PIN, but attempts remain: let the user retry in place.
+      // Wrong PIN, but attempts remain.
       if (pinActive) {
+        // Manual entry: let the user retry in place.
         const left = Number.isInteger(msg.left) ? msg.left : 0;
         showPinError(t("connect.pin.bad").replace("{left}", left));
         pinInput.value = "";
@@ -825,13 +890,23 @@ async function onMessage(ev) {
           /* ignore */
         }
         setStatus(t("connect.pin.title"), "warn");
+      } else if (autoPinSent && !inSession) {
+        // A remembered PIN was wrong (the host changed it): forget it and fall back to
+        // the manual gate so the user can enter the new one.
+        clearStoredPin(currentCode);
+        pendingPin = null;
+        showPinGate(pinLen);
+        showPinError(t("connect.pin.bad").replace("{left}", Number.isInteger(msg.left) ? msg.left : 0));
       }
       break;
     case "denied":
-      if (pinActive) {
+      if (pinActive || (autoPinSent && !inSession)) {
         // The PIN challenge ended in refusal (too many wrong tries, a lockout, or a
-        // timeout). Return to the code form with a clear message; a fresh join restarts
-        // the challenge (the host may have changed the PIN).
+        // timeout). Forget any remembered PIN for this code (it just failed) and return
+        // to the code form; a fresh join restarts the challenge (the host may have
+        // changed the PIN).
+        clearStoredPin(currentCode);
+        pendingPin = null;
         setStatus(t("connect.pin.failed"), "bad");
         hidePinGate();
         showJoinError(t("connect.pin.failed"));
@@ -1153,6 +1228,11 @@ function abortConnect() {
 
 function startSession(mons) {
   monitors = mons.map((m) => ({ i: m.i, w: m.w, h: m.h }));
+  // A PIN we just submitted was accepted (the session is starting): remember it for this
+  // code if the user opted in, so a later connect auto-submits it. No-op when there was
+  // no PIN gate (pendingPin null) or the user left "remember" unchecked.
+  if (rememberOnSuccess && pendingPin && currentCode) setStoredPin(currentCode, pendingPin);
+  pendingPin = null;
   inSession = true;
   blockRects = []; // fresh session: clear any stale agent-window regions
   clipLast = null; // fresh session: no clipboard reconciled yet (caps arrives right after)

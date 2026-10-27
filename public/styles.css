@@ -483,6 +483,18 @@ body.app {
 /* On the PIN card the Connect button is centered and sits a little lower, below the
    full-width PIN field (the join card keeps its full-width button). */
 #pinForm .btn { align-self: center; margin-top: 12px; }
+/* "Remember on this device" sits under the PIN field: a quiet, centered opt-in row. */
+.pin-remember {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  color: var(--muted);
+  font-size: 14px;
+  cursor: pointer;
+  user-select: none;
+}
+.pin-remember input { accent-color: var(--brand); width: 16px; height: 16px; cursor: pointer; }
 .code-input {
   font-family: ui-monospace, SFMono-Regular, "Cascadia Code", Consolas, monospace;
   font-size: 26px;

@@ -5,6 +5,13 @@ const SESSION_TTL_MS = 15 * 60 * 1000; // reservation / idle lifetime
 // long so the agent can reconnect with the SAME code before the session is torn
 // down. Must comfortably exceed the client's 5s interrupt + reconnect attempts.
 const AGENT_GRACE_MS = 60 * 1000;
+// How long a STABLE (claimed) code's OWNERSHIP binding outlives its last use. The live
+// session expires on idle like any other, but the {claimSecret, ownerExpiry} binding is
+// kept this long after the owner was last seen (refreshed on every claim), so a code the
+// owner merely stepped away from cannot be adopted by someone who only knows the code. A
+// code untouched for this long is treated as abandoned and fully released. Random
+// (reserve()) codes never get a binding and are unaffected.
+const OWNER_TTL_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
 // Each side app-pings ~once a second. If a side goes silent for this long its link
 // has gone quiet. The two directions are handled ASYMMETRICALLY:
 //   - A silent AGENT (native app, pings reliably) is a genuine half-open drop: the
@@ -47,6 +54,33 @@ export class SessionDO extends DurableObject {
     const reserved = await this.ctx.storage.get<boolean>("reserved");
     if (reserved) return false;
     await this.ctx.storage.put("reserved", true);
+    await this.ctx.storage.setAlarm(Date.now() + SESSION_TTL_MS);
+    return true;
+  }
+
+  /** Claim a SPECIFIC code for a stable (auto-accept) session, protected by a
+   *  caller-held secret so the owning agent can reclaim the SAME code on a later
+   *  launch — which `reserve()` (random code) can't do. Returns true if the caller
+   *  now holds the reservation.
+   *
+   *  A code bound to a DIFFERENT secret is refused (false), so once an agent has
+   *  claimed its code nobody else can take it. Crucially, that ownership is DURABLE:
+   *  the live session (`reserved`, sockets) still expires on idle, but `claimSecret`
+   *  (and an `ownerExpiry` horizon, refreshed on every claim) survive session
+   *  teardown — see endSession/alarm. So while the owner is merely offline, an
+   *  attacker who knows only the CODE still cannot adopt it (their mismatched secret
+   *  hits the refusal above); the binding is only forgotten after OWNER_TTL_MS with
+   *  no reclaim, at which point a genuinely abandoned code becomes claimable again.
+   *  A code that was never claimed (no secret) is adopted on first claim. */
+  async claim(secret: string): Promise<boolean> {
+    if (!secret) return false;
+    const bound = await this.ctx.storage.get<string>("claimSecret");
+    if (bound !== undefined && bound !== secret) return false;
+    await this.ctx.storage.put("reserved", true);
+    await this.ctx.storage.put("claimSecret", secret);
+    // Refresh the ownership horizon: an actively-relaunched code never lapses, while
+    // one unused for OWNER_TTL_MS is eventually released (see alarm()).
+    await this.ctx.storage.put("ownerExpiry", Date.now() + OWNER_TTL_MS);
     await this.ctx.storage.setAlarm(Date.now() + SESSION_TTL_MS);
     return true;
   }
@@ -609,19 +643,42 @@ export class SessionDO extends DurableObject {
   }
 
   async alarm() {
-    // If no agent is connected when the timer fires, the session is dead.
-    if (this.ctx.getWebSockets("agent").length === 0) {
-      for (const s of this.ctx.getWebSockets()) {
-        try {
-          s.close(1001, "session expired");
-        } catch {
-          /* ignore */
-        }
-      }
-      await this.teardown();
-    } else {
+    // Agent still connected: just a periodic keep-alive, re-arm and carry on.
+    if (this.ctx.getWebSockets("agent").length > 0) {
       await this.ctx.storage.setAlarm(Date.now() + SESSION_TTL_MS);
+      return;
     }
+    // No agent: the live session is dead. Close any lingering sockets.
+    for (const s of this.ctx.getWebSockets()) {
+      try {
+        s.close(1001, "session expired");
+      } catch {
+        /* ignore */
+      }
+    }
+    // A STABLE code keeps its ownership binding (claimSecret) until OWNER_TTL_MS after
+    // the owner was last seen, so a merely-offline owner can't be squatted by someone who
+    // only knows the code. End the live session but KEEP the binding, and wake again at
+    // the ownership horizon to release it if the owner never comes back. A random
+    // (reserve()) code has no ownerExpiry and is torn down fully, exactly as before.
+    const ownerExpiry = await this.ctx.storage.get<number>("ownerExpiry");
+    if (ownerExpiry !== undefined && Date.now() < ownerExpiry) {
+      await this.endSession();
+      await this.ctx.storage.setAlarm(ownerExpiry);
+    } else {
+      await this.teardown();
+    }
+  }
+
+  /** End the live session but PRESERVE the durable ownership binding (claimSecret +
+   *  ownerExpiry), so the owning agent can reclaim its stable code later while nobody
+   *  else can adopt it. Clears only the session-scoped state. */
+  private async endSession() {
+    await this.ctx.storage.delete([
+      "reserved",
+      "viewerLeftInGrace",
+      "viewerWarned",
+    ]);
   }
 
   private async teardown() {
