@@ -1510,10 +1510,10 @@ function attachInput(canvas, mon) {
     }
     const p = canvasXY(canvas, e);
     // Over the agent's own window the agent ignores clicks, so hint with a
-    // "not-allowed" cursor (updated every move; "" reverts to the CSS crosshair).
+    // "not-allowed" cursor (updated every move; "" reverts to the CSS arrow cursor).
     canvas.style.cursor = inBlockRect(mon.i, p.x, p.y) ? "not-allowed" : "";
     const now = performance.now();
-    if (now - lastMove < 25) return; // ~40 moves/sec max
+    if (now - lastMove < 15) return; // ~66 moves/sec max (snappier remote cursor)
     lastMove = now;
     send({ t: "mm", m: mon.i, x: p.x, y: p.y });
   };
@@ -1529,7 +1529,12 @@ function attachInput(canvas, mon) {
     e.preventDefault();
     if (!kbToggle.checked) return; // input off: view-only
     const p = canvasXY(canvas, e);
-    send({ t: "scroll", m: mon.i, x: p.x, y: p.y, dx: e.deltaX, dy: e.deltaY });
+    // Normalize the delta to a pixel-ish unit regardless of deltaMode (0=pixel,
+    // 1=line, 2=page) so the agent applies a consistent amount across browsers and
+    // devices; the agent sums these deltas into whole scroll steps (not one click
+    // per event), which is what keeps scrolling from being hypersensitive.
+    const unit = e.deltaMode === 1 ? 33 : e.deltaMode === 2 ? 800 : 1;
+    send({ t: "scroll", m: mon.i, x: p.x, y: p.y, dx: e.deltaX * unit, dy: e.deltaY * unit });
   };
   const onCtx = (e) => {
     e.preventDefault(); // let right-click flow through as md/mu instead

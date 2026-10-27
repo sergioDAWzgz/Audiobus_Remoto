@@ -86,6 +86,14 @@ HB_WARN_SECS = 2.0          # reconnect starts at once; show the Wait/Cut dialog
 HB_MAX_RECONNECT_SECS = 65.0  # > the DO's 60s grace: give up reconnecting after this
 INTERRUPT_REASK_MS = 10000  # re-ask the Wait/Cut dialog this long after "Wait"
 
+# Mouse-wheel sensitivity. Browsers fire many small wheel deltas per gesture (smooth
+# scroll / trackpad); the viewer normalizes each to a pixel-ish unit and the agent sums
+# them, emitting one scroll "click" per this many normalized pixels. Chrome sends ~100
+# px per physical notch, so 100 keeps one notch ~= one click (responsive) while the many
+# fractional smooth-scroll/trackpad events COLLAPSE into that one click instead of each
+# flooring to a full click — which is what made scrolling hypersensitive. Larger = less.
+WHEEL_PX_PER_STEP = 100.0
+
 # Clipboard sync + file transfer tuning.
 CLIP_POLL_MS = 500             # how often the GUI thread polls the OS clipboard for changes
 CLIP_MAX_BYTES = 256 * 1024    # cap on synced clipboard text (UTF-8); larger is skipped
@@ -391,11 +399,21 @@ def resolve_key(ev):
     return None
 
 
-def _wheel_steps(delta):
-    if not delta:
-        return 0
-    steps = int(round(delta / 100.0))
-    return steps if steps else (1 if delta > 0 else -1)
+def _accumulate_wheel(dx, dy, accum):
+    """Convert normalized wheel pixel deltas into integer scroll steps, carrying the
+    fractional remainder in `accum` (a mutable {"x","y"} dict kept per session) so many
+    small events — smooth scrolling, a trackpad — SUM into whole steps instead of each
+    flooring to a full click. Flooring every event made scrolling hypersensitive; this
+    keeps one physical notch to roughly one step while staying smooth for fine scrolls."""
+    if accum is None:
+        accum = {"x": 0.0, "y": 0.0}
+    accum["x"] += (dx or 0) / WHEEL_PX_PER_STEP
+    accum["y"] += (dy or 0) / WHEEL_PX_PER_STEP
+    sx = int(accum["x"])  # truncates toward zero, so the remainder carries its sign
+    sy = int(accum["y"])
+    accum["x"] -= sx
+    accum["y"] -= sy
+    return sx, sy
 
 
 def _in_rects(x, y, rects):
@@ -515,7 +533,7 @@ def _click_on_agent(x, y, rects):
 
 
 def apply_event(ev, monitors=None, window_rects=None, blocked=None,
-                pressed=None, agent_foreground=False):
+                pressed=None, agent_foreground=False, wheel_accum=None):
     """Apply one remote input event, while protecting the agent's OWN windows so a
     remote user can't close it or drive its controls:
 
@@ -576,8 +594,7 @@ def apply_event(ev, monitors=None, window_rects=None, blocked=None,
             if _click_on_agent(ax, ay, window_rects):
                 return  # don't scroll an agent window that is actually on top here
             mouse.position = (ax, ay)
-            sx = _wheel_steps(ev.get("dx", 0))
-            sy = _wheel_steps(ev.get("dy", 0))
+            sx, sy = _accumulate_wheel(ev.get("dx", 0), ev.get("dy", 0), wheel_accum)
             if sx or sy:
                 mouse.scroll(sx, -sy)
         elif t == "kd":
@@ -829,6 +846,9 @@ class NetClient:
         self._viewer_gen = 0
         self._blocked_btns = set()  # buttons whose press was suppressed over our window
         self._pressed_btns = set()  # buttons we actually injected a press for (to release)
+        # Mouse-wheel accumulation: sum many small per-event deltas into whole scroll
+        # steps (see _accumulate_wheel) instead of flooring each event to a full click.
+        self._wheel_accum = {"x": 0.0, "y": 0.0}
         self._last_blockrects = None  # last blockrects JSON sent to the viewer (dedup)
         # True between "we ended the session locally" and the resulting peer-left,
         # so the status reads "you closed the connection" rather than blaming the
@@ -1414,6 +1434,7 @@ class NetClient:
                 getattr(self.app, "_window_rects", None),
                 self._blocked_btns, self._pressed_btns,
                 getattr(self.app, "_agent_foreground", False),
+                self._wheel_accum,
             )
             return
         mtype = msg.get("type")
@@ -1649,6 +1670,7 @@ class NetClient:
         except Exception:
             return
         self.streaming = True
+        self._wheel_accum["x"] = self._wheel_accum["y"] = 0.0  # no carried scroll fraction
         # Advertise optional capabilities so a newer viewer enables its clipboard/file UI
         # only against an agent that supports them (older agents just ignore these types).
         try:
