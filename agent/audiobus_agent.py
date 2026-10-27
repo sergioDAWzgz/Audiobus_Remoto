@@ -472,7 +472,7 @@ _NET_DPI_LOGGED = False   # one-time net-thread DPI-awareness diagnostic
 _GUI_DPI_LOGGED = False   # one-time GUI-thread DPI-awareness + raw-rect diagnostic
 
 
-_AGENT_BUILD = "2026-10-26-dpidiag"  # bumped per diagnostic build; appears in the click log
+_AGENT_BUILD = "2026-10-27-pxdiag"  # bumped per diagnostic build; appears in the click log
 
 
 def _click_log(msg):
@@ -497,6 +497,26 @@ def _dpi_awareness_name():
                 3: "PER_MONITOR_V2", 4: "UNAWARE_GDISCALED"}.get(val, f"val={val}")
     except Exception as e:
         return f"?({e!r})"
+
+
+def _screen_pixel(x, y):
+    """(r,g,b) of the COMPOSITED desktop at physical (x,y) — i.e. what is VISIBLY on screen
+    (and in the capture/stream) there. Lets a blocked-click log say whether the agent window
+    is actually visible at that point, or the app behind it shows through (which would mean
+    the window is in the hit-test but not the capture)."""
+    try:
+        u = ctypes.windll.user32
+        g = ctypes.windll.gdi32
+        g.GetPixel.restype = ctypes.c_uint32
+        g.GetPixel.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_int]
+        hdc = u.GetDC(0)
+        c = g.GetPixel(ctypes.c_void_p(hdc), int(x), int(y))
+        u.ReleaseDC(0, hdc)
+        if c == 0xFFFFFFFF:  # CLR_INVALID
+            return None
+        return (c & 0xFF, (c >> 8) & 0xFF, (c >> 16) & 0xFF)
+    except Exception:
+        return None
 
 
 def _win_diag(hwnd):
@@ -560,7 +580,8 @@ def _click_on_agent(x, y, rects):
         if _CLICK_DEBUG:
             _click_log(f"({x},{y}) in rect; WindowFromPoint hwnd={hwnd} pid={pid} "
                        f"title={_window_title(hwnd)!r} our_pid={os.getpid()} "
-                       f"[{_win_diag(hwnd)}] -> {'BLOCK' if on_agent else 'allow'}")
+                       f"screen_px={_screen_pixel(x, y)} [{_win_diag(hwnd)}] -> "
+                       f"{'BLOCK' if on_agent else 'allow'}")
         return on_agent
     except Exception as e:
         if _CLICK_DEBUG:
