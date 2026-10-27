@@ -473,7 +473,7 @@ _GUI_DPI_LOGGED = False   # one-time GUI-thread DPI-awareness + raw-rect diagnos
 _SHOT_SAVED = False       # one-time: save an mss screenshot on the first blocked click
 
 
-_AGENT_BUILD = "2026-10-27-sampfix"  # bumped per diagnostic build; appears in the click log
+_AGENT_BUILD = "2026-10-27-nohover"  # bumped per diagnostic build; appears in the click log
 
 
 def _save_debug_shot(x, y):
@@ -646,7 +646,13 @@ def apply_event(ev, monitors=None, window_rects=None, blocked=None,
         off_y = mon["top"]
     try:
         if t == "mm":
-            mouse.position = (off_x + ev["x"], off_y + ev["y"])
+            ax, ay = off_x + ev["x"], off_y + ev["y"]
+            # Don't glide the real cursor ONTO an agent window: it would hover/highlight our
+            # own title-bar buttons (minimize/maximize/close) — a "phantom click" the viewer
+            # sees even though the actual click is refused. The viewer already draws a blocked
+            # cursor over us, so freezing the OS cursor at our edge keeps the two consistent.
+            if not _click_on_agent(ax, ay, window_rects):
+                mouse.position = (ax, ay)
         elif t == "md":
             ax, ay = off_x + ev["x"], off_y + ev["y"]
             b = ev.get("b", 0)
