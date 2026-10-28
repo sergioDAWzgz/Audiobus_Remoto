@@ -3029,6 +3029,10 @@ class App:
             box["ok"] = ok
             ev.set()
 
+        # Someone is asking to connect: make sure the owner actually sees the prompt even
+        # if the window was minimised to the taskbar or hidden in the tray. Restoring the
+        # main window also gives the dialog a valid on-screen position to centre over.
+        self._restore_window()
         self.set_status(tr("agent.status.asking"), WARN)
         self._approval_dialog = ActionDialog(
             self.root, tr("agent.approval.prompt"),
@@ -3544,6 +3548,11 @@ class App:
                 Item(tr("agent.pin.rotate"), self._tray_rotate,
                      visible=lambda i: bool(self.auto_accept)),
                 Menu.SEPARATOR,
+                # Session actions — shown only while a viewer is connected.
+                Item(tr("agent.btn.sendFile"), self._tray_send_file,
+                     visible=lambda i: bool(self._connected)),
+                Item(tr("ui.interrupt.cut"), self._tray_disconnect,
+                     visible=lambda i: bool(self._connected)),
                 Item(tr("agent.tray.show"), self._tray_show, default=True),
                 Item(tr("agent.tray.exit"), self._tray_exit),
             )
@@ -3609,6 +3618,19 @@ class App:
         # Rotating from the tray brings the window back and shows the usual confirm.
         self._restore_window()
         self._rotate_pin_click()
+
+    def _tray_send_file(self, icon, item):
+        self.post(self._tray_do_send_file)
+
+    def _tray_disconnect(self, icon, item):
+        # End the current session straight away (a deliberate menu choice); the program
+        # keeps running, ready for the next viewer. The window stays wherever it is.
+        self.post(self._do_end_session)
+
+    def _tray_do_send_file(self):
+        # Bring the window back so the file picker has a visible parent, then pick + send.
+        self._restore_window()
+        self.send_file_click()
 
     def _restore_window(self):
         try:
