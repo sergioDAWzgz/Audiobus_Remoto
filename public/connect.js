@@ -45,8 +45,9 @@ const pinDesc = $("pinDesc");
 const pinRemember = $("pinRemember"); // "Remember on this device" checkbox on the PIN gate
 const forgetPinsBtn = $("forgetPins"); // "Forget saved PINs" link on the join card
 const rememberCode = $("rememberCode"); // "Remember this code" checkbox on the join card
-const savedSessions = $("savedSessions"); // container for the saved-codes list
-const savedList = $("savedList"); // where the saved-code chips are rendered
+const savedSessions = $("savedSessions"); // container for the saved-codes dropdown
+const savedToggle = $("savedToggle"); // the dropdown toggle button
+const savedMenu = $("savedMenu"); // the dropdown panel where the saved-code rows render
 
 // Translation helper (i18n.js loads first; falls back to the key if missing).
 const t = (k) => (window.I18N ? window.I18N.t(k) : k);
@@ -164,13 +165,21 @@ function removeSavedCode(code) {
   }
   clearStoredPin(code); // removing a saved session forgets its PIN too
 }
-// Render the saved-code chips. Clicking one fills the field and connects (auto-submitting
-// a remembered PIN, if any); the × removes it. Shown only when there is at least one.
+function setSavedMenuOpen(open) {
+  if (!savedMenu || !savedToggle) return;
+  savedMenu.hidden = !open;
+  savedToggle.setAttribute("aria-expanded", open ? "true" : "false");
+  savedToggle.classList.toggle("open", open);
+}
+// (Re)build the dropdown's rows. Clicking a code fills the field and connects (auto-
+// submitting a remembered PIN, if any); its × removes that saved session. The whole
+// dropdown is shown only when there is at least one saved code.
 function renderSavedSessions() {
-  if (!savedList || !savedSessions) return;
+  if (!savedMenu || !savedSessions) return;
   const codes = savedCodes();
   savedSessions.hidden = codes.length === 0;
-  savedList.textContent = "";
+  if (codes.length === 0) setSavedMenuOpen(false);
+  savedMenu.textContent = "";
   for (const code of codes) {
     const row = document.createElement("div");
     row.className = "saved-item";
@@ -182,7 +191,9 @@ function renderSavedSessions() {
       pick.classList.add("has-pin"); // visual hint: this one auto-connects
       pick.title = t("connect.savedAutoHint");
     }
-    pick.addEventListener("click", () => {
+    pick.addEventListener("click", (e) => {
+      e.stopPropagation(); // don't let it reach the outside-click close handler
+      setSavedMenuOpen(false);
       $("codeInput").value = code;
       $("joinError").hidden = true;
       connect(code);
@@ -193,15 +204,31 @@ function renderSavedSessions() {
     del.textContent = "×"; // ×
     del.setAttribute("aria-label", t("connect.removeSaved"));
     del.title = t("connect.removeSaved");
-    del.addEventListener("click", () => {
+    del.addEventListener("click", (e) => {
+      // Stop propagation BEFORE the re-render detaches this button — otherwise the click
+      // bubbles to document, where the (now-removed) target is "outside" and closes the menu.
+      e.stopPropagation();
       removeSavedCode(code);
-      renderSavedSessions();
+      renderSavedSessions(); // leaves the dropdown open, showing the rest
       updateForgetPinsLink(); // its PIN was cleared too
     });
     row.append(pick, del);
-    savedList.append(row);
+    savedMenu.append(row);
   }
 }
+if (savedToggle) {
+  savedToggle.addEventListener("click", (e) => {
+    e.stopPropagation();
+    setSavedMenuOpen(savedMenu.hidden);
+  });
+}
+// Close the dropdown on an outside click or Escape.
+document.addEventListener("click", (e) => {
+  if (savedSessions && !savedSessions.contains(e.target)) setSavedMenuOpen(false);
+});
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape") setSavedMenuOpen(false);
+});
 renderSavedSessions(); // reflect saved codes on initial load
 
 let viewMode = "grid"; // "grid" | "single"
