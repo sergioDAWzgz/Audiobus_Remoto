@@ -162,6 +162,10 @@
           <button class="btn big" type="submit" data-i18n="connect.btn.connect">Connect</button>
         </form>
         <p id="joinError" class="error" hidden></p>
+        <!-- Shown only when this device has remembered one or more auto-accept PINs. -->
+        <button id="forgetPins" class="linkbtn" type="button" data-i18n="connect.forgetPins" hidden>
+          Forget saved PINs
+        </button>
       </div>
       <!-- Shown in place of the code card when the host auto-accepts behind a PIN. -->
       <div id="pinCard" class="card" hidden>

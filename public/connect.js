@@ -43,6 +43,7 @@ const pinInput = $("pinInput");
 const pinError = $("pinError");
 const pinDesc = $("pinDesc");
 const pinRemember = $("pinRemember"); // "Remember on this device" checkbox on the PIN gate
+const forgetPinsBtn = $("forgetPins"); // "Forget saved PINs" link on the join card
 
 // Translation helper (i18n.js loads first; falls back to the key if missing).
 const t = (k) => (window.I18N ? window.I18N.t(k) : k);
@@ -88,6 +89,43 @@ function clearStoredPin(code) {
     /* ignore */
   }
 }
+function storedPinKeys() {
+  const keys = [];
+  try {
+    for (let i = 0; i < localStorage.length; i++) {
+      const k = localStorage.key(i);
+      if (k && k.startsWith(PIN_STORE_PREFIX)) keys.push(k);
+    }
+  } catch {
+    /* ignore */
+  }
+  return keys;
+}
+// Show the "Forget saved PINs" link only when this device has remembered at least one
+// PIN. Called whenever the join card becomes visible and after a clear.
+function updateForgetPinsLink() {
+  if (!forgetPinsBtn) return;
+  forgetPinsBtn.hidden = storedPinKeys().length === 0;
+  forgetPinsBtn.disabled = false;
+  forgetPinsBtn.classList.remove("done");
+  forgetPinsBtn.textContent = t("connect.forgetPins");
+}
+if (forgetPinsBtn) {
+  forgetPinsBtn.addEventListener("click", () => {
+    storedPinKeys().forEach((k) => {
+      try {
+        localStorage.removeItem(k);
+      } catch {
+        /* ignore */
+      }
+    });
+    // Confirm in place: a non-interactive "cleared" note that clears on the next visit.
+    forgetPinsBtn.textContent = t("connect.forgetPins.done");
+    forgetPinsBtn.disabled = true;
+    forgetPinsBtn.classList.add("done");
+  });
+}
+updateForgetPinsLink(); // reflect saved PINs on initial load (the join card is the default view)
 let viewMode = "grid"; // "grid" | "single"
 let selectedIndex = 0; // monitor index shown in single mode
 let activeDown = null; // { canvas, mon } held between mousedown and mouseup
@@ -684,6 +722,7 @@ function hidePinGate() {
   pinActive = false;
   pinCard.hidden = true;
   joinCard.hidden = false;
+  updateForgetPinsLink(); // the join card is visible again — reflect any saved PINs
 }
 
 function showPinError(msg) {
@@ -891,12 +930,14 @@ async function onMessage(ev) {
         }
         setStatus(t("connect.pin.title"), "warn");
       } else if (autoPinSent && !inSession) {
-        // A remembered PIN was wrong (the host changed it): forget it and fall back to
-        // the manual gate so the user can enter the new one.
+        // A remembered PIN was wrong (the host rotated/changed it): forget it and fall
+        // back to the manual gate. Show a NEUTRAL note in the description — the user didn't
+        // mistype, their saved PIN is simply stale — instead of the red "wrong PIN — N
+        // attempts left" error, which wrongly reads as a user mistake.
         clearStoredPin(currentCode);
         pendingPin = null;
         showPinGate(pinLen);
-        showPinError(t("connect.pin.bad").replace("{left}", Number.isInteger(msg.left) ? msg.left : 0));
+        pinDesc.textContent = t("connect.pin.stale");
       }
       break;
     case "denied":
