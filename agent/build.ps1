@@ -64,6 +64,7 @@ Invoke-OrThrow { & $py -m PyInstaller `
     --name audiobus-agent `
     --windowed `
     --icon logo.ico `
+    --version-file version_info.txt `
     --collect-all pystray `
     audiobus_agent.py }
 

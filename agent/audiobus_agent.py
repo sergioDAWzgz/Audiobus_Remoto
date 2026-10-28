@@ -3548,11 +3548,12 @@ class App:
                 Item(tr("agent.pin.rotate"), self._tray_rotate,
                      visible=lambda i: bool(self.auto_accept)),
                 Menu.SEPARATOR,
-                # Session actions — shown only while a viewer is connected.
+                # Session actions — always listed, enabled only while a viewer is connected
+                # (greyed out otherwise) so they're discoverable even when idle.
                 Item(tr("agent.btn.sendFile"), self._tray_send_file,
-                     visible=lambda i: bool(self._connected)),
+                     enabled=lambda i: bool(self._connected)),
                 Item(tr("ui.interrupt.cut"), self._tray_disconnect,
-                     visible=lambda i: bool(self._connected)),
+                     enabled=lambda i: bool(self._connected)),
                 Item(tr("agent.tray.show"), self._tray_show, default=True),
                 Item(tr("agent.tray.exit"), self._tray_exit),
             )
@@ -3636,6 +3637,9 @@ class App:
         try:
             self.root.deiconify()
             self.root.state("normal")
+            # Realise the restored geometry now, so anything that positions itself over the
+            # window (e.g. the approval dialog centring) sees a valid on-screen rect.
+            self.root.update_idletasks()
             self.root.lift()
             self.root.focus_force()
         except Exception:
