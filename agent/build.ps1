@@ -72,6 +72,7 @@ Invoke-OrThrow { & $py -m PyInstaller `
     --collect-all aiortc `
     --collect-all aioice `
     --collect-all pylibsrtp `
+    --collect-all pystray `
     audiobus_agent.py }
 
 $exe = Join-Path $PSScriptRoot "dist/audiobus-agent.exe"

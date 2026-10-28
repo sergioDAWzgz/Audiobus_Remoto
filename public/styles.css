@@ -79,6 +79,7 @@ a:hover { text-decoration: underline; }
 
 .muted { color: var(--muted); }
 .error { color: var(--bad); }
+#pinError { text-align: center; }
 .good { color: var(--good); }
 .bad { color: var(--bad); }
 

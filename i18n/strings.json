@@ -116,7 +116,10 @@
     "agent.btn.rotate": "Rotate PIN",
     "connect.pin.stale": "Your saved PIN is no longer valid. Enter the current PIN.",
     "connect.forgetPins": "Forget saved PINs",
-    "connect.forgetPins.done": "Saved PINs cleared"
+    "connect.forgetPins.done": "Saved PINs cleared",
+    "agent.btn.copyPin": "Copy PIN",
+    "agent.tray.show": "Show window",
+    "agent.tray.exit": "Exit"
   },
   "es": {
     "doc.title.home": "Audiobus Remote",
@@ -235,7 +238,10 @@
     "agent.btn.rotate": "Cambiar PIN",
     "connect.pin.stale": "Tu PIN guardado ya no es válido. Introduce el PIN actual.",
     "connect.forgetPins": "Olvidar PINs guardados",
-    "connect.forgetPins.done": "PINs guardados borrados"
+    "connect.forgetPins.done": "PINs guardados borrados",
+    "agent.btn.copyPin": "Copiar PIN",
+    "agent.tray.show": "Mostrar ventana",
+    "agent.tray.exit": "Salir"
   },
   "fr": {
     "doc.title.home": "Audiobus Remote",
@@ -344,7 +350,10 @@
     "agent.btn.rotate": "Nouveau PIN",
     "connect.pin.stale": "Votre PIN enregistré n'est plus valide. Saisissez le PIN actuel.",
     "connect.forgetPins": "Oublier les PIN enregistrés",
-    "connect.forgetPins.done": "PIN enregistrés supprimés"
+    "connect.forgetPins.done": "PIN enregistrés supprimés",
+    "agent.btn.copyPin": "Copier le PIN",
+    "agent.tray.show": "Afficher la fenêtre",
+    "agent.tray.exit": "Quitter"
   },
   "de": {
     "doc.title.home": "Audiobus Remote",
@@ -453,7 +462,10 @@
     "agent.btn.rotate": "Neue PIN",
     "connect.pin.stale": "Dein gespeicherter PIN ist nicht mehr gültig. Gib den aktuellen PIN ein.",
     "connect.forgetPins": "Gespeicherte PINs vergessen",
-    "connect.forgetPins.done": "Gespeicherte PINs gelöscht"
+    "connect.forgetPins.done": "Gespeicherte PINs gelöscht",
+    "agent.btn.copyPin": "PIN kopieren",
+    "agent.tray.show": "Fenster anzeigen",
+    "agent.tray.exit": "Beenden"
   },
   "it": {
     "doc.title.home": "Audiobus Remote",
@@ -562,7 +574,10 @@
     "agent.btn.rotate": "Nuovo PIN",
     "connect.pin.stale": "Il PIN salvato non è più valido. Inserisci il PIN attuale.",
     "connect.forgetPins": "Dimentica i PIN salvati",
-    "connect.forgetPins.done": "PIN salvati eliminati"
+    "connect.forgetPins.done": "PIN salvati eliminati",
+    "agent.btn.copyPin": "Copia PIN",
+    "agent.tray.show": "Mostra finestra",
+    "agent.tray.exit": "Esci"
   },
   "pt": {
     "doc.title.home": "Audiobus Remote",
@@ -671,7 +686,10 @@
     "agent.btn.rotate": "Novo PIN",
     "connect.pin.stale": "O PIN guardado já não é válido. Introduza o PIN atual.",
     "connect.forgetPins": "Esquecer PINs guardados",
-    "connect.forgetPins.done": "PINs guardados eliminados"
+    "connect.forgetPins.done": "PINs guardados eliminados",
+    "agent.btn.copyPin": "Copiar PIN",
+    "agent.tray.show": "Mostrar janela",
+    "agent.tray.exit": "Sair"
   },
   "pt-br": {
     "doc.title.home": "Audiobus Remote",
@@ -780,7 +798,10 @@
     "agent.btn.rotate": "Novo PIN",
     "connect.pin.stale": "O PIN salvo não é mais válido. Digite o PIN atual.",
     "connect.forgetPins": "Esquecer PINs salvos",
-    "connect.forgetPins.done": "PINs salvos apagados"
+    "connect.forgetPins.done": "PINs salvos apagados",
+    "agent.btn.copyPin": "Copiar PIN",
+    "agent.tray.show": "Mostrar janela",
+    "agent.tray.exit": "Sair"
   },
   "nl": {
     "doc.title.home": "Audiobus Remote",
@@ -889,7 +910,10 @@
     "agent.btn.rotate": "Nieuwe pin",
     "connect.pin.stale": "Je opgeslagen pin is niet meer geldig. Voer de huidige pin in.",
     "connect.forgetPins": "Opgeslagen pincodes vergeten",
-    "connect.forgetPins.done": "Opgeslagen pincodes gewist"
+    "connect.forgetPins.done": "Opgeslagen pincodes gewist",
+    "agent.btn.copyPin": "Pin kopiëren",
+    "agent.tray.show": "Venster tonen",
+    "agent.tray.exit": "Afsluiten"
   },
   "ru": {
     "doc.title.home": "Audiobus Remote",
@@ -998,7 +1022,10 @@
     "agent.btn.rotate": "Новый PIN",
     "connect.pin.stale": "Сохранённый PIN больше недействителен. Введите текущий PIN.",
     "connect.forgetPins": "Забыть сохранённые PIN",
-    "connect.forgetPins.done": "Сохранённые PIN удалены"
+    "connect.forgetPins.done": "Сохранённые PIN удалены",
+    "agent.btn.copyPin": "Копировать PIN",
+    "agent.tray.show": "Показать окно",
+    "agent.tray.exit": "Выход"
   },
   "uk": {
     "doc.title.home": "Audiobus Remote",
@@ -1107,7 +1134,10 @@
     "agent.btn.rotate": "Новий PIN",
     "connect.pin.stale": "Збережений PIN більше недійсний. Введіть поточний PIN.",
     "connect.forgetPins": "Забути збережені PIN",
-    "connect.forgetPins.done": "Збережені PIN видалено"
+    "connect.forgetPins.done": "Збережені PIN видалено",
+    "agent.btn.copyPin": "Копіювати PIN",
+    "agent.tray.show": "Показати вікно",
+    "agent.tray.exit": "Вихід"
   },
   "pl": {
     "doc.title.home": "Audiobus Remote",
@@ -1216,7 +1246,10 @@
     "agent.btn.rotate": "Nowy PIN",
     "connect.pin.stale": "Zapisany PIN jest już nieważny. Wprowadź aktualny PIN.",
     "connect.forgetPins": "Zapomnij zapisane PIN-y",
-    "connect.forgetPins.done": "Usunięto zapisane PIN-y"
+    "connect.forgetPins.done": "Usunięto zapisane PIN-y",
+    "agent.btn.copyPin": "Kopiuj PIN",
+    "agent.tray.show": "Pokaż okno",
+    "agent.tray.exit": "Zakończ"
   },
   "cs": {
     "doc.title.home": "Audiobus Remote",
@@ -1325,7 +1358,10 @@
     "agent.btn.rotate": "Nový PIN",
     "connect.pin.stale": "Uložený PIN již není platný. Zadejte aktuální PIN.",
     "connect.forgetPins": "Zapomenout uložené PINy",
-    "connect.forgetPins.done": "Uložené PINy smazány"
+    "connect.forgetPins.done": "Uložené PINy smazány",
+    "agent.btn.copyPin": "Kopírovat PIN",
+    "agent.tray.show": "Zobrazit okno",
+    "agent.tray.exit": "Ukončit"
   },
   "sv": {
     "doc.title.home": "Audiobus Remote",
@@ -1434,7 +1470,10 @@
     "agent.btn.rotate": "Ny PIN",
     "connect.pin.stale": "Din sparade PIN-kod är inte längre giltig. Ange den aktuella PIN-koden.",
     "connect.forgetPins": "Glöm sparade PIN-koder",
-    "connect.forgetPins.done": "Sparade PIN-koder rensade"
+    "connect.forgetPins.done": "Sparade PIN-koder rensade",
+    "agent.btn.copyPin": "Kopiera PIN",
+    "agent.tray.show": "Visa fönster",
+    "agent.tray.exit": "Avsluta"
   },
   "da": {
     "doc.title.home": "Audiobus Remote",
@@ -1543,7 +1582,10 @@
     "agent.btn.rotate": "Ny PIN",
     "connect.pin.stale": "Din gemte PIN er ikke længere gyldig. Indtast den aktuelle PIN.",
     "connect.forgetPins": "Glem gemte PIN-koder",
-    "connect.forgetPins.done": "Gemte PIN-koder ryddet"
+    "connect.forgetPins.done": "Gemte PIN-koder ryddet",
+    "agent.btn.copyPin": "Kopiér PIN",
+    "agent.tray.show": "Vis vindue",
+    "agent.tray.exit": "Afslut"
   },
   "fi": {
     "doc.title.home": "Audiobus Remote",
@@ -1652,7 +1694,10 @@
     "agent.btn.rotate": "Uusi PIN",
     "connect.pin.stale": "Tallennettu PIN ei ole enää voimassa. Syötä nykyinen PIN.",
     "connect.forgetPins": "Unohda tallennetut PIN-koodit",
-    "connect.forgetPins.done": "Tallennetut PIN-koodit poistettu"
+    "connect.forgetPins.done": "Tallennetut PIN-koodit poistettu",
+    "agent.btn.copyPin": "Kopioi PIN",
+    "agent.tray.show": "Näytä ikkuna",
+    "agent.tray.exit": "Lopeta"
   },
   "no": {
     "doc.title.home": "Audiobus Remote",
@@ -1761,7 +1806,10 @@
     "agent.btn.rotate": "Ny PIN",
     "connect.pin.stale": "Den lagrede PIN-koden er ikke lenger gyldig. Skriv inn den gjeldende PIN-koden.",
     "connect.forgetPins": "Glem lagrede PIN-koder",
-    "connect.forgetPins.done": "Lagrede PIN-koder fjernet"
+    "connect.forgetPins.done": "Lagrede PIN-koder fjernet",
+    "agent.btn.copyPin": "Kopier PIN",
+    "agent.tray.show": "Vis vindu",
+    "agent.tray.exit": "Avslutt"
   },
   "tr": {
     "doc.title.home": "Audiobus Remote",
@@ -1870,7 +1918,10 @@
     "agent.btn.rotate": "Yeni PIN",
     "connect.pin.stale": "Kaydedilen PIN artık geçerli değil. Geçerli PIN'i girin.",
     "connect.forgetPins": "Kayıtlı PIN'leri unut",
-    "connect.forgetPins.done": "Kayıtlı PIN'ler temizlendi"
+    "connect.forgetPins.done": "Kayıtlı PIN'ler temizlendi",
+    "agent.btn.copyPin": "PIN'i kopyala",
+    "agent.tray.show": "Pencereyi göster",
+    "agent.tray.exit": "Çıkış"
   },
   "el": {
     "doc.title.home": "Audiobus Remote",
@@ -1979,7 +2030,10 @@
     "agent.btn.rotate": "Νέο PIN",
     "connect.pin.stale": "Το αποθηκευμένο PIN δεν ισχύει πλέον. Εισαγάγετε το τρέχον PIN.",
     "connect.forgetPins": "Διαγραφή αποθηκευμένων PIN",
-    "connect.forgetPins.done": "Τα αποθηκευμένα PIN διαγράφηκαν"
+    "connect.forgetPins.done": "Τα αποθηκευμένα PIN διαγράφηκαν",
+    "agent.btn.copyPin": "Αντιγραφή PIN",
+    "agent.tray.show": "Εμφάνιση παραθύρου",
+    "agent.tray.exit": "Έξοδος"
   },
   "ro": {
     "doc.title.home": "Audiobus Remote",
@@ -2088,7 +2142,10 @@
     "agent.btn.rotate": "PIN nou",
     "connect.pin.stale": "PIN-ul salvat nu mai este valabil. Introdu PIN-ul actual.",
     "connect.forgetPins": "Uită PIN-urile salvate",
-    "connect.forgetPins.done": "PIN-urile salvate au fost șterse"
+    "connect.forgetPins.done": "PIN-urile salvate au fost șterse",
+    "agent.btn.copyPin": "Copiază PIN-ul",
+    "agent.tray.show": "Arată fereastra",
+    "agent.tray.exit": "Ieșire"
   },
   "hu": {
     "doc.title.home": "Audiobus Remote",
@@ -2197,7 +2254,10 @@
     "agent.btn.rotate": "Új PIN",
     "connect.pin.stale": "A mentett PIN már nem érvényes. Add meg az aktuális PIN-t.",
     "connect.forgetPins": "Mentett PIN-ek elfelejtése",
-    "connect.forgetPins.done": "Mentett PIN-ek törölve"
+    "connect.forgetPins.done": "Mentett PIN-ek törölve",
+    "agent.btn.copyPin": "PIN másolása",
+    "agent.tray.show": "Ablak megjelenítése",
+    "agent.tray.exit": "Kilépés"
   },
   "id": {
     "doc.title.home": "Audiobus Remote",
@@ -2306,7 +2366,10 @@
     "agent.btn.rotate": "PIN baru",
     "connect.pin.stale": "PIN tersimpan tidak lagi berlaku. Masukkan PIN saat ini.",
     "connect.forgetPins": "Lupakan PIN tersimpan",
-    "connect.forgetPins.done": "PIN tersimpan dihapus"
+    "connect.forgetPins.done": "PIN tersimpan dihapus",
+    "agent.btn.copyPin": "Salin PIN",
+    "agent.tray.show": "Tampilkan jendela",
+    "agent.tray.exit": "Keluar"
   },
   "vi": {
     "doc.title.home": "Audiobus Remote",
@@ -2415,7 +2478,10 @@
     "agent.btn.rotate": "Đổi PIN",
     "connect.pin.stale": "PIN đã lưu không còn hợp lệ. Nhập PIN hiện tại.",
     "connect.forgetPins": "Quên PIN đã lưu",
-    "connect.forgetPins.done": "Đã xóa PIN đã lưu"
+    "connect.forgetPins.done": "Đã xóa PIN đã lưu",
+    "agent.btn.copyPin": "Sao chép PIN",
+    "agent.tray.show": "Hiện cửa sổ",
+    "agent.tray.exit": "Thoát"
   },
   "th": {
     "doc.title.home": "Audiobus Remote",
@@ -2524,7 +2590,10 @@
     "agent.btn.rotate": "เปลี่ยน PIN",
     "connect.pin.stale": "PIN ที่บันทึกไว้ใช้ไม่ได้แล้ว กรุณากรอก PIN ปัจจุบัน",
     "connect.forgetPins": "ลืม PIN ที่บันทึกไว้",
-    "connect.forgetPins.done": "ล้าง PIN ที่บันทึกไว้แล้ว"
+    "connect.forgetPins.done": "ล้าง PIN ที่บันทึกไว้แล้ว",
+    "agent.btn.copyPin": "คัดลอก PIN",
+    "agent.tray.show": "แสดงหน้าต่าง",
+    "agent.tray.exit": "ออก"
   },
   "zh": {
     "doc.title.home": "Audiobus Remote",
@@ -2633,7 +2702,10 @@
     "agent.btn.rotate": "更换 PIN",
     "connect.pin.stale": "保存的 PIN 已失效，请输入当前 PIN。",
     "connect.forgetPins": "清除已保存的 PIN",
-    "connect.forgetPins.done": "已清除保存的 PIN"
+    "connect.forgetPins.done": "已清除保存的 PIN",
+    "agent.btn.copyPin": "复制 PIN",
+    "agent.tray.show": "显示窗口",
+    "agent.tray.exit": "退出"
   },
   "zh-tw": {
     "doc.title.home": "Audiobus Remote",
@@ -2742,7 +2814,10 @@
     "agent.btn.rotate": "更換 PIN",
     "connect.pin.stale": "已儲存的 PIN 已失效，請輸入目前的 PIN。",
     "connect.forgetPins": "清除已儲存的 PIN",
-    "connect.forgetPins.done": "已清除儲存的 PIN"
+    "connect.forgetPins.done": "已清除儲存的 PIN",
+    "agent.btn.copyPin": "複製 PIN",
+    "agent.tray.show": "顯示視窗",
+    "agent.tray.exit": "結束"
   },
   "ja": {
     "doc.title.home": "Audiobus Remote",
@@ -2851,7 +2926,10 @@
     "agent.btn.rotate": "PINを変更",
     "connect.pin.stale": "保存されたPINは無効になりました。現在のPINを入力してください。",
     "connect.forgetPins": "保存したPINを削除",
-    "connect.forgetPins.done": "保存したPINを削除しました"
+    "connect.forgetPins.done": "保存したPINを削除しました",
+    "agent.btn.copyPin": "PINをコピー",
+    "agent.tray.show": "ウィンドウを表示",
+    "agent.tray.exit": "終了"
   },
   "ko": {
     "doc.title.home": "Audiobus Remote",
@@ -2960,7 +3038,10 @@
     "agent.btn.rotate": "PIN 변경",
     "connect.pin.stale": "저장된 PIN이 더 이상 유효하지 않습니다. 현재 PIN을 입력하세요.",
     "connect.forgetPins": "저장된 PIN 지우기",
-    "connect.forgetPins.done": "저장된 PIN을 지웠습니다"
+    "connect.forgetPins.done": "저장된 PIN을 지웠습니다",
+    "agent.btn.copyPin": "PIN 복사",
+    "agent.tray.show": "창 표시",
+    "agent.tray.exit": "종료"
   },
   "ar": {
     "doc.title.home": "Audiobus Remote",
@@ -3069,7 +3150,10 @@
     "agent.btn.rotate": "تغيير رمز PIN",
     "connect.pin.stale": "رمز PIN المحفوظ لم يعد صالحًا. أدخل رمز PIN الحالي.",
     "connect.forgetPins": "نسيان رموز PIN المحفوظة",
-    "connect.forgetPins.done": "تم مسح رموز PIN المحفوظة"
+    "connect.forgetPins.done": "تم مسح رموز PIN المحفوظة",
+    "agent.btn.copyPin": "نسخ رمز PIN",
+    "agent.tray.show": "إظهار النافذة",
+    "agent.tray.exit": "خروج"
   },
   "he": {
     "doc.title.home": "Audiobus Remote",
@@ -3178,7 +3262,10 @@
     "agent.btn.rotate": "PIN חדש",
     "connect.pin.stale": "ה-PIN השמור אינו תקף עוד. הזן את ה-PIN הנוכחי.",
     "connect.forgetPins": "שכח PINים שמורים",
-    "connect.forgetPins.done": "ה-PINים השמורים נמחקו"
+    "connect.forgetPins.done": "ה-PINים השמורים נמחקו",
+    "agent.btn.copyPin": "העתק PIN",
+    "agent.tray.show": "הצג חלון",
+    "agent.tray.exit": "יציאה"
   },
   "fa": {
     "doc.title.home": "Audiobus Remote",
@@ -3287,7 +3374,10 @@
     "agent.btn.rotate": "PIN جدید",
     "connect.pin.stale": "PIN ذخیره‌شده دیگر معتبر نیست. PIN فعلی را وارد کنید.",
     "connect.forgetPins": "فراموش کردن PINهای ذخیره‌شده",
-    "connect.forgetPins.done": "PINهای ذخیره‌شده پاک شدند"
+    "connect.forgetPins.done": "PINهای ذخیره‌شده پاک شدند",
+    "agent.btn.copyPin": "کپی PIN",
+    "agent.tray.show": "نمایش پنجره",
+    "agent.tray.exit": "خروج"
   },
   "hi": {
     "doc.title.home": "Audiobus Remote",
@@ -3396,6 +3486,9 @@
     "agent.btn.rotate": "नया PIN",
     "connect.pin.stale": "आपका सहेजा गया PIN अब मान्य नहीं है। वर्तमान PIN दर्ज करें।",
     "connect.forgetPins": "सहेजे गए PIN भूल जाएँ",
-    "connect.forgetPins.done": "सहेजे गए PIN हटा दिए गए"
+    "connect.forgetPins.done": "सहेजे गए PIN हटा दिए गए",
+    "agent.btn.copyPin": "PIN कॉपी करें",
+    "agent.tray.show": "विंडो दिखाएँ",
+    "agent.tray.exit": "बाहर निकलें"
   }
 }
