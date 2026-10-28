@@ -2365,16 +2365,29 @@ class ActionDialog(tk.Toplevel):
             pass
 
     def _center(self, parent):
-        """Center over the parent window, clamped to stay on screen. Sets a FULL geometry
+        """Center the dialog over the parent window when it is visible; otherwise — the
+        parent is minimized to the taskbar or hidden in the tray — center on the SCREEN, so
+        the prompt is seen without having to restore the main window. Sets a FULL geometry
         (size + position) while hidden so it sticks when the window is shown."""
         try:
             self.update_idletasks()
-            pw, ph = parent.winfo_width(), parent.winfo_height()
-            px, py = parent.winfo_rootx(), parent.winfo_rooty()
             w, h = self.winfo_reqwidth(), self.winfo_reqheight()
-            x = px + (pw - w) // 2
-            y = py + (ph - h) // 2
             sw, sh = self.winfo_screenwidth(), self.winfo_screenheight()
+            over_parent = False
+            try:
+                # winfo_viewable is False for an iconified/withdrawn parent; width<=1 means
+                # it was never mapped. In both cases its rootx/rooty are off-screen/stale.
+                over_parent = bool(parent.winfo_viewable()) and parent.winfo_width() > 1
+            except Exception:
+                over_parent = False
+            if over_parent:
+                pw, ph = parent.winfo_width(), parent.winfo_height()
+                px, py = parent.winfo_rootx(), parent.winfo_rooty()
+                x = px + (pw - w) // 2
+                y = py + (ph - h) // 2
+            else:
+                x = (sw - w) // 2
+                y = (sh - h) // 2
             x = max(0, min(x, sw - w))  # keep fully on screen
             y = max(0, min(y, sh - h))
             self.geometry("%dx%d+%d+%d" % (w, h, x, y))
@@ -3029,10 +3042,9 @@ class App:
             box["ok"] = ok
             ev.set()
 
-        # Someone is asking to connect: make sure the owner actually sees the prompt even
-        # if the window was minimised to the taskbar or hidden in the tray. Restoring the
-        # main window also gives the dialog a valid on-screen position to centre over.
-        self._restore_window()
+        # The approval prompt is its own window and now centres on the SCREEN when the main
+        # window is minimised/hidden (see ActionDialog._center), so the owner sees it
+        # without the main window popping back up.
         self.set_status(tr("agent.status.asking"), WARN)
         self._approval_dialog = ActionDialog(
             self.root, tr("agent.approval.prompt"),
@@ -3068,6 +3080,7 @@ class App:
         tk.Misc.tkraise(self.banner)  # window-stacking raise (Canvas.tkraise is tag_raise)
         self.banner.update_idletasks()
         self._fade_banner(True)
+        self._refresh_tray()  # enable the tray's Send file / Disconnect items
         # A viewer just connected: get out of the way by minimising to the taskbar. Skip it
         # when the window is already hidden in the tray (leave it there) so a tray-based
         # workflow isn't yanked back to the taskbar.
@@ -3079,6 +3092,7 @@ class App:
 
     def on_denied(self):
         self._connected = False
+        self._refresh_tray()
         # A denial can now land AFTER a session was established (a reconnecting viewer is
         # re-prompted), so tear the controlling UI down like on_peer_left — otherwise the
         # 'controlling' banner + Stop button linger over a 'Denied' status.
@@ -3097,6 +3111,7 @@ class App:
         # local=True  -> we ended the session (Stop button / window): "you closed it"
         # local=False -> the viewer disconnected on their own.
         self._connected = False
+        self._refresh_tray()  # grey the tray's Send file / Disconnect items again
         self._close_approval_dialog()  # e.g. the viewer left before we decided
         self._fade_banner(False)
         self._fade_stop(False)
@@ -3522,6 +3537,7 @@ class App:
         # End the current session only — stop streaming and tell the viewer — but
         # keep the program running and connected, ready for a new connection.
         self._connected = False
+        self._refresh_tray()  # grey the tray's Send file / Disconnect items again
         if self.client:
             self.client.end_session()
         self._fade_banner(False)
@@ -3616,8 +3632,8 @@ class App:
         self._refresh_tray()
 
     def _tray_do_rotate(self):
-        # Rotating from the tray brings the window back and shows the usual confirm.
-        self._restore_window()
+        # The rotate confirm centres on the screen (ActionDialog._center) — no need to pop
+        # the main window.
         self._rotate_pin_click()
 
     def _tray_send_file(self, icon, item):
@@ -3652,11 +3668,12 @@ class App:
             pass
 
     def on_tray_exit(self):
-        # The real quit (from the tray's Exit). Confirm first while a viewer is connected.
+        # The real quit (from the tray's Exit). While a viewer is connected, confirm first —
+        # the confirm centres on the SCREEN (no main-window pop) so Exit works whether the
+        # window is minimised or in the tray.
         if not self._connected:
             self._quit()
             return
-        self._restore_window()
         ActionDialog(
             self.root, tr("agent.confirm.stop"),
             tr("agent.btn.stop"), STOP_BG, STOP_FG,
