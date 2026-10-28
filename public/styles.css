@@ -512,6 +512,59 @@ body.app {
 }
 .linkbtn:hover { color: var(--text); }
 .linkbtn.done { color: var(--good); text-decoration: none; cursor: default; }
+
+/* Saved session codes: a labelled list of chips under the join form. Each chip connects
+   on click; a green dot marks the ones that also have a saved PIN (auto-connect). */
+.saved-sessions { margin-top: 18px; }
+.saved-label {
+  margin: 0 0 10px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  text-align: center;
+}
+.saved-item { display: flex; align-items: stretch; gap: 8px; margin-bottom: 8px; }
+.saved-code {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 14px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: var(--code-bg);
+  color: var(--text);
+  font-family: ui-monospace, SFMono-Regular, "Cascadia Code", Consolas, monospace;
+  font-size: 18px;
+  letter-spacing: 3px;
+  text-align: left;
+  cursor: pointer;
+}
+.saved-code:hover { border-color: var(--brand); }
+.saved-code.has-pin::after {
+  content: "";
+  margin-left: auto;
+  flex: 0 0 auto;
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: var(--good);
+}
+.saved-remove {
+  flex: 0 0 auto;
+  width: 42px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: none;
+  color: var(--muted);
+  font-size: 20px;
+  line-height: 1;
+  cursor: pointer;
+}
+.saved-remove:hover { color: var(--bad); border-color: var(--bad); }
 .code-input {
   font-family: ui-monospace, SFMono-Regular, "Cascadia Code", Consolas, monospace;
   font-size: 26px;
