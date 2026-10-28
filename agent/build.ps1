@@ -68,6 +68,7 @@ Invoke-OrThrow { & $py -m PyInstaller `
     --name audiobus-agent `
     --windowed `
     --icon logo.ico `
+    --version-file version_info.txt `
     --collect-all av `
     --collect-all aiortc `
     --collect-all aioice `
