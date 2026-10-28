@@ -628,7 +628,7 @@ _GUI_DPI_LOGGED = False   # one-time GUI-thread DPI-awareness + raw-rect diagnos
 _SHOT_SAVED = False       # one-time: save an mss screenshot on the first blocked click
 
 
-_AGENT_BUILD = "2026-10-28-tray4"  # bumped per diagnostic build; appears in the click log
+_AGENT_BUILD = "2026-10-28-tray5"  # bumped per diagnostic build; appears in the click log
 
 
 def _save_debug_shot(x, y):
@@ -2933,10 +2933,21 @@ class ActionDialog(tk.Toplevel):
         self.title(title_text or tr("agent.window.title"))
         self.configure(bg=CARD)
         self.resizable(False, False)
+        # Couple the dialog to the main window ONLY while that window is visible. A
+        # `transient` of a minimized/withdrawn owner is itself withdrawn — so the prompt
+        # never appears — and deiconifying it drags the owner back up. When the main window
+        # is hidden (minimized or in the tray) we keep the dialog fully INDEPENDENT: it maps
+        # on its own, centres on the screen (see _center) and stays topmost, without
+        # disturbing the main window.
         try:
-            self.transient(parent)
+            self._over_parent = bool(parent.winfo_viewable()) and parent.winfo_width() > 1
         except Exception:
-            pass
+            self._over_parent = False
+        if self._over_parent:
+            try:
+                self.transient(parent)
+            except Exception:
+                pass
         try:  # match the main window's icon
             if getattr(parent, "_icon_imgs", None):
                 self.iconphoto(False, *parent._icon_imgs)
@@ -2993,14 +3004,9 @@ class ActionDialog(tk.Toplevel):
             self.update_idletasks()
             w, h = self.winfo_reqwidth(), self.winfo_reqheight()
             sw, sh = self.winfo_screenwidth(), self.winfo_screenheight()
-            over_parent = False
-            try:
-                # winfo_viewable is False for an iconified/withdrawn parent; width<=1 means
-                # it was never mapped. In both cases its rootx/rooty are off-screen/stale.
-                over_parent = bool(parent.winfo_viewable()) and parent.winfo_width() > 1
-            except Exception:
-                over_parent = False
-            if over_parent:
+            # Same decision as the transient coupling above: over the parent only when it is
+            # visible, otherwise on the screen centre.
+            if getattr(self, "_over_parent", False):
                 pw, ph = parent.winfo_width(), parent.winfo_height()
                 px, py = parent.winfo_rootx(), parent.winfo_rooty()
                 x = px + (pw - w) // 2
@@ -4132,7 +4138,28 @@ class App:
             return Image.new("RGBA", (32, 32), (91, 140, 255, 255))
 
     def _refresh_tray(self):
-        """Re-read the tray menu's dynamic labels (code / PIN) after they change."""
+        """Re-read the tray menu's dynamic labels/enabled state after they change. pystray's
+        native menu can lag applying an update_menu() right after the menu was dismissed
+        (e.g. the Disconnect item staying active briefly after it's pressed), so also fire
+        one debounced follow-up so the change reliably catches up. Tk-thread only."""
+        if getattr(self, "tray", None) is None:
+            return
+        try:
+            self.tray.update_menu()
+        except Exception:
+            pass
+        try:
+            if getattr(self, "_tray_refresh_after", None):
+                self.root.after_cancel(self._tray_refresh_after)
+        except Exception:
+            pass
+        try:
+            self._tray_refresh_after = self.root.after(300, self._tray_refresh_followup)
+        except Exception:
+            self._tray_refresh_after = None
+
+    def _tray_refresh_followup(self):
+        self._tray_refresh_after = None
         if getattr(self, "tray", None) is not None:
             try:
                 self.tray.update_menu()
