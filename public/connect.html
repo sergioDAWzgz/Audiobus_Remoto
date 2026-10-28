@@ -159,9 +159,18 @@
             placeholder="··········"
             aria-label="Session code"
           />
+          <label id="rememberCodeRow" class="pin-remember">
+            <input type="checkbox" id="rememberCode" />
+            <span data-i18n="connect.rememberCode">Remember this code</span>
+          </label>
           <button class="btn big" type="submit" data-i18n="connect.btn.connect">Connect</button>
         </form>
         <p id="joinError" class="error" hidden></p>
+        <!-- Saved session codes on this device; shown only when there is at least one. -->
+        <div id="savedSessions" class="saved-sessions" hidden>
+          <p class="saved-label" data-i18n="connect.savedSessions">Saved sessions</p>
+          <div id="savedList"></div>
+        </div>
         <!-- Shown only when this device has remembered one or more auto-accept PINs. -->
         <button id="forgetPins" class="linkbtn" type="button" data-i18n="connect.forgetPins" hidden>
           Forget saved PINs

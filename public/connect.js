@@ -44,6 +44,9 @@ const pinError = $("pinError");
 const pinDesc = $("pinDesc");
 const pinRemember = $("pinRemember"); // "Remember on this device" checkbox on the PIN gate
 const forgetPinsBtn = $("forgetPins"); // "Forget saved PINs" link on the join card
+const rememberCode = $("rememberCode"); // "Remember this code" checkbox on the join card
+const savedSessions = $("savedSessions"); // container for the saved-codes list
+const savedList = $("savedList"); // where the saved-code chips are rendered
 
 // Translation helper (i18n.js loads first; falls back to the key if missing).
 const t = (k) => (window.I18N ? window.I18N.t(k) : k);
@@ -126,6 +129,81 @@ if (forgetPinsBtn) {
   });
 }
 updateForgetPinsLink(); // reflect saved PINs on initial load (the join card is the default view)
+
+// ---- Saved session codes ----
+// The device can remember codes you opt to keep, so you can pick one instead of retyping.
+// A saved code that ALSO has a remembered PIN (abr.pin.<CODE>) auto-connects when picked.
+// Stored (never a cookie, never sent to the server) as a most-recent-first list of codes.
+const CODE_STORE_KEY = "abr.codes";
+function savedCodes() {
+  try {
+    const arr = JSON.parse(localStorage.getItem(CODE_STORE_KEY) || "[]");
+    return Array.isArray(arr) ? arr.filter((c) => typeof c === "string") : [];
+  } catch {
+    return [];
+  }
+}
+function addSavedCode(code) {
+  if (!code) return;
+  try {
+    const arr = savedCodes().filter((c) => c !== code);
+    arr.unshift(code); // most-recently-used first
+    localStorage.setItem(CODE_STORE_KEY, JSON.stringify(arr.slice(0, 12)));
+  } catch {
+    /* ignore */
+  }
+}
+function removeSavedCode(code) {
+  try {
+    localStorage.setItem(
+      CODE_STORE_KEY,
+      JSON.stringify(savedCodes().filter((c) => c !== code)),
+    );
+  } catch {
+    /* ignore */
+  }
+  clearStoredPin(code); // removing a saved session forgets its PIN too
+}
+// Render the saved-code chips. Clicking one fills the field and connects (auto-submitting
+// a remembered PIN, if any); the × removes it. Shown only when there is at least one.
+function renderSavedSessions() {
+  if (!savedList || !savedSessions) return;
+  const codes = savedCodes();
+  savedSessions.hidden = codes.length === 0;
+  savedList.textContent = "";
+  for (const code of codes) {
+    const row = document.createElement("div");
+    row.className = "saved-item";
+    const pick = document.createElement("button");
+    pick.type = "button";
+    pick.className = "saved-code";
+    pick.textContent = code;
+    if (storedPin(code)) {
+      pick.classList.add("has-pin"); // visual hint: this one auto-connects
+      pick.title = t("connect.savedAutoHint");
+    }
+    pick.addEventListener("click", () => {
+      $("codeInput").value = code;
+      $("joinError").hidden = true;
+      connect(code);
+    });
+    const del = document.createElement("button");
+    del.type = "button";
+    del.className = "saved-remove";
+    del.textContent = "×"; // ×
+    del.setAttribute("aria-label", t("connect.removeSaved"));
+    del.title = t("connect.removeSaved");
+    del.addEventListener("click", () => {
+      removeSavedCode(code);
+      renderSavedSessions();
+      updateForgetPinsLink(); // its PIN was cleared too
+    });
+    row.append(pick, del);
+    savedList.append(row);
+  }
+}
+renderSavedSessions(); // reflect saved codes on initial load
+
 let viewMode = "grid"; // "grid" | "single"
 let selectedIndex = 0; // monitor index shown in single mode
 let activeDown = null; // { el, mon } held between mousedown and mouseup
@@ -730,6 +808,7 @@ function hidePinGate() {
   pinCard.hidden = true;
   joinCard.hidden = false;
   updateForgetPinsLink(); // the join card is visible again — reflect any saved PINs
+  renderSavedSessions(); // and refresh the saved-code chips (e.g. a PIN was just saved)
 }
 
 function showPinError(msg) {
@@ -772,6 +851,10 @@ $("joinForm").addEventListener("submit", (e) => {
     return;
   }
   $("joinError").hidden = true;
+  if (rememberCode && rememberCode.checked) {
+    addSavedCode(code);
+    renderSavedSessions();
+  }
   connect(code);
 });
 

@@ -119,7 +119,11 @@
     "connect.forgetPins.done": "Saved PINs cleared",
     "agent.btn.copyPin": "Copy PIN",
     "agent.tray.show": "Show window",
-    "agent.tray.exit": "Exit"
+    "agent.tray.exit": "Exit",
+    "connect.rememberCode": "Remember this code",
+    "connect.savedSessions": "Saved sessions",
+    "connect.removeSaved": "Remove",
+    "connect.savedAutoHint": "PIN saved — connects automatically"
   },
   "es": {
     "doc.title.home": "Audiobus Remote",
@@ -241,7 +245,11 @@
     "connect.forgetPins.done": "PINs guardados borrados",
     "agent.btn.copyPin": "Copiar PIN",
     "agent.tray.show": "Mostrar ventana",
-    "agent.tray.exit": "Salir"
+    "agent.tray.exit": "Salir",
+    "connect.rememberCode": "Recordar este código",
+    "connect.savedSessions": "Sesiones guardadas",
+    "connect.removeSaved": "Eliminar",
+    "connect.savedAutoHint": "PIN guardado — se conecta automáticamente"
   },
   "fr": {
     "doc.title.home": "Audiobus Remote",
@@ -353,7 +361,11 @@
     "connect.forgetPins.done": "PIN enregistrés supprimés",
     "agent.btn.copyPin": "Copier le PIN",
     "agent.tray.show": "Afficher la fenêtre",
-    "agent.tray.exit": "Quitter"
+    "agent.tray.exit": "Quitter",
+    "connect.rememberCode": "Mémoriser ce code",
+    "connect.savedSessions": "Sessions enregistrées",
+    "connect.removeSaved": "Supprimer",
+    "connect.savedAutoHint": "PIN enregistré — connexion automatique"
   },
   "de": {
     "doc.title.home": "Audiobus Remote",
@@ -465,7 +477,11 @@
     "connect.forgetPins.done": "Gespeicherte PINs gelöscht",
     "agent.btn.copyPin": "PIN kopieren",
     "agent.tray.show": "Fenster anzeigen",
-    "agent.tray.exit": "Beenden"
+    "agent.tray.exit": "Beenden",
+    "connect.rememberCode": "Diesen Code merken",
+    "connect.savedSessions": "Gespeicherte Sitzungen",
+    "connect.removeSaved": "Entfernen",
+    "connect.savedAutoHint": "PIN gespeichert – verbindet automatisch"
   },
   "it": {
     "doc.title.home": "Audiobus Remote",
@@ -577,7 +593,11 @@
     "connect.forgetPins.done": "PIN salvati eliminati",
     "agent.btn.copyPin": "Copia PIN",
     "agent.tray.show": "Mostra finestra",
-    "agent.tray.exit": "Esci"
+    "agent.tray.exit": "Esci",
+    "connect.rememberCode": "Ricorda questo codice",
+    "connect.savedSessions": "Sessioni salvate",
+    "connect.removeSaved": "Rimuovi",
+    "connect.savedAutoHint": "PIN salvato — si connette automaticamente"
   },
   "pt": {
     "doc.title.home": "Audiobus Remote",
@@ -689,7 +709,11 @@
     "connect.forgetPins.done": "PINs guardados eliminados",
     "agent.btn.copyPin": "Copiar PIN",
     "agent.tray.show": "Mostrar janela",
-    "agent.tray.exit": "Sair"
+    "agent.tray.exit": "Sair",
+    "connect.rememberCode": "Lembrar este código",
+    "connect.savedSessions": "Sessões guardadas",
+    "connect.removeSaved": "Remover",
+    "connect.savedAutoHint": "PIN guardado — liga automaticamente"
   },
   "pt-br": {
     "doc.title.home": "Audiobus Remote",
@@ -801,7 +825,11 @@
     "connect.forgetPins.done": "PINs salvos apagados",
     "agent.btn.copyPin": "Copiar PIN",
     "agent.tray.show": "Mostrar janela",
-    "agent.tray.exit": "Sair"
+    "agent.tray.exit": "Sair",
+    "connect.rememberCode": "Lembrar este código",
+    "connect.savedSessions": "Sessões salvas",
+    "connect.removeSaved": "Remover",
+    "connect.savedAutoHint": "PIN salvo — conecta automaticamente"
   },
   "nl": {
     "doc.title.home": "Audiobus Remote",
@@ -913,7 +941,11 @@
     "connect.forgetPins.done": "Opgeslagen pincodes gewist",
     "agent.btn.copyPin": "Pin kopiëren",
     "agent.tray.show": "Venster tonen",
-    "agent.tray.exit": "Afsluiten"
+    "agent.tray.exit": "Afsluiten",
+    "connect.rememberCode": "Deze code onthouden",
+    "connect.savedSessions": "Opgeslagen sessies",
+    "connect.removeSaved": "Verwijderen",
+    "connect.savedAutoHint": "Pin opgeslagen — maakt automatisch verbinding"
   },
   "ru": {
     "doc.title.home": "Audiobus Remote",
@@ -1025,7 +1057,11 @@
     "connect.forgetPins.done": "Сохранённые PIN удалены",
     "agent.btn.copyPin": "Копировать PIN",
     "agent.tray.show": "Показать окно",
-    "agent.tray.exit": "Выход"
+    "agent.tray.exit": "Выход",
+    "connect.rememberCode": "Запомнить этот код",
+    "connect.savedSessions": "Сохранённые сеансы",
+    "connect.removeSaved": "Удалить",
+    "connect.savedAutoHint": "PIN сохранён — подключается автоматически"
   },
   "uk": {
     "doc.title.home": "Audiobus Remote",
@@ -1137,7 +1173,11 @@
     "connect.forgetPins.done": "Збережені PIN видалено",
     "agent.btn.copyPin": "Копіювати PIN",
     "agent.tray.show": "Показати вікно",
-    "agent.tray.exit": "Вихід"
+    "agent.tray.exit": "Вихід",
+    "connect.rememberCode": "Запам’ятати цей код",
+    "connect.savedSessions": "Збережені сеанси",
+    "connect.removeSaved": "Видалити",
+    "connect.savedAutoHint": "PIN збережено — під’єднується автоматично"
   },
   "pl": {
     "doc.title.home": "Audiobus Remote",
@@ -1249,7 +1289,11 @@
     "connect.forgetPins.done": "Usunięto zapisane PIN-y",
     "agent.btn.copyPin": "Kopiuj PIN",
     "agent.tray.show": "Pokaż okno",
-    "agent.tray.exit": "Zakończ"
+    "agent.tray.exit": "Zakończ",
+    "connect.rememberCode": "Zapamiętaj ten kod",
+    "connect.savedSessions": "Zapisane sesje",
+    "connect.removeSaved": "Usuń",
+    "connect.savedAutoHint": "PIN zapisany — łączy automatycznie"
   },
   "cs": {
     "doc.title.home": "Audiobus Remote",
@@ -1361,7 +1405,11 @@
     "connect.forgetPins.done": "Uložené PINy smazány",
     "agent.btn.copyPin": "Kopírovat PIN",
     "agent.tray.show": "Zobrazit okno",
-    "agent.tray.exit": "Ukončit"
+    "agent.tray.exit": "Ukončit",
+    "connect.rememberCode": "Zapamatovat tento kód",
+    "connect.savedSessions": "Uložené relace",
+    "connect.removeSaved": "Odebrat",
+    "connect.savedAutoHint": "PIN uložen — připojí se automaticky"
   },
   "sv": {
     "doc.title.home": "Audiobus Remote",
@@ -1473,7 +1521,11 @@
     "connect.forgetPins.done": "Sparade PIN-koder rensade",
     "agent.btn.copyPin": "Kopiera PIN",
     "agent.tray.show": "Visa fönster",
-    "agent.tray.exit": "Avsluta"
+    "agent.tray.exit": "Avsluta",
+    "connect.rememberCode": "Kom ihåg den här koden",
+    "connect.savedSessions": "Sparade sessioner",
+    "connect.removeSaved": "Ta bort",
+    "connect.savedAutoHint": "PIN sparad — ansluter automatiskt"
   },
   "da": {
     "doc.title.home": "Audiobus Remote",
@@ -1585,7 +1637,11 @@
     "connect.forgetPins.done": "Gemte PIN-koder ryddet",
     "agent.btn.copyPin": "Kopiér PIN",
     "agent.tray.show": "Vis vindue",
-    "agent.tray.exit": "Afslut"
+    "agent.tray.exit": "Afslut",
+    "connect.rememberCode": "Husk denne kode",
+    "connect.savedSessions": "Gemte sessioner",
+    "connect.removeSaved": "Fjern",
+    "connect.savedAutoHint": "PIN gemt — opretter forbindelse automatisk"
   },
   "fi": {
     "doc.title.home": "Audiobus Remote",
@@ -1697,7 +1753,11 @@
     "connect.forgetPins.done": "Tallennetut PIN-koodit poistettu",
     "agent.btn.copyPin": "Kopioi PIN",
     "agent.tray.show": "Näytä ikkuna",
-    "agent.tray.exit": "Lopeta"
+    "agent.tray.exit": "Lopeta",
+    "connect.rememberCode": "Muista tämä koodi",
+    "connect.savedSessions": "Tallennetut istunnot",
+    "connect.removeSaved": "Poista",
+    "connect.savedAutoHint": "PIN tallennettu — yhdistää automaattisesti"
   },
   "no": {
     "doc.title.home": "Audiobus Remote",
@@ -1809,7 +1869,11 @@
     "connect.forgetPins.done": "Lagrede PIN-koder fjernet",
     "agent.btn.copyPin": "Kopier PIN",
     "agent.tray.show": "Vis vindu",
-    "agent.tray.exit": "Avslutt"
+    "agent.tray.exit": "Avslutt",
+    "connect.rememberCode": "Husk denne koden",
+    "connect.savedSessions": "Lagrede økter",
+    "connect.removeSaved": "Fjern",
+    "connect.savedAutoHint": "PIN lagret — kobler til automatisk"
   },
   "tr": {
     "doc.title.home": "Audiobus Remote",
@@ -1921,7 +1985,11 @@
     "connect.forgetPins.done": "Kayıtlı PIN'ler temizlendi",
     "agent.btn.copyPin": "PIN'i kopyala",
     "agent.tray.show": "Pencereyi göster",
-    "agent.tray.exit": "Çıkış"
+    "agent.tray.exit": "Çıkış",
+    "connect.rememberCode": "Bu kodu hatırla",
+    "connect.savedSessions": "Kayıtlı oturumlar",
+    "connect.removeSaved": "Kaldır",
+    "connect.savedAutoHint": "PIN kaydedildi — otomatik bağlanır"
   },
   "el": {
     "doc.title.home": "Audiobus Remote",
@@ -2033,7 +2101,11 @@
     "connect.forgetPins.done": "Τα αποθηκευμένα PIN διαγράφηκαν",
     "agent.btn.copyPin": "Αντιγραφή PIN",
     "agent.tray.show": "Εμφάνιση παραθύρου",
-    "agent.tray.exit": "Έξοδος"
+    "agent.tray.exit": "Έξοδος",
+    "connect.rememberCode": "Απομνημόνευση αυτού του κωδικού",
+    "connect.savedSessions": "Αποθηκευμένες συνεδρίες",
+    "connect.removeSaved": "Αφαίρεση",
+    "connect.savedAutoHint": "Το PIN αποθηκεύτηκε — συνδέεται αυτόματα"
   },
   "ro": {
     "doc.title.home": "Audiobus Remote",
@@ -2145,7 +2217,11 @@
     "connect.forgetPins.done": "PIN-urile salvate au fost șterse",
     "agent.btn.copyPin": "Copiază PIN-ul",
     "agent.tray.show": "Arată fereastra",
-    "agent.tray.exit": "Ieșire"
+    "agent.tray.exit": "Ieșire",
+    "connect.rememberCode": "Reține acest cod",
+    "connect.savedSessions": "Sesiuni salvate",
+    "connect.removeSaved": "Elimină",
+    "connect.savedAutoHint": "PIN salvat — se conectează automat"
   },
   "hu": {
     "doc.title.home": "Audiobus Remote",
@@ -2257,7 +2333,11 @@
     "connect.forgetPins.done": "Mentett PIN-ek törölve",
     "agent.btn.copyPin": "PIN másolása",
     "agent.tray.show": "Ablak megjelenítése",
-    "agent.tray.exit": "Kilépés"
+    "agent.tray.exit": "Kilépés",
+    "connect.rememberCode": "Kód megjegyzése",
+    "connect.savedSessions": "Mentett munkamenetek",
+    "connect.removeSaved": "Eltávolítás",
+    "connect.savedAutoHint": "PIN mentve — automatikusan csatlakozik"
   },
   "id": {
     "doc.title.home": "Audiobus Remote",
@@ -2369,7 +2449,11 @@
     "connect.forgetPins.done": "PIN tersimpan dihapus",
     "agent.btn.copyPin": "Salin PIN",
     "agent.tray.show": "Tampilkan jendela",
-    "agent.tray.exit": "Keluar"
+    "agent.tray.exit": "Keluar",
+    "connect.rememberCode": "Ingat kode ini",
+    "connect.savedSessions": "Sesi tersimpan",
+    "connect.removeSaved": "Hapus",
+    "connect.savedAutoHint": "PIN tersimpan — terhubung otomatis"
   },
   "vi": {
     "doc.title.home": "Audiobus Remote",
@@ -2481,7 +2565,11 @@
     "connect.forgetPins.done": "Đã xóa PIN đã lưu",
     "agent.btn.copyPin": "Sao chép PIN",
     "agent.tray.show": "Hiện cửa sổ",
-    "agent.tray.exit": "Thoát"
+    "agent.tray.exit": "Thoát",
+    "connect.rememberCode": "Ghi nhớ mã này",
+    "connect.savedSessions": "Phiên đã lưu",
+    "connect.removeSaved": "Xóa",
+    "connect.savedAutoHint": "Đã lưu PIN — tự động kết nối"
   },
   "th": {
     "doc.title.home": "Audiobus Remote",
@@ -2593,7 +2681,11 @@
     "connect.forgetPins.done": "ล้าง PIN ที่บันทึกไว้แล้ว",
     "agent.btn.copyPin": "คัดลอก PIN",
     "agent.tray.show": "แสดงหน้าต่าง",
-    "agent.tray.exit": "ออก"
+    "agent.tray.exit": "ออก",
+    "connect.rememberCode": "จดจำรหัสนี้",
+    "connect.savedSessions": "เซสชันที่บันทึกไว้",
+    "connect.removeSaved": "ลบ",
+    "connect.savedAutoHint": "บันทึก PIN แล้ว — เชื่อมต่ออัตโนมัติ"
   },
   "zh": {
     "doc.title.home": "Audiobus Remote",
@@ -2705,7 +2797,11 @@
     "connect.forgetPins.done": "已清除保存的 PIN",
     "agent.btn.copyPin": "复制 PIN",
     "agent.tray.show": "显示窗口",
-    "agent.tray.exit": "退出"
+    "agent.tray.exit": "退出",
+    "connect.rememberCode": "记住此代码",
+    "connect.savedSessions": "已保存的会话",
+    "connect.removeSaved": "移除",
+    "connect.savedAutoHint": "已保存 PIN — 自动连接"
   },
   "zh-tw": {
     "doc.title.home": "Audiobus Remote",
@@ -2817,7 +2913,11 @@
     "connect.forgetPins.done": "已清除儲存的 PIN",
     "agent.btn.copyPin": "複製 PIN",
     "agent.tray.show": "顯示視窗",
-    "agent.tray.exit": "結束"
+    "agent.tray.exit": "結束",
+    "connect.rememberCode": "記住此代碼",
+    "connect.savedSessions": "已儲存的工作階段",
+    "connect.removeSaved": "移除",
+    "connect.savedAutoHint": "已儲存 PIN — 自動連線"
   },
   "ja": {
     "doc.title.home": "Audiobus Remote",
@@ -2929,7 +3029,11 @@
     "connect.forgetPins.done": "保存したPINを削除しました",
     "agent.btn.copyPin": "PINをコピー",
     "agent.tray.show": "ウィンドウを表示",
-    "agent.tray.exit": "終了"
+    "agent.tray.exit": "終了",
+    "connect.rememberCode": "このコードを記憶する",
+    "connect.savedSessions": "保存したセッション",
+    "connect.removeSaved": "削除",
+    "connect.savedAutoHint": "PIN保存済み — 自動接続します"
   },
   "ko": {
     "doc.title.home": "Audiobus Remote",
@@ -3041,7 +3145,11 @@
     "connect.forgetPins.done": "저장된 PIN을 지웠습니다",
     "agent.btn.copyPin": "PIN 복사",
     "agent.tray.show": "창 표시",
-    "agent.tray.exit": "종료"
+    "agent.tray.exit": "종료",
+    "connect.rememberCode": "이 코드 기억하기",
+    "connect.savedSessions": "저장된 세션",
+    "connect.removeSaved": "제거",
+    "connect.savedAutoHint": "PIN 저장됨 — 자동으로 연결됩니다"
   },
   "ar": {
     "doc.title.home": "Audiobus Remote",
@@ -3153,7 +3261,11 @@
     "connect.forgetPins.done": "تم مسح رموز PIN المحفوظة",
     "agent.btn.copyPin": "نسخ رمز PIN",
     "agent.tray.show": "إظهار النافذة",
-    "agent.tray.exit": "خروج"
+    "agent.tray.exit": "خروج",
+    "connect.rememberCode": "تذكّر هذا الرمز",
+    "connect.savedSessions": "الجلسات المحفوظة",
+    "connect.removeSaved": "إزالة",
+    "connect.savedAutoHint": "تم حفظ رمز PIN — يتصل تلقائيًا"
   },
   "he": {
     "doc.title.home": "Audiobus Remote",
@@ -3265,7 +3377,11 @@
     "connect.forgetPins.done": "ה-PINים השמורים נמחקו",
     "agent.btn.copyPin": "העתק PIN",
     "agent.tray.show": "הצג חלון",
-    "agent.tray.exit": "יציאה"
+    "agent.tray.exit": "יציאה",
+    "connect.rememberCode": "זכור קוד זה",
+    "connect.savedSessions": "הפעלות שמורות",
+    "connect.removeSaved": "הסר",
+    "connect.savedAutoHint": "PIN נשמר — מתחבר אוטומטית"
   },
   "fa": {
     "doc.title.home": "Audiobus Remote",
@@ -3377,7 +3493,11 @@
     "connect.forgetPins.done": "PINهای ذخیره‌شده پاک شدند",
     "agent.btn.copyPin": "کپی PIN",
     "agent.tray.show": "نمایش پنجره",
-    "agent.tray.exit": "خروج"
+    "agent.tray.exit": "خروج",
+    "connect.rememberCode": "این کد را به خاطر بسپار",
+    "connect.savedSessions": "نشست‌های ذخیره‌شده",
+    "connect.removeSaved": "حذف",
+    "connect.savedAutoHint": "PIN ذخیره شد — به‌طور خودکار متصل می‌شود"
   },
   "hi": {
     "doc.title.home": "Audiobus Remote",
@@ -3489,6 +3609,10 @@
     "connect.forgetPins.done": "सहेजे गए PIN हटा दिए गए",
     "agent.btn.copyPin": "PIN कॉपी करें",
     "agent.tray.show": "विंडो दिखाएँ",
-    "agent.tray.exit": "बाहर निकलें"
+    "agent.tray.exit": "बाहर निकलें",
+    "connect.rememberCode": "यह कोड याद रखें",
+    "connect.savedSessions": "सहेजे गए सत्र",
+    "connect.removeSaved": "हटाएँ",
+    "connect.savedAutoHint": "PIN सहेजा गया — स्वतः कनेक्ट होता है"
   }
 }
