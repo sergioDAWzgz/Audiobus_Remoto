@@ -109,7 +109,11 @@
     "connect.pin.failed": "PIN rejected. Ask for the current PIN and try again.",
     "connect.err.pinLen": "Enter the {len}-digit PIN.",
     "connect.pin.submit": "Connect",
-    "agent.status.pinBlocked": "Too many wrong PINs — connection blocked."
+    "agent.status.pinBlocked": "Too many wrong PINs — connection blocked.",
+    "connect.pin.remember": "Remember on this device",
+    "agent.pin.rotate": "Rotate PIN / revoke remembered devices",
+    "agent.confirm.rotate": "Generate a new PIN and make every remembered device enter it again?",
+    "agent.btn.rotate": "Rotate PIN"
   },
   "es": {
     "doc.title.home": "Audiobus Remote",
@@ -221,7 +225,11 @@
     "connect.pin.bad": "PIN incorrecto — quedan {left} intentos.",
     "connect.pin.failed": "PIN rechazado. Pide el PIN actual e inténtalo de nuevo.",
     "connect.err.pinLen": "Introduce el PIN de {len} dígitos.",
-    "agent.status.pinBlocked": "Demasiados PIN incorrectos — conexión bloqueada."
+    "agent.status.pinBlocked": "Demasiados PIN incorrectos — conexión bloqueada.",
+    "connect.pin.remember": "Recordar en este dispositivo",
+    "agent.pin.rotate": "Cambiar PIN / revocar dispositivos recordados",
+    "agent.confirm.rotate": "¿Generar un PIN nuevo para que cada dispositivo recordado tenga que volver a introducirlo?",
+    "agent.btn.rotate": "Cambiar PIN"
   },
   "fr": {
     "doc.title.home": "Audiobus Remote",
@@ -323,7 +331,11 @@
     "connect.pin.bad": "PIN incorrect — {left} tentatives restantes.",
     "connect.pin.failed": "PIN refusé. Demandez le PIN actuel et réessayez.",
     "connect.err.pinLen": "Saisissez le PIN à {len} chiffres.",
-    "agent.status.pinBlocked": "Trop de PIN incorrects — connexion bloquée."
+    "agent.status.pinBlocked": "Trop de PIN incorrects — connexion bloquée.",
+    "connect.pin.remember": "Mémoriser sur cet appareil",
+    "agent.pin.rotate": "Nouveau PIN / révoquer les appareils mémorisés",
+    "agent.confirm.rotate": "Générer un nouveau PIN pour que chaque appareil mémorisé doive le saisir à nouveau ?",
+    "agent.btn.rotate": "Nouveau PIN"
   },
   "de": {
     "doc.title.home": "Audiobus Remote",
@@ -425,7 +437,11 @@
     "connect.pin.bad": "Falsche PIN — noch {left} Versuche übrig.",
     "connect.pin.failed": "PIN abgelehnt. Frage nach der aktuellen PIN und versuche es erneut.",
     "connect.err.pinLen": "Gib die {len}-stellige PIN ein.",
-    "agent.status.pinBlocked": "Zu viele falsche PINs — Verbindung blockiert."
+    "agent.status.pinBlocked": "Zu viele falsche PINs — Verbindung blockiert.",
+    "connect.pin.remember": "Auf diesem Gerät merken",
+    "agent.pin.rotate": "Neue PIN / gemerkte Geräte widerrufen",
+    "agent.confirm.rotate": "Neue PIN erzeugen, sodass alle gemerkten Geräte sie erneut eingeben müssen?",
+    "agent.btn.rotate": "Neue PIN"
   },
   "it": {
     "doc.title.home": "Audiobus Remote",
@@ -527,7 +543,11 @@
     "connect.pin.bad": "PIN errato — {left} tentativi rimasti.",
     "connect.pin.failed": "PIN rifiutato. Chiedi il PIN attuale e riprova.",
     "connect.err.pinLen": "Inserisci il PIN di {len} cifre.",
-    "agent.status.pinBlocked": "Troppi PIN errati — connessione bloccata."
+    "agent.status.pinBlocked": "Troppi PIN errati — connessione bloccata.",
+    "connect.pin.remember": "Ricorda su questo dispositivo",
+    "agent.pin.rotate": "Nuovo PIN / revoca dispositivi ricordati",
+    "agent.confirm.rotate": "Generare un nuovo PIN in modo che ogni dispositivo ricordato debba inserirlo di nuovo?",
+    "agent.btn.rotate": "Nuovo PIN"
   },
   "pt": {
     "doc.title.home": "Audiobus Remote",
@@ -629,7 +649,11 @@
     "connect.pin.bad": "PIN incorreto — restam {left} tentativas.",
     "connect.pin.failed": "PIN rejeitado. Peça o PIN atual e tente novamente.",
     "connect.err.pinLen": "Introduza o PIN de {len} dígitos.",
-    "agent.status.pinBlocked": "Demasiados PIN incorretos — ligação bloqueada."
+    "agent.status.pinBlocked": "Demasiados PIN incorretos — ligação bloqueada.",
+    "connect.pin.remember": "Lembrar neste dispositivo",
+    "agent.pin.rotate": "Novo PIN / revogar dispositivos lembrados",
+    "agent.confirm.rotate": "Gerar um novo PIN para que cada dispositivo lembrado tenha de o introduzir novamente?",
+    "agent.btn.rotate": "Novo PIN"
   },
   "pt-br": {
     "doc.title.home": "Audiobus Remote",
@@ -731,7 +755,11 @@
     "connect.pin.bad": "PIN incorreto — restam {left} tentativas.",
     "connect.pin.failed": "PIN rejeitado. Peça o PIN atual e tente novamente.",
     "connect.err.pinLen": "Digite o PIN de {len} dígitos.",
-    "agent.status.pinBlocked": "PINs incorretos demais — conexão bloqueada."
+    "agent.status.pinBlocked": "PINs incorretos demais — conexão bloqueada.",
+    "connect.pin.remember": "Lembrar neste dispositivo",
+    "agent.pin.rotate": "Novo PIN / revogar dispositivos lembrados",
+    "agent.confirm.rotate": "Gerar um novo PIN para que cada dispositivo lembrado precise inseri-lo de novo?",
+    "agent.btn.rotate": "Novo PIN"
   },
   "nl": {
     "doc.title.home": "Audiobus Remote",
@@ -833,7 +861,11 @@
     "connect.pin.bad": "Onjuiste PIN — nog {left} pogingen over.",
     "connect.pin.failed": "PIN geweigerd. Vraag om de huidige PIN en probeer het opnieuw.",
     "connect.err.pinLen": "Voer de {len}-cijferige PIN in.",
-    "agent.status.pinBlocked": "Te veel onjuiste PIN's — verbinding geblokkeerd."
+    "agent.status.pinBlocked": "Te veel onjuiste PIN's — verbinding geblokkeerd.",
+    "connect.pin.remember": "Onthouden op dit apparaat",
+    "agent.pin.rotate": "Nieuwe pin / onthouden apparaten intrekken",
+    "agent.confirm.rotate": "Een nieuwe pin genereren zodat elk onthouden apparaat die opnieuw moet invoeren?",
+    "agent.btn.rotate": "Nieuwe pin"
   },
   "ru": {
     "doc.title.home": "Audiobus Remote",
@@ -935,7 +967,11 @@
     "connect.pin.bad": "Неверный PIN — осталось {left} попыток.",
     "connect.pin.failed": "PIN отклонён. Запросите текущий PIN и повторите попытку.",
     "connect.err.pinLen": "Введите PIN из {len} цифр.",
-    "agent.status.pinBlocked": "Слишком много неверных PIN — подключение заблокировано."
+    "agent.status.pinBlocked": "Слишком много неверных PIN — подключение заблокировано.",
+    "connect.pin.remember": "Запомнить на этом устройстве",
+    "agent.pin.rotate": "Новый PIN / отозвать запомненные устройства",
+    "agent.confirm.rotate": "Создать новый PIN, чтобы каждое запомненное устройство ввело его заново?",
+    "agent.btn.rotate": "Новый PIN"
   },
   "uk": {
     "doc.title.home": "Audiobus Remote",
@@ -1037,7 +1073,11 @@
     "connect.pin.bad": "Неправильний PIN — залишилося {left} спроб.",
     "connect.pin.failed": "PIN відхилено. Запитайте поточний PIN і повторіть спробу.",
     "connect.err.pinLen": "Введіть PIN із {len} цифр.",
-    "agent.status.pinBlocked": "Забагато неправильних PIN — підключення заблоковано."
+    "agent.status.pinBlocked": "Забагато неправильних PIN — підключення заблоковано.",
+    "connect.pin.remember": "Запам’ятати на цьому пристрої",
+    "agent.pin.rotate": "Новий PIN / відкликати запам’ятані пристрої",
+    "agent.confirm.rotate": "Створити новий PIN, щоб кожен запам’ятаний пристрій увів його знову?",
+    "agent.btn.rotate": "Новий PIN"
   },
   "pl": {
     "doc.title.home": "Audiobus Remote",
@@ -1139,7 +1179,11 @@
     "connect.pin.bad": "Nieprawidłowy PIN — pozostało {left} prób.",
     "connect.pin.failed": "PIN odrzucony. Poproś o aktualny PIN i spróbuj ponownie.",
     "connect.err.pinLen": "Wpisz {len}-cyfrowy PIN.",
-    "agent.status.pinBlocked": "Zbyt wiele błędnych PIN-ów — połączenie zablokowane."
+    "agent.status.pinBlocked": "Zbyt wiele błędnych PIN-ów — połączenie zablokowane.",
+    "connect.pin.remember": "Zapamiętaj na tym urządzeniu",
+    "agent.pin.rotate": "Nowy PIN / odwołaj zapamiętane urządzenia",
+    "agent.confirm.rotate": "Wygenerować nowy PIN, aby każde zapamiętane urządzenie musiało podać go ponownie?",
+    "agent.btn.rotate": "Nowy PIN"
   },
   "cs": {
     "doc.title.home": "Audiobus Remote",
@@ -1241,7 +1285,11 @@
     "connect.pin.bad": "Nesprávný PIN — zbývá {left} pokusů.",
     "connect.pin.failed": "PIN byl odmítnut. Vyžádejte si aktuální PIN a zkuste to znovu.",
     "connect.err.pinLen": "Zadejte {len}místný PIN.",
-    "agent.status.pinBlocked": "Příliš mnoho nesprávných PINů — připojení zablokováno."
+    "agent.status.pinBlocked": "Příliš mnoho nesprávných PINů — připojení zablokováno.",
+    "connect.pin.remember": "Zapamatovat na tomto zařízení",
+    "agent.pin.rotate": "Nový PIN / odvolat zapamatovaná zařízení",
+    "agent.confirm.rotate": "Vygenerovat nový PIN a přinutit všechna zapamatovaná zařízení, aby ho zadala znovu?",
+    "agent.btn.rotate": "Nový PIN"
   },
   "sv": {
     "doc.title.home": "Audiobus Remote",
@@ -1343,7 +1391,11 @@
     "connect.pin.bad": "Fel PIN — {left} försök kvar.",
     "connect.pin.failed": "PIN avvisades. Fråga efter den aktuella PIN och försök igen.",
     "connect.err.pinLen": "Ange den {len}-siffriga PIN.",
-    "agent.status.pinBlocked": "För många felaktiga PIN-koder — anslutning blockerad."
+    "agent.status.pinBlocked": "För många felaktiga PIN-koder — anslutning blockerad.",
+    "connect.pin.remember": "Kom ihåg på den här enheten",
+    "agent.pin.rotate": "Ny PIN / återkalla ihågkomna enheter",
+    "agent.confirm.rotate": "Skapa en ny PIN så att varje ihågkommen enhet måste ange den igen?",
+    "agent.btn.rotate": "Ny PIN"
   },
   "da": {
     "doc.title.home": "Audiobus Remote",
@@ -1445,7 +1497,11 @@
     "connect.pin.bad": "Forkert PIN — {left} forsøg tilbage.",
     "connect.pin.failed": "PIN afvist. Bed om den aktuelle PIN, og prøv igen.",
     "connect.err.pinLen": "Indtast den {len}-cifrede PIN.",
-    "agent.status.pinBlocked": "For mange forkerte PIN-koder — forbindelse blokeret."
+    "agent.status.pinBlocked": "For mange forkerte PIN-koder — forbindelse blokeret.",
+    "connect.pin.remember": "Husk på denne enhed",
+    "agent.pin.rotate": "Ny PIN / tilbagekald huskede enheder",
+    "agent.confirm.rotate": "Generere en ny PIN, så alle huskede enheder skal indtaste den igen?",
+    "agent.btn.rotate": "Ny PIN"
   },
   "fi": {
     "doc.title.home": "Audiobus Remote",
@@ -1547,7 +1603,11 @@
     "connect.pin.bad": "Väärä PIN — {left} yritystä jäljellä.",
     "connect.pin.failed": "PIN hylätty. Pyydä nykyinen PIN ja yritä uudelleen.",
     "connect.err.pinLen": "Syötä {len}-numeroinen PIN.",
-    "agent.status.pinBlocked": "Liian monta väärää PIN-koodia — yhteys estetty."
+    "agent.status.pinBlocked": "Liian monta väärää PIN-koodia — yhteys estetty.",
+    "connect.pin.remember": "Muista tällä laitteella",
+    "agent.pin.rotate": "Uusi PIN / peru muistetut laitteet",
+    "agent.confirm.rotate": "Luodaanko uusi PIN, jolloin jokaisen muistetun laitteen on syötettävä se uudelleen?",
+    "agent.btn.rotate": "Uusi PIN"
   },
   "no": {
     "doc.title.home": "Audiobus Remote",
@@ -1649,7 +1709,11 @@
     "connect.pin.bad": "Feil PIN — {left} forsøk igjen.",
     "connect.pin.failed": "PIN avvist. Be om den gjeldende PIN-en, og prøv igjen.",
     "connect.err.pinLen": "Skriv inn den {len}-sifrede PIN-en.",
-    "agent.status.pinBlocked": "For mange feil PIN-koder — tilkobling blokkert."
+    "agent.status.pinBlocked": "For mange feil PIN-koder — tilkobling blokkert.",
+    "connect.pin.remember": "Husk på denne enheten",
+    "agent.pin.rotate": "Ny PIN / tilbakekall huskede enheter",
+    "agent.confirm.rotate": "Lage en ny PIN slik at alle huskede enheter må skrive den inn på nytt?",
+    "agent.btn.rotate": "Ny PIN"
   },
   "tr": {
     "doc.title.home": "Audiobus Remote",
@@ -1751,7 +1815,11 @@
     "connect.pin.bad": "Yanlış PIN — {left} deneme kaldı.",
     "connect.pin.failed": "PIN reddedildi. Güncel PIN'i isteyip tekrar deneyin.",
     "connect.err.pinLen": "{len} haneli PIN'i girin.",
-    "agent.status.pinBlocked": "Çok fazla yanlış PIN — bağlantı engellendi."
+    "agent.status.pinBlocked": "Çok fazla yanlış PIN — bağlantı engellendi.",
+    "connect.pin.remember": "Bu cihazda hatırla",
+    "agent.pin.rotate": "Yeni PIN / hatırlanan cihazları iptal et",
+    "agent.confirm.rotate": "Yeni bir PIN oluşturulsun ve hatırlanan her cihaz onu yeniden girsin mi?",
+    "agent.btn.rotate": "Yeni PIN"
   },
   "el": {
     "doc.title.home": "Audiobus Remote",
@@ -1853,7 +1921,11 @@
     "connect.pin.bad": "Λάθος PIN — απομένουν {left} προσπάθειες.",
     "connect.pin.failed": "Το PIN απορρίφθηκε. Ζητήστε το τρέχον PIN και δοκιμάστε ξανά.",
     "connect.err.pinLen": "Εισαγάγετε το PIN {len} ψηφίων.",
-    "agent.status.pinBlocked": "Πάρα πολλά λανθασμένα PIN — η σύνδεση αποκλείστηκε."
+    "agent.status.pinBlocked": "Πάρα πολλά λανθασμένα PIN — η σύνδεση αποκλείστηκε.",
+    "connect.pin.remember": "Απομνημόνευση σε αυτήν τη συσκευή",
+    "agent.pin.rotate": "Νέο PIN / ανάκληση αποθηκευμένων συσκευών",
+    "agent.confirm.rotate": "Δημιουργία νέου PIN, ώστε κάθε αποθηκευμένη συσκευή να το εισαγάγει ξανά;",
+    "agent.btn.rotate": "Νέο PIN"
   },
   "ro": {
     "doc.title.home": "Audiobus Remote",
@@ -1955,7 +2027,11 @@
     "connect.pin.bad": "PIN incorect — au mai rămas {left} încercări.",
     "connect.pin.failed": "PIN respins. Cereți PIN-ul curent și încercați din nou.",
     "connect.err.pinLen": "Introduceți PIN-ul de {len} cifre.",
-    "agent.status.pinBlocked": "Prea multe PIN-uri greșite — conexiune blocată."
+    "agent.status.pinBlocked": "Prea multe PIN-uri greșite — conexiune blocată.",
+    "connect.pin.remember": "Reține pe acest dispozitiv",
+    "agent.pin.rotate": "PIN nou / revocă dispozitivele reținute",
+    "agent.confirm.rotate": "Generezi un PIN nou, astfel încât fiecare dispozitiv reținut să îl introducă din nou?",
+    "agent.btn.rotate": "PIN nou"
   },
   "hu": {
     "doc.title.home": "Audiobus Remote",
@@ -2057,7 +2133,11 @@
     "connect.pin.bad": "Hibás PIN-kód — {left} próbálkozás maradt.",
     "connect.pin.failed": "PIN-kód elutasítva. Kérje el az aktuális PIN-kódot, és próbálja újra.",
     "connect.err.pinLen": "Írjon be egy {len} számjegyű PIN-kódot.",
-    "agent.status.pinBlocked": "Túl sok hibás PIN — a kapcsolat letiltva."
+    "agent.status.pinBlocked": "Túl sok hibás PIN — a kapcsolat letiltva.",
+    "connect.pin.remember": "Megjegyzés ezen az eszközön",
+    "agent.pin.rotate": "Új PIN / megjegyzett eszközök visszavonása",
+    "agent.confirm.rotate": "Létrehoz egy új PIN-t, hogy minden megjegyzett eszköznek újra meg kelljen adnia?",
+    "agent.btn.rotate": "Új PIN"
   },
   "id": {
     "doc.title.home": "Audiobus Remote",
@@ -2159,7 +2239,11 @@
     "connect.pin.bad": "PIN salah — sisa {left} percobaan.",
     "connect.pin.failed": "PIN ditolak. Tanyakan PIN saat ini lalu coba lagi.",
     "connect.err.pinLen": "Masukkan PIN {len} digit.",
-    "agent.status.pinBlocked": "Terlalu banyak PIN salah — koneksi diblokir."
+    "agent.status.pinBlocked": "Terlalu banyak PIN salah — koneksi diblokir.",
+    "connect.pin.remember": "Ingat di perangkat ini",
+    "agent.pin.rotate": "PIN baru / cabut perangkat tersimpan",
+    "agent.confirm.rotate": "Buat PIN baru agar setiap perangkat tersimpan harus memasukkannya lagi?",
+    "agent.btn.rotate": "PIN baru"
   },
   "vi": {
     "doc.title.home": "Audiobus Remote",
@@ -2261,7 +2345,11 @@
     "connect.pin.bad": "PIN sai — còn {left} lần thử.",
     "connect.pin.failed": "PIN bị từ chối. Hãy hỏi mã PIN hiện tại và thử lại.",
     "connect.err.pinLen": "Nhập mã PIN gồm {len} chữ số.",
-    "agent.status.pinBlocked": "Quá nhiều PIN sai — đã chặn kết nối."
+    "agent.status.pinBlocked": "Quá nhiều PIN sai — đã chặn kết nối.",
+    "connect.pin.remember": "Ghi nhớ trên thiết bị này",
+    "agent.pin.rotate": "Đổi PIN / thu hồi thiết bị đã nhớ",
+    "agent.confirm.rotate": "Tạo PIN mới để mọi thiết bị đã nhớ phải nhập lại?",
+    "agent.btn.rotate": "Đổi PIN"
   },
   "th": {
     "doc.title.home": "Audiobus Remote",
@@ -2363,7 +2451,11 @@
     "connect.pin.bad": "PIN ไม่ถูกต้อง — เหลือ {left} ครั้ง",
     "connect.pin.failed": "PIN ถูกปฏิเสธ ขอ PIN ปัจจุบันแล้วลองอีกครั้ง",
     "connect.err.pinLen": "ป้อน PIN {len} หลัก",
-    "agent.status.pinBlocked": "ใส่ PIN ผิดหลายครั้งเกินไป — การเชื่อมต่อถูกบล็อก"
+    "agent.status.pinBlocked": "ใส่ PIN ผิดหลายครั้งเกินไป — การเชื่อมต่อถูกบล็อก",
+    "connect.pin.remember": "จดจำบนอุปกรณ์นี้",
+    "agent.pin.rotate": "เปลี่ยน PIN / เพิกถอนอุปกรณ์ที่จดจำ",
+    "agent.confirm.rotate": "สร้าง PIN ใหม่เพื่อให้ทุกอุปกรณ์ที่จดจำต้องกรอกใหม่หรือไม่?",
+    "agent.btn.rotate": "เปลี่ยน PIN"
   },
   "zh": {
     "doc.title.home": "Audiobus Remote",
@@ -2465,7 +2557,11 @@
     "connect.pin.bad": "PIN 错误 — 还剩 {left} 次尝试。",
     "connect.pin.failed": "PIN 被拒绝。请询问当前的 PIN 后重试。",
     "connect.err.pinLen": "请输入 {len} 位 PIN。",
-    "agent.status.pinBlocked": "错误 PIN 次数过多 — 已阻止连接。"
+    "agent.status.pinBlocked": "错误 PIN 次数过多 — 已阻止连接。",
+    "connect.pin.remember": "在此设备上记住",
+    "agent.pin.rotate": "更换 PIN／撤销已记住的设备",
+    "agent.confirm.rotate": "生成新 PIN，让每个已记住的设备重新输入？",
+    "agent.btn.rotate": "更换 PIN"
   },
   "zh-tw": {
     "doc.title.home": "Audiobus Remote",
@@ -2567,7 +2663,11 @@
     "connect.pin.bad": "PIN 錯誤 — 還剩 {left} 次嘗試。",
     "connect.pin.failed": "PIN 被拒絕。請詢問目前的 PIN 後重試。",
     "connect.err.pinLen": "請輸入 {len} 位 PIN。",
-    "agent.status.pinBlocked": "錯誤 PIN 次數過多 — 已封鎖連線。"
+    "agent.status.pinBlocked": "錯誤 PIN 次數過多 — 已封鎖連線。",
+    "connect.pin.remember": "在此裝置上記住",
+    "agent.pin.rotate": "更換 PIN／撤銷已記住的裝置",
+    "agent.confirm.rotate": "產生新 PIN，讓每個已記住的裝置重新輸入？",
+    "agent.btn.rotate": "更換 PIN"
   },
   "ja": {
     "doc.title.home": "Audiobus Remote",
@@ -2669,7 +2769,11 @@
     "connect.pin.bad": "PINが違います — 残り{left}回です。",
     "connect.pin.failed": "PINが拒否されました。現在のPINを確認して、もう一度お試しください。",
     "connect.err.pinLen": "{len}桁のPINを入力してください。",
-    "agent.status.pinBlocked": "PINの誤入力が多すぎます — 接続をブロックしました。"
+    "agent.status.pinBlocked": "PINの誤入力が多すぎます — 接続をブロックしました。",
+    "connect.pin.remember": "このデバイスで記憶する",
+    "agent.pin.rotate": "PINを変更／記憶済みデバイスを無効化",
+    "agent.confirm.rotate": "新しいPINを作成し、記憶済みのすべてのデバイスに再入力させますか？",
+    "agent.btn.rotate": "PINを変更"
   },
   "ko": {
     "doc.title.home": "Audiobus Remote",
@@ -2771,7 +2875,11 @@
     "connect.pin.bad": "PIN이 틀렸습니다 — {left}번 남았습니다.",
     "connect.pin.failed": "PIN이 거부되었습니다. 현재 PIN을 물어본 후 다시 시도하세요.",
     "connect.err.pinLen": "{len}자리 PIN을 입력하세요.",
-    "agent.status.pinBlocked": "잘못된 PIN이 너무 많습니다 — 연결이 차단되었습니다."
+    "agent.status.pinBlocked": "잘못된 PIN이 너무 많습니다 — 연결이 차단되었습니다.",
+    "connect.pin.remember": "이 기기에서 기억하기",
+    "agent.pin.rotate": "PIN 변경 / 기억된 기기 해제",
+    "agent.confirm.rotate": "새 PIN을 만들어 기억된 모든 기기가 다시 입력하도록 할까요?",
+    "agent.btn.rotate": "PIN 변경"
   },
   "ar": {
     "doc.title.home": "Audiobus Remote",
@@ -2873,7 +2981,11 @@
     "connect.pin.bad": "رمز PIN غير صحيح — تبقّت {left} محاولات.",
     "connect.pin.failed": "رُفض رمز PIN. اطلب رمز PIN الحالي وحاول مرة أخرى.",
     "connect.err.pinLen": "أدخل رمز PIN المكوّن من {len} أرقام.",
-    "agent.status.pinBlocked": "عدد كبير جدًا من محاولات PIN الخاطئة — تم حظر الاتصال."
+    "agent.status.pinBlocked": "عدد كبير جدًا من محاولات PIN الخاطئة — تم حظر الاتصال.",
+    "connect.pin.remember": "تذكّر على هذا الجهاز",
+    "agent.pin.rotate": "تغيير رمز PIN / إلغاء الأجهزة المحفوظة",
+    "agent.confirm.rotate": "إنشاء رمز PIN جديد وإلزام كل جهاز محفوظ بإدخاله من جديد؟",
+    "agent.btn.rotate": "تغيير رمز PIN"
   },
   "he": {
     "doc.title.home": "Audiobus Remote",
@@ -2975,7 +3087,11 @@
     "connect.pin.bad": "PIN שגוי — נותרו {left} ניסיונות.",
     "connect.pin.failed": "ה-PIN נדחה. בקש את ה-PIN הנוכחי ונסה שוב.",
     "connect.err.pinLen": "הזן את ה-PIN בן {len} הספרות.",
-    "agent.status.pinBlocked": "יותר מדי קודי PIN שגויים — החיבור נחסם."
+    "agent.status.pinBlocked": "יותר מדי קודי PIN שגויים — החיבור נחסם.",
+    "connect.pin.remember": "זכור במכשיר הזה",
+    "agent.pin.rotate": "PIN חדש / ביטול מכשירים שנשמרו",
+    "agent.confirm.rotate": "ליצור PIN חדש כך שכל מכשיר שנשמר יצטרך להזין אותו מחדש?",
+    "agent.btn.rotate": "PIN חדש"
   },
   "fa": {
     "doc.title.home": "Audiobus Remote",
@@ -3077,7 +3193,11 @@
     "connect.pin.bad": "PIN نادرست — {left} تلاش باقی مانده.",
     "connect.pin.failed": "PIN رد شد. PIN فعلی را بخواهید و دوباره تلاش کنید.",
     "connect.err.pinLen": "PIN ‏{len} رقمی را وارد کنید.",
-    "agent.status.pinBlocked": "تعداد زیادی PIN اشتباه — اتصال مسدود شد."
+    "agent.status.pinBlocked": "تعداد زیادی PIN اشتباه — اتصال مسدود شد.",
+    "connect.pin.remember": "به‌خاطر سپردن در این دستگاه",
+    "agent.pin.rotate": "PIN جدید / لغو دستگاه‌های ذخیره‌شده",
+    "agent.confirm.rotate": "یک PIN جدید ساخته شود تا هر دستگاه ذخیره‌شده دوباره آن را وارد کند؟",
+    "agent.btn.rotate": "PIN جدید"
   },
   "hi": {
     "doc.title.home": "Audiobus Remote",
@@ -3179,6 +3299,10 @@
     "connect.pin.bad": "गलत PIN — {left} प्रयास शेष।",
     "connect.pin.failed": "PIN अस्वीकृत। मौजूदा PIN माँगें और फिर से कोशिश करें।",
     "connect.err.pinLen": "{len}-अंकों का PIN दर्ज करें।",
-    "agent.status.pinBlocked": "बहुत अधिक गलत PIN — कनेक्शन अवरुद्ध।"
+    "agent.status.pinBlocked": "बहुत अधिक गलत PIN — कनेक्शन अवरुद्ध।",
+    "connect.pin.remember": "इस डिवाइस पर याद रखें",
+    "agent.pin.rotate": "नया PIN / याद किए गए डिवाइस हटाएँ",
+    "agent.confirm.rotate": "नया PIN बनाएँ ताकि हर याद किया गया डिवाइस उसे फिर से दर्ज करे?",
+    "agent.btn.rotate": "नया PIN"
   }
 }

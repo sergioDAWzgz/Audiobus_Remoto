@@ -621,7 +621,7 @@ _GUI_DPI_LOGGED = False   # one-time GUI-thread DPI-awareness + raw-rect diagnos
 _SHOT_SAVED = False       # one-time: save an mss screenshot on the first blocked click
 
 
-_AGENT_BUILD = "2026-10-27-stablecode"  # bumped per diagnostic build; appears in the click log
+_AGENT_BUILD = "2026-10-28-rotatepin"  # bumped per diagnostic build; appears in the click log
 
 
 def _save_debug_shot(x, y):
@@ -3281,6 +3281,34 @@ class App:
             font=("Consolas", 16, "bold"), height=1,
         )
         self.pin_label.pack(pady=(0, 6))
+
+        # "Rotate PIN / revoke remembered devices": mints a new PIN so every browser that
+        # remembered the old one must re-enter it. It lives in a FIXED-HEIGHT slot (shown
+        # only while auto-accept is on) so appearing/disappearing never resizes the locked
+        # window — the same discipline the two PIN lines above use with height=1.
+        self.rotate_slot = tk.Frame(self.root, bg=BG)
+        # Shrink the font so the (translated, sometimes long) label fits the shared box
+        # width — the same discipline the "Connect at:" URL box uses — so no language
+        # widens the compact window.
+        _rotate_pad_x = 12
+        _r_label = tr("agent.pin.rotate")
+        _r_size = 9
+        _rf = tkfont.Font(family="Segoe UI", size=_r_size)
+        while _r_size > 7 and _rf.measure(_r_label) + 2 * _rotate_pad_x > shared_w:
+            _r_size -= 1
+            _rf = tkfont.Font(family="Segoe UI", size=_r_size)
+        self.rotate_btn = RoundedButton(
+            self.rotate_slot, _r_label, NEUTRAL_BG, NEUTRAL_FG,
+            command=self._rotate_pin_click, font=_rf, min_width=0,
+            pad_x=_rotate_pad_x, pad_y=5, parent_bg=BG, border=BORDER,
+        )
+        self.rotate_btn.update_idletasks()
+        self.rotate_slot.configure(
+            width=self.rotate_btn.winfo_reqwidth(),
+            height=self.rotate_btn.winfo_reqheight(),
+        )
+        self.rotate_slot.pack_propagate(False)   # slot keeps its height when the button hides
+        self.rotate_slot.pack(pady=(0, 6))
         self._refresh_pin_label()
 
         # Theme selector (Auto / Light / Dark), applied live.
@@ -3892,10 +3920,53 @@ class App:
             pass
 
     def _refresh_pin_label(self):
-        """Show the PIN under the auto-accept box when auto-accept is on, else blank."""
+        """Show the PIN (and the rotate button) under the auto-accept box when auto-accept
+        is on, else blank. The rotate button's slot keeps its height either way, so the
+        window never resizes."""
         on = bool(self.auto_accept and self.pin)
         self.pin_caption.config(text=tr("agent.pin.caption") if on else "")
         self.pin_label.config(text=self.pin if on else "")
+        btn = getattr(self, "rotate_btn", None)
+        if btn is not None:
+            # winfo_manager() is "pack" while shown, "" after pack_forget — unlike
+            # winfo_ismapped() it tracks pack state even when the window is hidden/minimized.
+            managed = bool(btn.winfo_manager())
+            if on and not managed:
+                btn.pack()
+            elif not on and managed:
+                btn.pack_forget()
+
+    def _rotate_pin_click(self):
+        """The rotate button: confirm, then mint a new PIN (which revokes every remembered
+        device — they'll get pin-bad on their next auto-connect and must enter the new one)."""
+        if not self.auto_accept:
+            return
+        ActionDialog(
+            self.root, tr("agent.confirm.rotate"),
+            tr("agent.btn.rotate"), BRAND, COPY_FG,
+            tr("ui.cancel"), NEUTRAL_BG, NEUTRAL_FG,
+            on_pos=self._rotate_pin, on_neg=None,
+        )
+
+    def _rotate_pin(self):
+        """Mint a fresh PIN, keeping the stable code + secret, and persist it so it holds
+        across restarts. A browser that remembered the old PIN then fails its silent
+        auto-connect (pin-bad) and must re-enter the new PIN."""
+        if not self.auto_accept:
+            return
+        self.pin = _new_pin()
+        saved = _load_stable()
+        if saved and saved.get("code") and saved.get("secret"):
+            _save_stable(saved["code"], saved["secret"], self.pin)
+        elif self.client is not None:
+            # No saved identity yet (first bind still pending): re-bind so the new PIN is
+            # the one that gets stored for this code.
+            self.client.request_stable_bind(self.pin)
+        if self.client is not None:
+            self.client._pin_fails = 0
+            self.client._pin_backoff = 0
+            self.client._pin_lock_until = 0.0
+        self._refresh_pin_label()
 
     def _toggle_auto(self):
         # Order the two writes so the net thread (which reads auto_accept then pin in
