@@ -3672,8 +3672,9 @@ class App:
         self.post(self._do_end_session)
 
     def _tray_do_send_file(self):
-        # Bring the window back so the file picker has a visible parent, then pick + send.
-        self._restore_window()
+        # The native file picker appears on its own — its owner window need not be visible —
+        # and the app already has foreground rights from the tray-menu click, so don't pop
+        # the main window; just pick + send.
         self.send_file_click()
 
     def _restore_window(self):
