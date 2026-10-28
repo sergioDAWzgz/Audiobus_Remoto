@@ -136,6 +136,13 @@ except Exception:
     LOGO_HEADER_B64 = None
     LOGO_ICONS_B64 = []
 
+# System-tray icon (optional): if pystray can't be imported/initialised the agent still
+# runs, and the window's X button quits as before instead of hiding to the tray.
+try:
+    import pystray
+except Exception:
+    pystray = None
+
 
 def _resource_path(name):
     """Path to a bundled data file, in source runs and in the frozen exe."""
@@ -2533,6 +2540,7 @@ class App:
                 self._logo_small = None
 
         self._drain_after = None
+        self.tray = None
         self._build_ui()
         # Refresh our window rects / focus state immediately on move/resize/focus
         # change (the 80ms drain is only the backstop), so the click/key filter
@@ -2541,6 +2549,8 @@ class App:
             self.root.bind(_seq, lambda e: self._update_window_rects(), add="+")
         self._update_window_rects()
         self._drain_after = self.root.after(80, self._drain)
+        # Create the system-tray icon once the UI exists (best-effort; see _build_tray).
+        self._build_tray()
 
     def _build_ui(self):
         """Build (or, on a live theme switch, rebuild) the themed widgets. It reads
@@ -2662,6 +2672,23 @@ class App:
             font=("Consolas", 16, "bold"), height=1,
         )
         self.pin_label.pack(pady=(0, 6))
+
+        # "Copy PIN" — like the code's Copy button, but for the auto-accept PIN. Shown
+        # (with the PIN) only while auto-accept is on, in a fixed-height slot so the window
+        # size doesn't jump when it appears/disappears.
+        self.copy_pin_slot = tk.Frame(self.root, bg=BG)
+        self.copy_pin_btn = RoundedButton(
+            self.copy_pin_slot, tr("agent.btn.copyPin"), BRAND, COPY_FG,
+            command=self.copy_pin, font=("Segoe UI Semibold", 9), min_width=0,
+            pad_x=14, pad_y=5, parent_bg=BG,
+        )
+        self.copy_pin_btn.update_idletasks()
+        self.copy_pin_slot.configure(
+            width=self.copy_pin_btn.winfo_reqwidth(),
+            height=self.copy_pin_btn.winfo_reqheight(),
+        )
+        self.copy_pin_slot.pack_propagate(False)
+        self.copy_pin_slot.pack(pady=(0, 4))
 
         # "Rotate PIN / revoke remembered devices": mints a new PIN so every browser that
         # remembered the old one must re-enter it. It lives in a FIXED-HEIGHT slot (shown
@@ -3037,6 +3064,14 @@ class App:
         tk.Misc.tkraise(self.banner)  # window-stacking raise (Canvas.tkraise is tag_raise)
         self.banner.update_idletasks()
         self._fade_banner(True)
+        # A viewer just connected: get out of the way by minimising to the taskbar. Skip it
+        # when the window is already hidden in the tray (leave it there) so a tray-based
+        # workflow isn't yanked back to the taskbar.
+        try:
+            if self.root.state() != "withdrawn":
+                self.root.iconify()
+        except Exception:
+            pass
 
     def on_denied(self):
         self._connected = False
@@ -3381,14 +3416,15 @@ class App:
             pass
 
     def _refresh_pin_label(self):
-        """Show the PIN (and the rotate button) under the auto-accept box when auto-accept
-        is on, else blank. The rotate button's slot keeps its height either way, so the
-        window never resizes."""
+        """Show the PIN (and the Copy PIN + rotate buttons) under the auto-accept box when
+        auto-accept is on, else blank. Each button's slot keeps its height either way, so
+        the window never resizes. Also refreshes the tray menu (its PIN/code labels)."""
         on = bool(self.auto_accept and self.pin)
         self.pin_caption.config(text=tr("agent.pin.caption") if on else "")
         self.pin_label.config(text=self.pin if on else "")
-        btn = getattr(self, "rotate_btn", None)
-        if btn is not None:
+        for btn in (getattr(self, "copy_pin_btn", None), getattr(self, "rotate_btn", None)):
+            if btn is None:
+                continue
             # winfo_manager() is "pack" while shown, "" after pack_forget — unlike
             # winfo_ismapped() it tracks pack state even when the window is hidden/minimized.
             managed = bool(btn.winfo_manager())
@@ -3396,6 +3432,15 @@ class App:
                 btn.pack()
             elif not on and managed:
                 btn.pack_forget()
+        self._refresh_tray()
+
+    def copy_pin(self):
+        pin = self.pin
+        if self.auto_accept and pin:
+            self.root.clipboard_clear()
+            self.root.clipboard_append(pin)
+            self.copy_pin_btn.set_text(tr("agent.btn.copied"))
+            self.root.after(1500, lambda: self.copy_pin_btn.set_text(tr("agent.btn.copyPin")))
 
     def _rotate_pin_click(self):
         """The rotate button: confirm, then mint a new PIN (which revokes every remembered
@@ -3479,10 +3524,128 @@ class App:
         self._fade_stop(False)
         self.set_status(tr("agent.status.ended"), WARN)
 
+    # ---- System tray ------------------------------------------------------- #
+    def _build_tray(self):
+        """Create the tray icon + menu (best-effort). Without it the X button quits.
+        The menu lets the owner see/copy the code and PIN, toggle auto-accept, rotate the
+        PIN, reopen the window, or exit — all usable while the window is hidden."""
+        self.tray = None
+        if pystray is None:
+            return
+        try:
+            Item, Menu = pystray.MenuItem, pystray.Menu
+            menu = Menu(
+                Item(self._tray_code_label, self._tray_copy_code),
+                Item(self._tray_pin_label, self._tray_copy_pin,
+                     visible=lambda i: bool(self.auto_accept and self.pin)),
+                Menu.SEPARATOR,
+                Item(tr("agent.autoAccept"), self._tray_toggle_auto,
+                     checked=lambda i: bool(self.auto_accept)),
+                Item(tr("agent.pin.rotate"), self._tray_rotate,
+                     visible=lambda i: bool(self.auto_accept)),
+                Menu.SEPARATOR,
+                Item(tr("agent.tray.show"), self._tray_show, default=True),
+                Item(tr("agent.tray.exit"), self._tray_exit),
+            )
+            self.tray = pystray.Icon("audiobus-remote", self._tray_image(),
+                                     "Audiobus Remote", menu)
+            self.tray.run_detached()
+        except Exception:
+            self.tray = None
+
+    def _tray_image(self):
+        from PIL import Image
+        # A mid-size square app icon (embedded in logo.py) → crisp in the tray at any DPI.
+        for b64 in (LOGO_ICONS_B64[6:7] + LOGO_ICONS_B64[-1:]):  # 64px, else the largest
+            try:
+                return Image.open(io.BytesIO(base64.b64decode(b64)))
+            except Exception:
+                pass
+        try:
+            return Image.open(_resource_path("logo.ico"))
+        except Exception:
+            return Image.new("RGBA", (32, 32), (91, 140, 255, 255))
+
+    def _refresh_tray(self):
+        """Re-read the tray menu's dynamic labels (code / PIN) after they change."""
+        if getattr(self, "tray", None) is not None:
+            try:
+                self.tray.update_menu()
+            except Exception:
+                pass
+
+    # Dynamic menu labels (pystray evaluates these each time the menu opens / is refreshed).
+    def _tray_code_label(self, item):
+        return f"{tr('agent.sessionCode')}: {self._code or '··········'}"
+
+    def _tray_pin_label(self, item):
+        return f"{tr('agent.pin.caption')}: {self.pin}" if self.pin else tr("agent.pin.caption")
+
+    # pystray fires these on ITS OWN thread → marshal onto the Tk thread via post().
+    def _tray_copy_code(self, icon, item):
+        self.post(self.copy_code)
+
+    def _tray_copy_pin(self, icon, item):
+        self.post(self.copy_pin)
+
+    def _tray_toggle_auto(self, icon, item):
+        self.post(self._tray_do_toggle_auto)
+
+    def _tray_rotate(self, icon, item):
+        self.post(self._tray_do_rotate)
+
+    def _tray_show(self, icon, item):
+        self.post(self._restore_window)
+
+    def _tray_exit(self, icon, item):
+        self.post(self.on_tray_exit)
+
+    def _tray_do_toggle_auto(self):
+        self.auto_var.set(not self.auto_var.get())
+        self._toggle_auto()
+        self._refresh_tray()
+
+    def _tray_do_rotate(self):
+        # Rotating from the tray brings the window back and shows the usual confirm.
+        self._restore_window()
+        self._rotate_pin_click()
+
+    def _restore_window(self):
+        try:
+            self.root.deiconify()
+            self.root.state("normal")
+            self.root.lift()
+            self.root.focus_force()
+        except Exception:
+            pass
+
+    def _hide_to_tray(self):
+        try:
+            self.root.withdraw()
+        except Exception:
+            pass
+
+    def on_tray_exit(self):
+        # The real quit (from the tray's Exit). Confirm first while a viewer is connected.
+        if not self._connected:
+            self._quit()
+            return
+        self._restore_window()
+        ActionDialog(
+            self.root, tr("agent.confirm.stop"),
+            tr("agent.btn.stop"), STOP_BG, STOP_FG,
+            tr("ui.cancel"), NEUTRAL_BG, NEUTRAL_FG,
+            on_pos=self._quit, on_neg=None,
+        )
+
     def on_close(self):
-        # Closing the window quits the program (and ends the session). While a viewer
-        # is connected, confirm first (same warning as "Stop session") so an
-        # accidental close doesn't drop a live session.
+        # The window's X button: minimise to the tray (the program keeps running and a
+        # live session continues) — the owner quits from the tray's "Exit". Without a tray
+        # (pystray unavailable) fall back to the old behaviour: X quits, confirming while a
+        # viewer is connected so an accidental close doesn't drop a live session.
+        if getattr(self, "tray", None) is not None:
+            self._hide_to_tray()
+            return
         if not self._connected:
             self._quit()
             return
@@ -3505,6 +3668,12 @@ class App:
         )
 
     def _quit(self):
+        if getattr(self, "tray", None) is not None:
+            try:
+                self.tray.stop()
+            except Exception:
+                pass
+            self.tray = None
         if self.client:
             self.client.request_stop()
         self.root.after(250, self._finish)
