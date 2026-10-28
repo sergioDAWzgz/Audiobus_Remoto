@@ -3040,6 +3040,7 @@ class App:
         self._http_base = http_base
         self.code_panel.set_text(code)
         self.url_panel.set_text(tr("agent.connectAt") + "\n" + http_base + "/connect")
+        self._refresh_tray()  # show the new session code in the tray menu immediately
 
     def show_approval(self, ev, box):
         # The consent prompt is its own window now. The decision fires immediately
@@ -3576,7 +3577,9 @@ class App:
                      enabled=lambda i: bool(self._connected)),
                 Item(tr("ui.interrupt.cut"), self._tray_disconnect,
                      enabled=lambda i: bool(self._connected)),
-                Item(tr("agent.tray.show"), self._tray_show, default=True),
+                # No default item: a LEFT-click on the tray icon does nothing — the window
+                # is only reopened via this right-click menu's "Show window".
+                Item(tr("agent.tray.show"), self._tray_show),
                 Item(tr("agent.tray.exit"), self._tray_exit),
             )
             self.tray = pystray.Icon("audiobus-remote", self._tray_image(),
