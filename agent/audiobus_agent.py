@@ -628,7 +628,7 @@ _GUI_DPI_LOGGED = False   # one-time GUI-thread DPI-awareness + raw-rect diagnos
 _SHOT_SAVED = False       # one-time: save an mss screenshot on the first blocked click
 
 
-_AGENT_BUILD = "2026-10-30-vidpts"  # bumped per diagnostic build; appears in the click log
+_AGENT_BUILD = "2026-10-30-revertpts"  # bumped per diagnostic build; appears in the click log
 
 
 def _save_debug_shot(x, y):
@@ -974,7 +974,7 @@ class ScreenTrack(MediaStreamTrack):
         self.client = client
         self.mi = i
         self._interval = 1.0 / max(1, int(client.args.fps))
-        self._start = None
+        self._pts = 0
         self._next = None
 
     async def recv(self):
@@ -986,20 +986,11 @@ class ScreenTrack(MediaStreamTrack):
         delay = self._next - now
         if delay > 0:
             await asyncio.sleep(delay)
-        # Pace the next frame; if we fell behind (slow encode / network) resync to NOW rather
-        # than bursting a backlog to "catch up".
-        self._next = max(self._next + self._interval, time.time())
+        self._next += self._interval
         arr = await self._current()
         frame = av.VideoFrame.from_ndarray(arr, format="rgb24")
-        # Timestamp from REAL elapsed time, not a fixed per-frame increment. If frames are
-        # produced slower than --fps (heavy/large screen or slow software VP8 encode), the
-        # media clock still tracks wall-clock, so the viewer plays each frame as it arrives
-        # instead of drifting ever further behind a clock that runs slow — which showed up
-        # as the video lagging while input stayed instant.
-        tnow = time.time()
-        if self._start is None:
-            self._start = tnow
-        frame.pts = int((tnow - self._start) * self._CLOCK)
+        self._pts += int(self._interval * self._CLOCK)
+        frame.pts = self._pts
         frame.time_base = fractions.Fraction(1, self._CLOCK)
         return frame
 
