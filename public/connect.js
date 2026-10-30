@@ -241,6 +241,10 @@ let dismissModal = null; // close() of the open confirmation dialog, or null
 let currentCode = null; // the session code (needed to fetch ICE servers)
 let pc = null; // RTCPeerConnection carrying the per-monitor video tracks
 let trackMids = {}; // offer m-line "mid" -> monitor index (from the agent)
+let inputDC = null; // WebRTC data channel for low-latency input (null until the agent opens it)
+let inputPingTimer = null; // interval id for the input-latency probe
+let lastInputRtt = null; // most recent input round-trip (ms) measured over the data channel
+const SHOW_LAT_HUD = /[?&](hud|debug)=1/.test(location.search); // tiny on-screen latency readout
 // ---- Connection heartbeat + interruption / active reconnection ----
 const PING_MS = 1000; // send a heartbeat ping this often
 const INTERRUPT_MS = 3000; // no pong for this long -> the server link is interrupted
@@ -962,6 +966,19 @@ function openWs(code) {
 }
 
 function send(obj) {
+  // Input events (they carry "t") take the low-latency WebRTC data channel when it is
+  // open — the same peer-to-peer path as the video — instead of the Cloudflare-relayed
+  // WebSocket, whose data-center detour is the dominant input delay. Everything else
+  // (consent, signaling, clipboard, files) stays on the WebSocket. Falls back to the WS
+  // if the channel isn't up yet, so input never silently drops.
+  if (obj && obj.t !== undefined && inputDC && inputDC.readyState === "open") {
+    try {
+      inputDC.send(JSON.stringify(obj));
+      return;
+    } catch {
+      /* fall through to the WebSocket */
+    }
+  }
   if (ws && ws.readyState === 1) ws.send(JSON.stringify(obj));
 }
 
@@ -1196,6 +1213,12 @@ async function handleOffer(msg) {
 
   pc = new RTCPeerConnection({ iceServers });
 
+  // The agent (offerer) opens an "input" data channel; mouse/keyboard events ride it for
+  // low latency instead of the relayed WebSocket (see send()). Wire it up when it arrives.
+  pc.ondatachannel = (e) => {
+    if (e.channel && e.channel.label === "input") setupInputChannel(e.channel);
+  };
+
   pc.ontrack = (e) => {
     // Minimize the receiver's jitter buffer: for remote CONTROL, low latency matters
     // far more than smoothing out jitter, so target ~0 playout delay. jitterBufferTarget
@@ -1313,6 +1336,71 @@ function closePeer() {
     pc = null;
   }
   trackMids = {};
+  inputDC = null; // closed with the pc; stop probing and drop the reference
+  stopInputPing();
+}
+
+// ---- Low-latency input data channel + optional latency readout ----
+function setupInputChannel(ch) {
+  inputDC = ch;
+  // The channel may already be "open" by the time we receive it (a race); otherwise wait
+  // for the open event. Input SENDING is safe either way — send() checks readyState live —
+  // this only governs when the (optional) latency probe starts.
+  if (ch.readyState === "open") startInputPing();
+  else ch.onopen = () => startInputPing();
+  ch.onclose = () => {
+    if (inputDC === ch) inputDC = null;
+    stopInputPing();
+  };
+  ch.onmessage = (e) => {
+    // Only our own latency-probe echo comes back on this channel.
+    try {
+      const m = JSON.parse(e.data);
+      if (m && m.t === "ping" && typeof m.ts === "number") {
+        lastInputRtt = performance.now() - m.ts;
+        updateLatHud();
+      }
+    } catch {
+      /* ignore */
+    }
+  };
+}
+
+function startInputPing() {
+  stopInputPing();
+  if (!SHOW_LAT_HUD) return; // only emit probe traffic when the readout is enabled
+  inputPingTimer = setInterval(() => {
+    if (inputDC && inputDC.readyState === "open") {
+      try {
+        inputDC.send(JSON.stringify({ t: "ping", ts: performance.now() }));
+      } catch {
+        /* ignore */
+      }
+    }
+  }, 1000);
+}
+
+function stopInputPing() {
+  if (inputPingTimer) {
+    clearInterval(inputPingTimer);
+    inputPingTimer = null;
+  }
+}
+
+function updateLatHud() {
+  if (!SHOW_LAT_HUD) return;
+  let hud = document.getElementById("latHud");
+  if (!hud) {
+    hud = document.createElement("div");
+    hud.id = "latHud";
+    hud.style.cssText =
+      "position:fixed;bottom:8px;right:8px;z-index:9999;font:11px/1.4 monospace;" +
+      "background:rgba(0,0,0,.55);color:#fff;padding:3px 7px;border-radius:5px;" +
+      "pointer-events:none;";
+    document.body.appendChild(hud);
+  }
+  hud.textContent =
+    lastInputRtt != null ? "input " + Math.round(lastInputRtt) + " ms (p2p)" : "";
 }
 
 // ------------- Connection heartbeat + interruption / reconnection -------------

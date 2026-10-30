@@ -629,7 +629,7 @@ _GUI_DPI_LOGGED = False   # one-time GUI-thread DPI-awareness + raw-rect diagnos
 _SHOT_SAVED = False       # one-time: save an mss screenshot on the first blocked click
 
 
-_AGENT_BUILD = "2026-10-30-guardv2"  # bumped per diagnostic build; appears in the click log
+_AGENT_BUILD = "2026-10-30-inputdc"  # bumped per diagnostic build; appears in the click log
 
 
 def _save_debug_shot(x, y):
@@ -1438,6 +1438,7 @@ class NetClient:
         # connection with fresh ICE/TURN credentials rather than ending the session.
         self._media_gen = 0          # bumps per rebuild so a stale pc's handler bails out
         self._reneg_attempts = 0     # consecutive rebuilds without reaching "connected"
+        self._input_dc = None        # WebRTC data channel carrying viewer input (low latency)
 
     def start(self):
         threading.Thread(target=self._thread_main, daemon=True).start()
@@ -2070,21 +2071,27 @@ class NetClient:
                 # must never tear down the live session. Drop it and keep receiving.
                 continue
 
+    def _apply_input(self, msg):
+        """Apply one viewer input event (mouse/keyboard). Shared by the WebSocket path and
+        the low-latency WebRTC data channel. Only inject for an APPROVED, streaming session
+        (ignore anything before consent / during the prompt / after a deny); apply_event
+        also protects the agent's own windows."""
+        if not self.streaming:
+            return
+        apply_event(
+            msg, self.monitors,
+            getattr(self.app, "_window_rects", None),
+            self._blocked_btns, self._pressed_btns,
+            getattr(self.app, "_agent_foreground", False),
+            self._wheel_accum,
+        )
+
     async def _handle_msg(self, ws, msg):
         """Dispatch one decoded viewer/server message. Called inside _recv_loop's guard."""
         if "t" in msg:
-            # Only inject input for an APPROVED, streaming session (ignore anything sent
-            # before consent / during the prompt / after a deny), and protect the agent's
-            # own windows (see apply_event).
-            if not self.streaming:
-                return
-            apply_event(
-                msg, self.monitors,
-                getattr(self.app, "_window_rects", None),
-                self._blocked_btns, self._pressed_btns,
-                getattr(self.app, "_agent_foreground", False),
-                self._wheel_accum,
-            )
+            # Input can also arrive here over the WS (data channel not open, or an old
+            # viewer); apply it the same way. The primary path is the data channel.
+            self._apply_input(msg)
             return
         mtype = msg.get("type")
         if mtype == "want":
@@ -2423,6 +2430,33 @@ class NetClient:
                         return
                     await self._stop_stream()
                     self._report_peer_left(False)
+
+            # Low-latency INPUT path: a data channel carries the viewer's mouse/keyboard
+            # events peer-to-peer (the same fast path as the video) instead of the
+            # Cloudflare-relayed WebSocket, whose data-center detour is the dominant input
+            # delay once the video is tight. The agent (offerer) creates it so it rides the
+            # existing offer; the viewer sends input on it when open and falls back to the
+            # WS otherwise. Input still ALSO works over the WS (see _handle_msg), so an old
+            # viewer or a not-yet-open channel degrades gracefully.
+            dc = self.pc.createDataChannel("input")
+            self._input_dc = dc
+
+            @dc.on("message")
+            def _on_input_dc(message):
+                # Runs on the net loop. A tiny {"t":"ping","ts":...} is a latency probe:
+                # echo it straight back so the viewer can measure the input round-trip.
+                # Anything else is a real input event, applied exactly like the WS path.
+                try:
+                    ev = json.loads(message)
+                except Exception:
+                    return
+                if ev.get("t") == "ping":
+                    try:
+                        dc.send(message)
+                    except Exception:
+                        pass
+                    return
+                self._apply_input(ev)
 
             for m in self.monitors:
                 self.pc.addTrack(ScreenTrack(self, m["i"]))
