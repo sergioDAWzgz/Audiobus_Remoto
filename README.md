@@ -79,9 +79,9 @@ SmartScreen may warn on first run until it is code-signed.
 | Flag | Default | Meaning |
 |------|---------|---------|
 | `--server` | `$AUDIOBUS_SERVER` or built-in | Audiobus server URL |
-| `--fps` | `15` | Target frames per second |
+| `--fps` | `12` | Target frames per second |
 | `--quality` | `55` | JPEG quality (1–95) |
-| `--max-width` | `1280` | Auto-downscale frames to at most this width (lower = less video delay) |
+| `--max-width` | `1600` | Auto-downscale frames to at most this width |
 | `--scale` | auto | Fixed downscale factor instead of `--max-width` |
 | `--monitor` | `1` | Monitor to share (1 = primary, 0 = all) |
 | `--auto-accept` | off | Skip the approval prompt |

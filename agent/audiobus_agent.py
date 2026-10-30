@@ -628,7 +628,7 @@ _GUI_DPI_LOGGED = False   # one-time GUI-thread DPI-awareness + raw-rect diagnos
 _SHOT_SAVED = False       # one-time: save an mss screenshot on the first blocked click
 
 
-_AGENT_BUILD = "2026-10-30-lowlat"  # bumped per diagnostic build; appears in the click log
+_AGENT_BUILD = "2026-10-30-latok"  # bumped per diagnostic build; appears in the click log
 
 
 def _save_debug_shot(x, y):
@@ -952,9 +952,7 @@ class CaptureManager:
             ow, oh = _even(shot.width * scale), _even(shot.height * scale)
             if (ow, oh) != (shot.width, shot.height):
                 img = Image.frombytes("RGB", (shot.width, shot.height), shot.rgb)
-                # BILINEAR, not the default BICUBIC: cheaper on the capture thread so it
-                # sustains --fps; the slight extra softening on downscale is fine here.
-                arr = np.asarray(img.resize((ow, oh), Image.BILINEAR), dtype=np.uint8)
+                arr = np.asarray(img.resize((ow, oh)), dtype=np.uint8)
             else:
                 arr = np.frombuffer(shot.rgb, dtype=np.uint8).reshape(
                     (shot.height, shot.width, 3))
@@ -4364,17 +4362,11 @@ def parse_args(argv):
         default=os.environ.get("AUDIOBUS_SERVER", DEFAULT_SERVER),
         help="Audiobus server URL (default: %(default)s or $AUDIOBUS_SERVER).",
     )
-    # Defaults tuned for LOW LATENCY over sharpness: software VP8 encode time scales
-    # with pixel count, and that per-frame encode time is the constant video-delay floor
-    # (the growing part is fixed by the wall-clock PTS in ScreenTrack.recv). 1280-wide +
-    # 15fps roughly halves the encode load vs a full 1080p/20fps frame, so the encoder
-    # keeps up and frames reach the viewer sooner. Raise --max-width / --fps for a sharper
-    # or smoother picture at the cost of more delay.
-    p.add_argument("--fps", type=int, default=15, help="Target frames per second.")
+    p.add_argument("--fps", type=int, default=20, help="Target frames per second.")
     p.add_argument("--bitrate", type=int, default=None,
                    help="Best-effort max video bitrate in kbps (default: adaptive).")
     p.add_argument("--scale", type=float, default=None, help="Fixed downscale (0-1).")
-    p.add_argument("--max-width", type=int, default=1280,
+    p.add_argument("--max-width", type=int, default=1920,
                    help="Auto-downscale so frames are at most this wide.")
     p.add_argument("--monitor", type=int, default=1,
                    help="Monitor index (1 = primary, 0 = all).")
