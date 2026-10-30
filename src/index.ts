@@ -186,6 +186,11 @@ export default {
       headers.set("content-disposition", 'attachment; filename="audiobus-agent.exe"');
       headers.set("content-length", obj.size.toString());
       headers.set("etag", obj.httpEtag);
+      // The exe is replaced in place on every release at this same URL, so the browser
+      // (and any intermediary) must never serve a stale copy: a cached old build made a
+      // "re-download" silently hand back the previous version. no-store forces a fresh
+      // fetch from R2 every time; this file is downloaded rarely, so the cost is nil.
+      headers.set("cache-control", "no-store");
       return new Response(obj.body, { headers });
     }
 
