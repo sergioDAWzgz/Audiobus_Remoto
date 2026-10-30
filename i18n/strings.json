@@ -124,7 +124,7 @@
     "connect.savedSessions": "Saved sessions",
     "connect.removeSaved": "Remove",
     "connect.savedAutoHint": "PIN saved — connects automatically",
-    "agent.already_running": "Audiobus Remote is already running — open it from its icon in the system tray (near the clock)."
+    "agent.already_running": "Audiobus Remote is already running (check the system tray). Replace it with this copy?\n\nThe running copy — and any active session — will close."
   },
   "es": {
     "doc.title.home": "Audiobus Remote",
@@ -251,7 +251,7 @@
     "connect.savedSessions": "Sesiones guardadas",
     "connect.removeSaved": "Eliminar",
     "connect.savedAutoHint": "PIN guardado — se conecta automáticamente",
-    "agent.already_running": "Audiobus Remote ya se está ejecutando: ábrelo desde su icono en la bandeja del sistema (junto al reloj)."
+    "agent.already_running": "Audiobus Remote ya se está ejecutando (mira en la bandeja del sistema). ¿Reemplazarlo por esta copia?\n\nLa copia en ejecución —y cualquier sesión activa— se cerrará."
   },
   "fr": {
     "doc.title.home": "Audiobus Remote",

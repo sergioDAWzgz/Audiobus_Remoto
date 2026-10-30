@@ -31,6 +31,7 @@ import os
 import queue
 import secrets
 import ssl
+import subprocess
 import sys
 import threading
 import time
@@ -628,7 +629,7 @@ _GUI_DPI_LOGGED = False   # one-time GUI-thread DPI-awareness + raw-rect diagnos
 _SHOT_SAVED = False       # one-time: save an mss screenshot on the first blocked click
 
 
-_AGENT_BUILD = "2026-10-30-latok"  # bumped per diagnostic build; appears in the click log
+_AGENT_BUILD = "2026-10-30-guardv2"  # bumped per diagnostic build; appears in the click log
 
 
 def _save_debug_shot(x, y):
@@ -4494,21 +4495,22 @@ def _set_dpi_awareness():
 
 
 def _acquire_single_instance():
-    """Stop a SECOND agent instance from running on this machine.
+    """Detect/claim single-instance ownership on this machine.
 
-    Both instances read the same stable {code, secret} from config.json and both claim
+    Two agent copies read the same stable {code, secret} from config.json and both claim
     the SAME relay session, so each one's connect evicts the other's socket (SessionDO
     replaces the registered agent socket on every connect). The result is an endless
     flap: the code flickers between the real code and the placeholder and no viewer can
     connect. A named mutex in the per-session namespace catches the common case — a
-    fresh launch while an earlier instance is still alive (e.g. minimized to the tray).
+    fresh launch while an earlier copy is still alive (e.g. minimized to the tray).
 
-    Returns a handle to keep alive for the process lifetime (Windows frees it on exit)
-    when we are the only instance, None if another instance already holds it. On any
-    error it returns a truthy sentinel so the agent still starts (never worse than
-    before). --selfcheck does not call this, so headless checks can always run."""
+    Returns (handle, already_running): `handle` is kept alive for the process lifetime
+    (Windows frees it on exit) and, once held, makes future launches see us; it is a
+    truthy sentinel on non-Windows / any error so startup always proceeds (never worse
+    than before). `already_running` is True iff another copy already held the mutex.
+    --selfcheck does not call this, so headless checks can always run."""
     if sys.platform != "win32":
-        return True
+        return True, False
     try:
         from ctypes import wintypes
         k32 = ctypes.WinDLL("kernel32", use_last_error=True)
@@ -4517,12 +4519,50 @@ def _acquire_single_instance():
         handle = k32.CreateMutexW(None, False, "Local\\AudiobusRemoteAgent")
         err = ctypes.get_last_error()
         if not handle:
-            return True  # couldn't create the mutex at all: don't block startup
-        if err == 183:  # ERROR_ALREADY_EXISTS
-            return None
-        return handle
+            return True, False  # couldn't create the mutex at all: don't block startup
+        return handle, (err == 183)  # 183 = ERROR_ALREADY_EXISTS
     except Exception:
-        return True
+        return True, False
+
+
+def _replace_running_instance():
+    """Another copy is already running. Ask the user whether to replace it (the common
+    case being a freshly downloaded update launched while the old copy sits in the tray).
+    Returns True if the caller should PROCEED (we terminated the other copy), False if it
+    should exit and leave the running copy in place.
+
+    Only terminates when FROZEN, matching on our own exe name, so running from source in
+    development can never kill a stray python.exe by name."""
+    frozen = getattr(sys, "frozen", False)
+    try:
+        root = tk.Tk()
+        root.withdraw()
+        root.attributes("-topmost", True)
+        if not frozen:
+            # From source (dev): can't safely kill by exe name. Just inform and exit.
+            messagebox.showinfo("Audiobus Remote", tr("agent.already_running"), parent=root)
+            root.destroy()
+            return False
+        replace = messagebox.askyesno("Audiobus Remote", tr("agent.already_running"),
+                                      parent=root)
+        root.destroy()
+    except Exception:
+        return False
+    if not replace:
+        return False
+    try:
+        # Force-kill the other copy/copies of THIS exe (never ourselves). The old
+        # process's mutex handle, tray icon and relay socket are released as it dies;
+        # the DO then hands the session to our new connect (replace-on-connect).
+        exe_name = os.path.basename(sys.executable)
+        subprocess.run(
+            ["taskkill", "/F", "/IM", exe_name, "/FI", f"PID ne {os.getpid()}"],
+            creationflags=0x08000000,  # CREATE_NO_WINDOW: no console flash
+            timeout=10, capture_output=True)
+        time.sleep(0.8)  # let the old process fully release its resources
+    except Exception:
+        pass
+    return True
 
 
 def main(argv=None):
@@ -4530,18 +4570,12 @@ def main(argv=None):
     if getattr(args, "selfcheck", None):
         print(run_selfcheck(args.selfcheck))
         return
-    _instance_guard = _acquire_single_instance()
-    if _instance_guard is None:
-        # Another agent is already running on this machine (commonly minimized to the
-        # tray). A second instance would share this machine's stable code and fight the
-        # first for the relay, so stop here and point the user at the running one.
-        try:
-            _root = tk.Tk()
-            _root.withdraw()
-            messagebox.showinfo("Audiobus Remote", tr("agent.already_running"))
-            _root.destroy()
-        except Exception:
-            pass
+    # We hold `_instance_guard` for the whole run so a later launch sees us (and can
+    # offer to replace us). If another copy is already running, offer to replace it
+    # rather than silently leaving the user on the old copy (e.g. after downloading an
+    # update) — see _replace_running_instance.
+    _instance_guard, _already_running = _acquire_single_instance()
+    if _already_running and not _replace_running_instance():
         return
     try:
         App(args).run()
