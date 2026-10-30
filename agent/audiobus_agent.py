@@ -628,7 +628,7 @@ _GUI_DPI_LOGGED = False   # one-time GUI-thread DPI-awareness + raw-rect diagnos
 _SHOT_SAVED = False       # one-time: save an mss screenshot on the first blocked click
 
 
-_AGENT_BUILD = "2026-10-30-revertpts"  # bumped per diagnostic build; appears in the click log
+_AGENT_BUILD = "2026-10-30-latguard"  # bumped per diagnostic build; appears in the click log
 
 
 def _save_debug_shot(x, y):
@@ -974,23 +974,37 @@ class ScreenTrack(MediaStreamTrack):
         self.client = client
         self.mi = i
         self._interval = 1.0 / max(1, int(client.args.fps))
-        self._pts = 0
+        self._start = None
         self._next = None
 
     async def recv(self):
         if self.readyState != "live":
             raise MediaStreamError
-        now = time.time()
+        now = time.monotonic()
         if self._next is None:
             self._next = now
         delay = self._next - now
         if delay > 0:
             await asyncio.sleep(delay)
-        self._next += self._interval
+        # Pace the next frame; if we fell behind (slow encode / network) resync to NOW
+        # rather than bursting a backlog of stale frames to "catch up".
+        self._next = max(self._next + self._interval, time.monotonic())
         arr = await self._current()
         frame = av.VideoFrame.from_ndarray(arr, format="rgb24")
-        self._pts += int(self._interval * self._CLOCK)
-        frame.pts = self._pts
+        # Timestamp each frame by REAL elapsed time, not a fixed per-frame increment.
+        # When software VP8 can't sustain --fps on a large/heavy screen, aiortc calls
+        # recv() slower than fps; a fixed-increment clock then advances slower than real
+        # time, so the viewer's playout drifts ever further behind (video lags while
+        # input stays instant). An elapsed-time PTS makes each frame carry its true
+        # capture offset, so the viewer plays it as it arrives and the delay never
+        # accumulates. Use time.monotonic() (NOT time.time()): a wall-clock step from an
+        # NTP/w32time correction, sleep/resume or VM clock sync would otherwise push the
+        # RTP timestamp backward and freeze the browser's video until the clock caught
+        # up. monotonic() advances at the same real rate but can never run backward.
+        tnow = time.monotonic()
+        if self._start is None:
+            self._start = tnow
+        frame.pts = int((tnow - self._start) * self._CLOCK)
         frame.time_base = fractions.Fraction(1, self._CLOCK)
         return frame
 
@@ -4479,10 +4493,55 @@ def _set_dpi_awareness():
                    f"thread_dpi_ctx={_dpi_awareness_name()} GetDpiForSystem={dpi}]")
 
 
+def _acquire_single_instance():
+    """Stop a SECOND agent instance from running on this machine.
+
+    Both instances read the same stable {code, secret} from config.json and both claim
+    the SAME relay session, so each one's connect evicts the other's socket (SessionDO
+    replaces the registered agent socket on every connect). The result is an endless
+    flap: the code flickers between the real code and the placeholder and no viewer can
+    connect. A named mutex in the per-session namespace catches the common case — a
+    fresh launch while an earlier instance is still alive (e.g. minimized to the tray).
+
+    Returns a handle to keep alive for the process lifetime (Windows frees it on exit)
+    when we are the only instance, None if another instance already holds it. On any
+    error it returns a truthy sentinel so the agent still starts (never worse than
+    before). --selfcheck does not call this, so headless checks can always run."""
+    if sys.platform != "win32":
+        return True
+    try:
+        from ctypes import wintypes
+        k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        k32.CreateMutexW.restype = wintypes.HANDLE
+        k32.CreateMutexW.argtypes = [wintypes.LPVOID, wintypes.BOOL, wintypes.LPCWSTR]
+        handle = k32.CreateMutexW(None, False, "Local\\AudiobusRemoteAgent")
+        err = ctypes.get_last_error()
+        if not handle:
+            return True  # couldn't create the mutex at all: don't block startup
+        if err == 183:  # ERROR_ALREADY_EXISTS
+            return None
+        return handle
+    except Exception:
+        return True
+
+
 def main(argv=None):
     args = parse_args(argv if argv is not None else sys.argv[1:])
     if getattr(args, "selfcheck", None):
         print(run_selfcheck(args.selfcheck))
+        return
+    _instance_guard = _acquire_single_instance()
+    if _instance_guard is None:
+        # Another agent is already running on this machine (commonly minimized to the
+        # tray). A second instance would share this machine's stable code and fight the
+        # first for the relay, so stop here and point the user at the running one.
+        try:
+            _root = tk.Tk()
+            _root.withdraw()
+            messagebox.showinfo("Audiobus Remote", tr("agent.already_running"))
+            _root.destroy()
+        except Exception:
+            pass
         return
     try:
         App(args).run()

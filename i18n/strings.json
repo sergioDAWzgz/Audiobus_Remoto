@@ -123,7 +123,8 @@
     "connect.rememberCode": "Remember this code",
     "connect.savedSessions": "Saved sessions",
     "connect.removeSaved": "Remove",
-    "connect.savedAutoHint": "PIN saved — connects automatically"
+    "connect.savedAutoHint": "PIN saved — connects automatically",
+    "agent.already_running": "Audiobus Remote is already running — open it from its icon in the system tray (near the clock)."
   },
   "es": {
     "doc.title.home": "Audiobus Remote",
@@ -249,7 +250,8 @@
     "connect.rememberCode": "Recordar este código",
     "connect.savedSessions": "Sesiones guardadas",
     "connect.removeSaved": "Eliminar",
-    "connect.savedAutoHint": "PIN guardado — se conecta automáticamente"
+    "connect.savedAutoHint": "PIN guardado — se conecta automáticamente",
+    "agent.already_running": "Audiobus Remote ya se está ejecutando: ábrelo desde su icono en la bandeja del sistema (junto al reloj)."
   },
   "fr": {
     "doc.title.home": "Audiobus Remote",
