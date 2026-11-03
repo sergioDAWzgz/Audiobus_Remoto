@@ -290,6 +290,31 @@ def _config_path():
     return os.path.join(base, "AudiobusRemote", "config.json")
 
 
+def _pidfile_path():
+    """Where the running owner records its PID, so a replacing launch can kill that exact
+    process regardless of the exe's filename (a re-downloaded update is often saved as
+    'audiobus-agent (1).exe', which a kill-by-image-name would miss)."""
+    return os.path.join(os.path.dirname(_config_path()), "agent.pid")
+
+
+def _write_pidfile():
+    try:
+        p = _pidfile_path()
+        os.makedirs(os.path.dirname(p), exist_ok=True)
+        with open(p, "w", encoding="utf-8") as f:
+            f.write(str(os.getpid()))
+    except Exception:
+        pass
+
+
+def _read_pidfile():
+    try:
+        with open(_pidfile_path(), encoding="utf-8") as f:
+            return int(f.read().strip())
+    except Exception:
+        return None
+
+
 # The config file is written from BOTH the Tk GUI thread (theme, auto-accept toggle) and
 # the asyncio net thread (stable-identity saves in _acquire_code / _bind_stable). Serialize
 # the read-modify-write under one lock and write atomically (temp + os.replace) so the two
@@ -633,7 +658,7 @@ _GUI_DPI_LOGGED = False   # one-time GUI-thread DPI-awareness + raw-rect diagnos
 _SHOT_SAVED = False       # one-time: save an mss screenshot on the first blocked click
 
 
-_AGENT_BUILD = "2026-11-03-remb"  # bumped per diagnostic build; appears in the click log
+_AGENT_BUILD = "2026-11-03-replfix"  # bumped per diagnostic build; appears in the click log
 
 
 def _save_debug_shot(x, y):
@@ -5349,15 +5374,26 @@ def _replace_running_instance():
         return False
     if not replace:
         return False
+    # Force-kill the other copy (never ourselves). The old process's mutex handle, tray
+    # icon and relay socket are released as it dies; the DO then hands the session to our
+    # new connect (replace-on-connect), and its pre-spawned video child dies with it.
     try:
-        # Force-kill the other copy/copies of THIS exe (never ourselves). The old
-        # process's mutex handle, tray icon and relay socket are released as it dies;
-        # the DO then hands the session to our new connect (replace-on-connect).
-        exe_name = os.path.basename(sys.executable)
+        me = os.getpid()
+        # Primary: kill the exact PID the running owner recorded, plus its child tree
+        # (/T), gated to our own exe names so a stale/reused PID can't hit something else.
+        # This works even when the running copy's exe was renamed (the common
+        # 'audiobus-agent (1).exe' re-download), which a kill-by-current-name would miss.
+        pid = _read_pidfile()
+        if pid and pid != me:
+            subprocess.run(
+                ["taskkill", "/F", "/T", "/FI", f"PID eq {pid}",
+                 "/FI", "IMAGENAME eq audiobus-agent*.exe"],
+                creationflags=0x08000000, timeout=10, capture_output=True)
+        # Fallback/sweep: any audiobus-agent*.exe except us (covers a missing pidfile and
+        # the wildcard catches the renamed-download case too).
         subprocess.run(
-            ["taskkill", "/F", "/IM", exe_name, "/FI", f"PID ne {os.getpid()}"],
-            creationflags=0x08000000,  # CREATE_NO_WINDOW: no console flash
-            timeout=10, capture_output=True)
+            ["taskkill", "/F", "/IM", "audiobus-agent*.exe", "/FI", f"PID ne {me}"],
+            creationflags=0x08000000, timeout=10, capture_output=True)
         time.sleep(0.8)  # let the old process fully release its resources
     except Exception:
         pass
@@ -5384,6 +5420,9 @@ def main(argv=None):
     _instance_guard, _already_running = _acquire_single_instance()
     if _already_running and not _replace_running_instance():
         return
+    # Record our PID so a later launch can replace us precisely, even if its exe was
+    # saved under a different filename (e.g. a re-downloaded 'audiobus-agent (1).exe').
+    _write_pidfile()
     try:
         App(args).run()
     except Exception as e:
