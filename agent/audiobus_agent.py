@@ -632,7 +632,7 @@ _GUI_DPI_LOGGED = False   # one-time GUI-thread DPI-awareness + raw-rect diagnos
 _SHOT_SAVED = False       # one-time: save an mss screenshot on the first blocked click
 
 
-_AGENT_BUILD = "2026-11-03-vsplit"  # bumped per diagnostic build; appears in the click log
+_AGENT_BUILD = "2026-11-03-prespawn"  # bumped per diagnostic build; appears in the click log
 
 
 def _save_debug_shot(x, y):
@@ -1121,12 +1121,16 @@ class VideoChild:
         self.proc = None
         self._lsock = None
         self._queues = {}            # mi -> asyncio.Queue of _PreEncoded
-        self._alive = False
+        self._alive = False          # child spawned + socket up + reader running
+        self._capturing = False      # a viewer session is live (vs idle/pre-spawned)
         self._send_lock = threading.Lock()
 
-    def start(self):
-        """Spawn the child and complete the handshake. BLOCKS (run in an executor).
-        Returns True on success; on any failure the caller uses the in-process path."""
+    def spawn(self):
+        """Launch the child and connect; it then IDLES until begin(). BLOCKS (run in an
+        executor). Pre-spawned at agent startup so a viewer session starts instantly.
+        Returns True on success; re-callable to respawn a child that died while idle."""
+        if self.alive():
+            return True
         try:
             ls = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             ls.bind(("127.0.0.1", 0))
@@ -1139,34 +1143,62 @@ class VideoChild:
                 cmd = [sys.executable, os.path.abspath(__file__),
                        "--video-child", "--vport", str(port)]
             self.proc = subprocess.Popen(cmd, creationflags=_VC_CREATE_NO_WINDOW)
-            ls.settimeout(10)
+            ls.settimeout(12)
             conn, _ = ls.accept()                 # waits for the child to connect
             conn.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
             self.sock = conn
-            bitrate = (int(self.client.args.bitrate) * 1000
-                       if self.client.args.bitrate else _VC_DEFAULT_BITRATE)
-            cfg = {
-                "monitors": self.client.monitors,
-                "fps": int(self.client.args.fps),
-                "scale": self.client.args.scale,
-                "max_width": int(self.client.args.max_width),
-                "bitrate": bitrate,
-                "wanted": list(self.client.wanted or []),
-            }
-            _vc_send_frame(conn, _VC_CTL, json.dumps(cfg).encode())
-            self._queues = {m["i"]: asyncio.Queue(maxsize=90)
-                            for m in self.client.monitors}
+            try:
+                ls.close()
+            except Exception:
+                pass
+            self._lsock = None
             self._alive = True
-            threading.Thread(target=self._read_loop, daemon=True).start()
+            threading.Thread(target=self._read_loop, args=(conn,), daemon=True).start()
             return True
         except Exception:
-            self.stop()
+            self.shutdown()
             return False
 
-    def _read_loop(self):
+    def alive(self):
+        return (self.sock is not None and self._alive
+                and self.proc is not None and self.proc.poll() is None)
+
+    def begin(self):
+        """Arm a capture session (viewer approved). Fast — the child is already spawned.
+        Runs on the loop thread (creates the per-monitor queues). Returns True if armed."""
+        if not self.alive():
+            return False
+        self._queues = {m["i"]: asyncio.Queue(maxsize=90)
+                        for m in self.client.monitors}
+        self._capturing = True
+        bitrate = (int(self.client.args.bitrate) * 1000
+                   if self.client.args.bitrate else _VC_DEFAULT_BITRATE)
+        self._send_ctl({
+            "type": "start",
+            "monitors": self.client.monitors,
+            "fps": int(self.client.args.fps),
+            "scale": self.client.args.scale,
+            "max_width": int(self.client.args.max_width),
+            "bitrate": bitrate,
+            "wanted": list(self.client.wanted or []),
+        })
+        return True
+
+    def end_capture(self):
+        """End the viewer session but KEEP the child spawned and idle for the next one."""
+        self._capturing = False
+        self._send_ctl({"type": "stop-capture"})
+        for q in self._queues.values():
+            try:
+                while True:
+                    q.get_nowait()
+            except asyncio.QueueEmpty:
+                pass
+        self._queues = {}
+
+    def _read_loop(self, sock):
         """Reader THREAD: shuttle already-encoded packets from the child to the loop.
         Light work only (no capture/encode), so it barely touches the main GIL."""
-        sock = self.sock
         while self._alive:
             try:
                 t, body = _vc_recv_frame(sock)
@@ -1192,6 +1224,8 @@ class VideoChild:
         """Loop thread: enqueue a packet. A full queue means we fell behind the child;
         dropping individual inter-frames would corrupt decode, so flush and resync with
         a keyframe instead."""
+        if not self._capturing:
+            return                      # stray packet after a session ended; ignore
         q = self._queues.get(mi)
         if q is None:
             return
@@ -1212,10 +1246,12 @@ class VideoChild:
             asyncio.ensure_future(self.client._on_capture_stalled())
 
     def _fail(self):
-        """The child died or the socket dropped. If we're still streaming, treat it like
-        a capture stall so the session ends cleanly rather than freezing."""
-        if self._alive:
-            self._alive = False
+        """The child died or the socket dropped. Mark it dead (begin() will respawn next
+        session). If it died DURING a live session, end that session like a capture stall
+        rather than freezing on a still."""
+        was_capturing = self._capturing
+        self._alive = False
+        if self.client.streaming and was_capturing:
             try:
                 self.loop.call_soon_threadsafe(self._on_stall)
             except Exception:
@@ -1256,9 +1292,12 @@ class VideoChild:
     def set_wanted(self, wanted):
         self._send_ctl({"type": "wanted", "set": list(wanted or [])})
 
-    def stop(self):
-        """Tear the child down. BLOCKS briefly (run in an executor, like capture.stop)."""
+    def shutdown(self):
+        """Terminate the child for good (agent exit). BLOCKS briefly (run in an executor).
+        The child also self-exits when our socket closes, so this is belt-and-suspenders."""
         self._alive = False
+        self._capturing = False
+        self._queues = {}
         if self.sock:
             self._send_ctl({"type": "stop"})
         try:
@@ -1335,55 +1374,17 @@ def _vc_grab(sct, m, scale_fixed, max_width):
         return None
 
 
-def run_video_child(port):
-    """Child-process entry point (started via `--video-child --vport N`). Captures and
-    VP8-encodes every monitor in ITS OWN process/GIL and streams pre-encoded packets to
-    the parent. Exits when the parent says stop or the socket drops."""
-    try:
-        _set_dpi_awareness()      # same physical-pixel space as the parent (see its note)
-    except Exception:
-        pass
-    try:
-        sock = socket.create_connection(("127.0.0.1", port), timeout=15)
-        sock.settimeout(None)
-        sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-    except Exception:
-        return
-    t, body = _vc_recv_frame(sock)
-    if t != _VC_CTL:
-        return
-    cfg = json.loads(body)
-    monitors = cfg["monitors"]
+def _vc_capture_session(sock, state):
+    """Grab + VP8-encode every monitor and stream packets, until the parent stops the
+    capture (end of a viewer session), bumps the generation (reconfig), or asks us to
+    exit. Returns to idle so the SAME pre-spawned child serves the next session instantly."""
+    cfg = state["cfg"] or {}
+    monitors = cfg.get("monitors") or []
     fps = max(1, int(cfg.get("fps", 20)))
     scale_fixed = cfg.get("scale")
     max_width = int(cfg.get("max_width", 1920))
     bitrate = int(cfg.get("bitrate") or _VC_DEFAULT_BITRATE)
-
-    state = {
-        "stop": False,
-        "wanted": set(cfg.get("wanted") or [m["i"] for m in monitors]),
-        "kf": set(),
-    }
-
-    def ctl_reader():
-        while not state["stop"]:
-            t, body = _vc_recv_frame(sock)
-            if t is None:                 # parent closed -> exit
-                state["stop"] = True
-                break
-            try:
-                msg = json.loads(body)
-            except Exception:
-                continue
-            typ = msg.get("type")
-            if typ == "stop":
-                state["stop"] = True
-                break
-            elif typ == "keyframe":
-                state["kf"].add(msg.get("mi"))
-            elif typ == "wanted":
-                state["wanted"] = set(msg.get("set") or [m["i"] for m in monitors])
-    threading.Thread(target=ctl_reader, daemon=True).start()
+    my_gen = state["gen"]
 
     IDLE_INTERVAL = 0.5          # unwanted monitors: ~2 fps (matches CaptureManager)
     STALE_SECS = 8.0
@@ -1395,7 +1396,7 @@ def run_video_child(port):
     stall_sent = False
 
     with ScreenGrabber() as sct:
-        while not state["stop"]:
+        while (state["capturing"] and not state["stop"] and state["gen"] == my_gen):
             now = time.time()
             for m in monitors:
                 mi = m["i"]
@@ -1442,6 +1443,66 @@ def run_video_child(port):
                     pass
             sleep = max(0.003, full_interval - (time.time() - now))
             time.sleep(sleep)
+
+
+def run_video_child(port):
+    """Child-process entry point (started via `--video-child --vport N`). Connects back to
+    the parent and IDLES until told to capture, so the parent can pre-spawn it at startup
+    and a viewer session then begins instantly (no process-launch / import delay). Captures
+    + VP8-encodes every monitor in ITS OWN process/GIL between 'start' and 'stop-capture';
+    exits on 'stop' or when the parent's socket drops."""
+    try:
+        _set_dpi_awareness()      # same physical-pixel space as the parent (see its note)
+    except Exception:
+        pass
+    try:
+        sock = socket.create_connection(("127.0.0.1", port), timeout=15)
+        sock.settimeout(None)
+        sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+    except Exception:
+        return
+
+    state = {"stop": False, "capturing": False, "cfg": None,
+             "wanted": set(), "kf": set(), "gen": 0}
+
+    def ctl_reader():
+        while not state["stop"]:
+            t, body = _vc_recv_frame(sock)
+            if t is None:                 # parent closed / died -> exit
+                state["stop"] = True
+                break
+            try:
+                msg = json.loads(body)
+            except Exception:
+                continue
+            typ = msg.get("type")
+            if typ == "start":
+                mons = msg.get("monitors") or []
+                state["cfg"] = msg
+                state["wanted"] = set(msg.get("wanted") or [m["i"] for m in mons])
+                state["kf"] = {m["i"] for m in mons}   # keyframe every monitor on (re)start
+                state["gen"] += 1
+                state["capturing"] = True
+            elif typ == "stop-capture":
+                state["capturing"] = False               # back to idle; process stays alive
+            elif typ == "keyframe":
+                state["kf"].add(msg.get("mi"))
+            elif typ == "wanted":
+                mons = (state["cfg"] or {}).get("monitors") or []
+                state["wanted"] = set(msg.get("set") or [m["i"] for m in mons])
+            elif typ == "stop":
+                state["stop"] = True
+                break
+    threading.Thread(target=ctl_reader, daemon=True).start()
+
+    while not state["stop"]:
+        if not state["capturing"]:
+            time.sleep(0.03)                 # idle: cheap wait for the next 'start'
+            continue
+        try:
+            _vc_capture_session(sock, state)
+        except Exception:
+            state["capturing"] = False       # never let one session's error kill the child
     try:
         sock.close()
     except Exception:
@@ -1797,7 +1858,9 @@ class NetClient:
         self.pc = None              # RTCPeerConnection carrying the video tracks
         self.capture = None         # CaptureManager (in-process fallback: grab -> slots)
         self.vchild = None          # VideoChild (preferred: capture+encode in a child proc)
-        self._using_vchild = False  # True once the child started; else the capture fallback
+        self._using_vchild = False  # this session streams via the child (else the fallback)
+        self._video_child_ok = False  # the child pre-spawned ok (persists across sessions)
+        self._prespawn_task = None  # background task that pre-spawns the idle child
         self.blockrects_task = None # keeps the viewer's blocked-cursor regions fresh
         self.monitors = []          # list of {"i","left","top","width","height"}
         self.primary = None         # convenience handle to monitors[0]
@@ -2278,6 +2341,12 @@ class NetClient:
         self.primary = self.monitors[0] if self.monitors else None
         # Default: stream every monitor until the viewer sends a "want" message.
         self.wanted = [m["i"] for m in self.monitors]
+        # Pre-spawn the capture/encode child NOW (idle), overlapping the server handshake,
+        # so the first frame appears instantly when a viewer is approved instead of waiting
+        # for a process launch. Best-effort; falls back to in-process capture if it can't.
+        if not getattr(self.args, "no_video_subprocess", False):
+            self.vchild = VideoChild(self)
+            self._prespawn_task = asyncio.ensure_future(self._prespawn_video_child())
         if _CLICK_DEBUG:
             try:
                 aw = ctypes.c_int()
@@ -2684,6 +2753,18 @@ class NetClient:
         self._left_reported = True
         self.app.post(lambda: self.app.on_peer_left(local))
 
+    async def _prespawn_video_child(self):
+        """Launch the idle capture/encode child in the background at startup so a session
+        later begins instantly. Best-effort: on failure the next session uses the
+        in-process capture path."""
+        try:
+            ok = await self.loop.run_in_executor(None, self.vchild.spawn)
+        except Exception:
+            ok = False
+        self._video_child_ok = ok
+        if not ok:
+            self.vchild = None
+
     async def _on_capture_stalled(self):
         """Screen capture stopped producing frames (lock screen, UAC/secure desktop,
         a display change, ...). End the session so the viewer drops out instead of
@@ -2833,19 +2914,28 @@ class NetClient:
             await ws.send(json.dumps({"type": "caps", "clip": True, "file": True}))
         except Exception:
             pass
-        # Start the video SOURCE, then open the WebRTC connection. Preferred: a child
-        # process that captures + VP8-encodes on its own GIL, so this process's loop
-        # stays free for input even while the encoder is busy. If the child can't start
-        # (blocked by AV, etc.), fall back to the in-process CaptureManager so video
-        # still works — exactly the old behaviour.
+        # Start the video SOURCE, then open the WebRTC connection. Preferred: the child
+        # process (pre-spawned at startup) that captures + VP8-encodes on its own GIL, so
+        # this process's loop stays free for input even while the encoder is busy — begin()
+        # just arms it, so the first frame is immediate. If the child isn't available
+        # (blocked by AV, or it died while idle and a respawn fails), fall back to the
+        # in-process CaptureManager so video still works — exactly the old behaviour.
         self._using_vchild = False
-        self.vchild = None
         self.capture = None
         if not getattr(self.args, "no_video_subprocess", False):
-            vc = VideoChild(self)
-            if await self.loop.run_in_executor(None, vc.start):
-                self.vchild = vc
-                self._using_vchild = True
+            # Wait out the startup pre-spawn if it's still in flight (usually already done,
+            # since it overlapped the server handshake).
+            if self._prespawn_task is not None:
+                try:
+                    await asyncio.wait_for(asyncio.shield(self._prespawn_task), timeout=12)
+                except Exception:
+                    pass
+            vc = self.vchild
+            if vc is not None:
+                if not vc.alive():          # died while idle: respawn (one-off delay)
+                    self._video_child_ok = await self.loop.run_in_executor(None, vc.spawn)
+                if vc.alive() and vc.begin():
+                    self._using_vchild = True
         if not self._using_vchild:
             self.capture = CaptureManager(self)
             self.capture.start()
@@ -3206,13 +3296,12 @@ class NetClient:
                     self.loop.run_in_executor(None, cap.stop), timeout=HB_INTERRUPT_SECS)
             except Exception:
                 pass
-        if self.vchild:
-            vc = self.vchild
-            self.vchild = None
+        if self._using_vchild and self.vchild is not None:
+            # End the session but KEEP the child spawned and idle, so the next session
+            # starts instantly. end_capture() is quick (a control message + queue drain).
             self._using_vchild = False
             try:
-                await asyncio.wait_for(
-                    self.loop.run_in_executor(None, vc.stop), timeout=HB_INTERRUPT_SECS)
+                self.vchild.end_capture()
             except Exception:
                 pass
 
@@ -5052,9 +5141,11 @@ def run_selfcheck_vsplit(out_path):
         client._on_capture_stalled = _stall
 
         vc = VideoChild(client)
-        if not await loop.run_in_executor(None, vc.start):
-            return 0
         client.vchild = vc
+        if not await loop.run_in_executor(None, vc.spawn):   # pre-spawn (idle)
+            return 0
+        if not vc.begin():                                   # arm the session
+            return 0
         sender = RTCPeerConnection()
         receiver = RTCPeerConnection()
         sender.addTrack(PreEncTrack(client, 0))
@@ -5092,7 +5183,7 @@ def run_selfcheck_vsplit(out_path):
             await asyncio.sleep(0.1)
             if len(frames) >= 3:
                 break
-        await loop.run_in_executor(None, vc.stop)
+        await loop.run_in_executor(None, vc.shutdown)
         try:
             await asyncio.wait_for(
                 asyncio.gather(sender.close(), receiver.close()), timeout=4)
