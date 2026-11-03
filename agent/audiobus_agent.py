@@ -629,7 +629,7 @@ _GUI_DPI_LOGGED = False   # one-time GUI-thread DPI-awareness + raw-rect diagnos
 _SHOT_SAVED = False       # one-time: save an mss screenshot on the first blocked click
 
 
-_AGENT_BUILD = "2026-11-03-netprio"  # bumped per diagnostic build; appears in the click log
+_AGENT_BUILD = "2026-11-03-netprio2"  # bumped per diagnostic build; appears in the click log
 
 
 def _save_debug_shot(x, y):
@@ -1783,17 +1783,27 @@ class NetClient:
         # -> the "input" data-channel callback -> pynput, plus the ?hud=1 ping echo.
         # It is otherwise a plain default-priority daemon. When something heavy runs
         # on the remote machine (e.g. opening a browser tab spawns processes while
-        # VP8 encodes a big screen delta on several cores), Windows deschedules this
-        # background thread — and even boosts the freshly-opened foreground app — so
-        # the inbound input packet sits in the socket buffer for tens-to-hundreds of
-        # ms before we service it. Nudging JUST this thread to ABOVE_NORMAL lets it
-        # preempt the normal-priority contenders for its short, bursty work and keeps
-        # input responsive under load. Deliberately NOT higher than ABOVE_NORMAL and
-        # NOT a process-wide class bump: the loop also does a per-frame ~6 MB frame
-        # copy, so HIGHEST would preempt the (normal-priority, off-loop) VP8 encoder
-        # every frame and bring video latency back, and a process bump would make the
-        # agent outrank the very app the viewer is operating. The encode/capture
-        # threads stay at normal priority. Best-effort; never fatal.
+        # VP8 encodes a big screen delta on several cores), two things delay input:
+        #   (1) SCHEDULING: Windows foreground-boosts the freshly-opened app's threads
+        #       to ~prio 10, ABOVE a plain/ABOVE_NORMAL net thread, so our inbound
+        #       packet waits in the socket buffer. Measured: ABOVE_NORMAL still spiked
+        #       to ~130ms on tab-open. Fix: run this thread at HIGHEST (prio 11) so it
+        #       outranks even foreground-boosted threads for its short, bursty work.
+        #       Still NOT a process-wide class bump (that would make the agent outrank
+        #       the very app the viewer is operating) and NOT TIME_CRITICAL. The loop
+        #       does little per-frame CPU (the ~6 MB frame copy is brief and this is a
+        #       multi-core host), so it does not meaningfully preempt the off-loop VP8
+        #       encoder/capture threads — i.e. no return of the old video-lag revert.
+        #   (2) GIL HANDOFF: continuous heavy change (e.g. scrolling) keeps the encode
+        #       executor thread holding the GIL in bursts; the net thread, though
+        #       scheduled, waits to re-acquire it. A shorter switch interval (default
+        #       5ms -> 1ms) hands the GIL back to the waiting loop sooner. Measured
+        #       in-process contention tops out ~30ms, matching the scroll-case spike.
+        # Both are best-effort; never fatal.
+        try:
+            sys.setswitchinterval(0.001)
+        except Exception:
+            pass
         if sys.platform == "win32":
             try:
                 _k = ctypes.windll.kernel32
@@ -1807,9 +1817,9 @@ class NetClient:
                 _k.SetThreadPriority.restype = wintypes.BOOL
                 _k.GetThreadPriority.argtypes = [wintypes.HANDLE]
                 _k.GetThreadPriority.restype = ctypes.c_int
-                _THREAD_PRIORITY_ABOVE_NORMAL = 1
+                _THREAD_PRIORITY_HIGHEST = 2
                 _h = _k.GetCurrentThread()
-                _ok = _k.SetThreadPriority(_h, _THREAD_PRIORITY_ABOVE_NORMAL)
+                _ok = _k.SetThreadPriority(_h, _THREAD_PRIORITY_HIGHEST)
                 _click_log(f"[diag build={_AGENT_BUILD} net_thread_priority "
                            f"set_ok={bool(_ok)} now={_k.GetThreadPriority(_h)}]")
             except Exception:
