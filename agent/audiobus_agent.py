@@ -629,7 +629,7 @@ _GUI_DPI_LOGGED = False   # one-time GUI-thread DPI-awareness + raw-rect diagnos
 _SHOT_SAVED = False       # one-time: save an mss screenshot on the first blocked click
 
 
-_AGENT_BUILD = "2026-10-30-inputdc"  # bumped per diagnostic build; appears in the click log
+_AGENT_BUILD = "2026-11-03-netprio"  # bumped per diagnostic build; appears in the click log
 
 
 def _save_debug_shot(x, y):
@@ -1777,6 +1777,43 @@ class NetClient:
             _save_stable(code, secret, pin)
 
     async def _run(self):
+        # Keep input instant even when the agent machine is briefly CPU-saturated.
+        # This coroutine (and the whole asyncio loop) runs on the net thread, which
+        # carries the ENTIRE inbound-input path single-threaded: UDP -> DTLS -> SCTP
+        # -> the "input" data-channel callback -> pynput, plus the ?hud=1 ping echo.
+        # It is otherwise a plain default-priority daemon. When something heavy runs
+        # on the remote machine (e.g. opening a browser tab spawns processes while
+        # VP8 encodes a big screen delta on several cores), Windows deschedules this
+        # background thread — and even boosts the freshly-opened foreground app — so
+        # the inbound input packet sits in the socket buffer for tens-to-hundreds of
+        # ms before we service it. Nudging JUST this thread to ABOVE_NORMAL lets it
+        # preempt the normal-priority contenders for its short, bursty work and keeps
+        # input responsive under load. Deliberately NOT higher than ABOVE_NORMAL and
+        # NOT a process-wide class bump: the loop also does a per-frame ~6 MB frame
+        # copy, so HIGHEST would preempt the (normal-priority, off-loop) VP8 encoder
+        # every frame and bring video latency back, and a process bump would make the
+        # agent outrank the very app the viewer is operating. The encode/capture
+        # threads stay at normal priority. Best-effort; never fatal.
+        if sys.platform == "win32":
+            try:
+                _k = ctypes.windll.kernel32
+                # Explicit signatures are REQUIRED: GetCurrentThread() returns the
+                # pseudo-handle (HANDLE)-2; without restype=HANDLE ctypes truncates it
+                # to a 32-bit int on 64-bit Windows and SetThreadPriority silently
+                # fails (verified — it returns 0 / the priority never changes).
+                _k.GetCurrentThread.restype = wintypes.HANDLE
+                _k.GetCurrentThread.argtypes = []
+                _k.SetThreadPriority.argtypes = [wintypes.HANDLE, ctypes.c_int]
+                _k.SetThreadPriority.restype = wintypes.BOOL
+                _k.GetThreadPriority.argtypes = [wintypes.HANDLE]
+                _k.GetThreadPriority.restype = ctypes.c_int
+                _THREAD_PRIORITY_ABOVE_NORMAL = 1
+                _h = _k.GetCurrentThread()
+                _ok = _k.SetThreadPriority(_h, _THREAD_PRIORITY_ABOVE_NORMAL)
+                _click_log(f"[diag build={_AGENT_BUILD} net_thread_priority "
+                           f"set_ok={bool(_ok)} now={_k.GetThreadPriority(_h)}]")
+            except Exception:
+                pass
         self.loop = asyncio.get_event_loop()
         self.stop_event = asyncio.Event()
         # Create the viewer-admission lock on THIS (net-thread) loop, like stop_event.
