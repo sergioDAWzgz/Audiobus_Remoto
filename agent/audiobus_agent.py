@@ -666,7 +666,7 @@ _GUI_DPI_LOGGED = False   # one-time GUI-thread DPI-awareness + raw-rect diagnos
 _SHOT_SAVED = False       # one-time: save an mss screenshot on the first blocked click
 
 
-_AGENT_BUILD = "2026-11-03-adminprio"  # bumped per diagnostic build; appears in the click log
+_AGENT_BUILD = "2026-11-03-skipstatic"  # bumped per diagnostic build; appears in the click log
 
 
 def _save_debug_shot(x, y):
@@ -1410,16 +1410,15 @@ def _vc_make_encoder(w, h, bitrate):
     return cc
 
 
-def _vc_grab(sct, m, scale_fixed, max_width):
-    """One monitor grab + optional downscale -> contiguous RGB array (mirrors
-    CaptureManager._grab). GIL-held, but it runs in the CHILD process."""
+def _vc_convert(shot, scale_fixed, max_width):
+    """An mss ScreenShot -> optionally-downscaled contiguous RGB array (the per-frame
+    copy path). Split from the grab so the caller can skip it for an unchanged frame.
+    GIL-held, but it runs in the CHILD process."""
     try:
-        shot = sct.grab({"left": m["left"], "top": m["top"],
-                         "width": m["width"], "height": m["height"]})
         if scale_fixed:
             scale = scale_fixed
-        elif m["width"] > 0:
-            scale = min(1.0, max_width / m["width"])
+        elif shot.width > 0:
+            scale = min(1.0, max_width / shot.width)
         else:
             scale = 1.0
         ow, oh = _even(shot.width * scale), _even(shot.height * scale)
@@ -1448,10 +1447,17 @@ def _vc_capture_session(sock, state):
 
     IDLE_INTERVAL = 0.5          # unwanted monitors: ~2 fps (matches CaptureManager)
     STALE_SECS = 8.0
+    # Static-screen skip: if a grab is byte-identical to the last one we encoded, don't
+    # re-encode/send it (no CPU for the 3 per-frame copies + VP8, no bandwidth). Force one
+    # frame through at least this often anyway so the viewer's 3s stall detector
+    # (STALE_MS in connect.js) never trips on a motionless screen.
+    MAX_SKIP_STATIC = 1.0
     full_interval = 1.0 / fps
-    encoders = {}               # mi -> (cc, w, h)
+    encoders = {}               # mi -> (cc, w, h, bitrate)
     starts = {}                 # mi -> monotonic start (elapsed-time PTS per monitor)
     last = {m["i"]: 0.0 for m in monitors}
+    last_raw = {}               # mi -> raw bytes of the last ENCODED grab (change detect)
+    last_sent = {}              # mi -> monotonic time we last encoded+sent a frame
     last_ok = time.monotonic()
     stall_sent = False
 
@@ -1465,10 +1471,26 @@ def _vc_capture_session(sock, state):
                 if not force_kf and (now - last[mi] < interval):
                     continue
                 last[mi] = now
-                arr = _vc_grab(sct, m, scale_fixed, max_width)
+                try:
+                    shot = sct.grab({"left": m["left"], "top": m["top"],
+                                     "width": m["width"], "height": m["height"]})
+                except Exception:
+                    continue
+                last_ok = time.monotonic()  # capture is working (grab succeeded)
+                # Skip an unchanged screen: compare the raw grab (BGRA, pre-conversion) to
+                # the last one we encoded. Never skip a requested keyframe, and force one
+                # through every MAX_SKIP_STATIC s so the viewer's stall detector stays happy.
+                raw = getattr(shot, "raw", None)
+                if (raw is not None and not force_kf and last_raw.get(mi) is not None
+                        and raw == last_raw[mi]
+                        and (time.monotonic() - last_sent.get(mi, 0.0)) < MAX_SKIP_STATIC):
+                    continue
+                arr = _vc_convert(shot, scale_fixed, max_width)
                 if arr is None:
                     continue
-                last_ok = time.monotonic()
+                if raw is not None:
+                    last_raw[mi] = bytes(raw)   # copy: mss may reuse its grab buffer
+                last_sent[mi] = time.monotonic()
                 h, w = int(arr.shape[0]), int(arr.shape[1])
                 # Desired bitrate = the viewer's latest REMB estimate for this monitor,
                 # bounded to [MIN, session default]; or the session bitrate as-is when no
