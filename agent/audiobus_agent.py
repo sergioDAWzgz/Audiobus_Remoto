@@ -64,6 +64,7 @@ try:
     )
     from aiortc.mediastreams import MediaStreamError
     from aiortc.sdp import candidate_from_sdp
+    from aiortc.codecs.vpx import Vp8Encoder
 except ImportError as exc:  # pragma: no cover - dependency guard
     try:
         messagebox.showerror(
@@ -632,7 +633,7 @@ _GUI_DPI_LOGGED = False   # one-time GUI-thread DPI-awareness + raw-rect diagnos
 _SHOT_SAVED = False       # one-time: save an mss screenshot on the first blocked click
 
 
-_AGENT_BUILD = "2026-11-03-prespawn"  # bumped per diagnostic build; appears in the click log
+_AGENT_BUILD = "2026-11-03-remb"  # bumped per diagnostic build; appears in the click log
 
 
 def _save_debug_shot(x, y):
@@ -1046,7 +1047,8 @@ class ScreenTrack(MediaStreamTrack):
 # ---------------------------------------------------------------------------
 _VC_CLOCK = 90000
 _VC_PKT, _VC_CTL, _VC_STALL = 1, 2, 3           # frame type bytes
-_VC_DEFAULT_BITRATE = 1_500_000                  # bps when --bitrate is unset
+_VC_DEFAULT_BITRATE = 1_500_000                  # bps when --bitrate is unset (= aiortc max)
+_VC_MIN_BITRATE = 250_000                        # floor REMB can adapt down to (= aiortc min)
 _VC_CREATE_NO_WINDOW = 0x08000000
 
 
@@ -1088,6 +1090,26 @@ class _PreEncoded:
 
     def __bytes__(self):
         return self._d
+
+
+class _ForwardingVp8Encoder(Vp8Encoder):
+    """Pre-installed on a video sender so aiortc PACKS our child's pre-encoded VP8 (the
+    inherited pack()), while the viewer's REMB bandwidth estimate — which aiortc delivers
+    by setting target_bitrate — is forwarded to the child so it can actually adapt its
+    encode bitrate. aiortc clamps the value to [250k, 1.5M] in the base setter before we
+    forward it. Only used when --bitrate is unset (otherwise the child stays fixed)."""
+
+    def __init__(self, on_bitrate):
+        super().__init__()
+        self._on_bitrate = on_bitrate
+
+    @Vp8Encoder.target_bitrate.setter
+    def target_bitrate(self, bitrate):
+        Vp8Encoder.target_bitrate.fset(self, bitrate)   # clamp [MIN, MAX] + store
+        try:
+            self._on_bitrate(self.target_bitrate)        # forward the clamped value
+        except Exception:
+            pass
 
 
 class PreEncTrack(MediaStreamTrack):
@@ -1292,6 +1314,11 @@ class VideoChild:
     def set_wanted(self, wanted):
         self._send_ctl({"type": "wanted", "set": list(wanted or [])})
 
+    def set_bitrate(self, mi, bps):
+        """Forward the viewer's REMB bandwidth estimate for one monitor to the child,
+        which re-tunes that monitor's encoder (only when --bitrate is unset)."""
+        self._send_ctl({"type": "bitrate", "mi": int(mi), "bps": int(bps)})
+
     def shutdown(self):
         """Terminate the child for good (agent exit). BLOCKS briefly (run in an executor).
         The child also self-exits when our socket closes, so this is belt-and-suspenders."""
@@ -1410,9 +1437,18 @@ def _vc_capture_session(sock, state):
                     continue
                 last_ok = time.monotonic()
                 h, w = int(arr.shape[0]), int(arr.shape[1])
+                # Desired bitrate = the viewer's latest REMB estimate for this monitor,
+                # bounded to [MIN, session default]; or the session bitrate as-is when no
+                # REMB has arrived (so a pinned --bitrate, including one under the REMB
+                # floor, is honored exactly). Recreate the encoder on a dimension or >10%
+                # bitrate change (as aiortc's own encoder does).
+                remb = state["bitrates"].get(mi)
+                desired = (max(_VC_MIN_BITRATE, min(int(remb), bitrate))
+                           if remb is not None else bitrate)
                 enc = encoders.get(mi)
-                if enc is None or enc[1] != w or enc[2] != h:
-                    enc = (_vc_make_encoder(w, h, bitrate), w, h)
+                if (enc is None or enc[1] != w or enc[2] != h
+                        or abs(desired - enc[3]) / enc[3] > 0.1):
+                    enc = (_vc_make_encoder(w, h, desired), w, h, desired)
                     encoders[mi] = enc
                     starts.setdefault(mi, time.monotonic())
                 cc = enc[0]
@@ -1463,7 +1499,7 @@ def run_video_child(port):
         return
 
     state = {"stop": False, "capturing": False, "cfg": None,
-             "wanted": set(), "kf": set(), "gen": 0}
+             "wanted": set(), "kf": set(), "gen": 0, "bitrates": {}}
 
     def ctl_reader():
         while not state["stop"]:
@@ -1481,6 +1517,7 @@ def run_video_child(port):
                 state["cfg"] = msg
                 state["wanted"] = set(msg.get("wanted") or [m["i"] for m in mons])
                 state["kf"] = {m["i"] for m in mons}   # keyframe every monitor on (re)start
+                state["bitrates"] = {}                  # fresh session: back to the default
                 state["gen"] += 1
                 state["capturing"] = True
             elif typ == "stop-capture":
@@ -1490,6 +1527,10 @@ def run_video_child(port):
             elif typ == "wanted":
                 mons = (state["cfg"] or {}).get("monitors") or []
                 state["wanted"] = set(msg.get("set") or [m["i"] for m in mons])
+            elif typ == "bitrate":
+                mi, bps = msg.get("mi"), msg.get("bps")
+                if mi is not None and bps:
+                    state["bitrates"][mi] = int(bps)     # REMB: adapt this monitor's encoder
             elif typ == "stop":
                 state["stop"] = True
                 break
@@ -3059,6 +3100,15 @@ class NetClient:
                             pass
                         vc.request_keyframe(mi)
                     sender._send_keyframe = _wrapped
+                    # Adapt the child's encode bitrate to the viewer's REMB estimate by
+                    # pre-installing an encoder that forwards it (only when the user hasn't
+                    # pinned --bitrate). Keeps aiortc's pack() path for the pre-encoded data.
+                    if self.args.bitrate is None:
+                        try:
+                            sender._RTCRtpSender__encoder = _ForwardingVp8Encoder(
+                                lambda bps, mi=mi: vc.set_bitrate(mi, bps))
+                        except Exception:
+                            pass
                 vc.flush_and_keyframe()
 
             await self.pc.setLocalDescription(await self.pc.createOffer())
