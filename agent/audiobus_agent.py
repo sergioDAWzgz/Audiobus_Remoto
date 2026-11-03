@@ -59,12 +59,14 @@ try:
         RTCConfiguration,
         RTCIceServer,
         RTCPeerConnection,
+        RTCRtpSender,
         RTCSessionDescription,
         MediaStreamTrack,
     )
     from aiortc.mediastreams import MediaStreamError
     from aiortc.sdp import candidate_from_sdp
     from aiortc.codecs.vpx import Vp8Encoder
+    from aiortc.codecs.h264 import H264Encoder
 except ImportError as exc:  # pragma: no cover - dependency guard
     try:
         messagebox.showerror(
@@ -666,7 +668,7 @@ _GUI_DPI_LOGGED = False   # one-time GUI-thread DPI-awareness + raw-rect diagnos
 _SHOT_SAVED = False       # one-time: save an mss screenshot on the first blocked click
 
 
-_AGENT_BUILD = "2026-11-03-skipstatic"  # bumped per diagnostic build; appears in the click log
+_AGENT_BUILD = "2026-11-03-h264r"  # bumped per diagnostic build; appears in the click log
 
 
 def _save_debug_shot(x, y):
@@ -1145,6 +1147,25 @@ class _ForwardingVp8Encoder(Vp8Encoder):
             pass
 
 
+class _ForwardingH264Encoder(H264Encoder):
+    """H264 counterpart of _ForwardingVp8Encoder: aiortc PACKS our child's pre-encoded
+    H264 (inherited pack()) and forwards the viewer's REMB estimate to the child."""
+
+    def __init__(self, on_bitrate):
+        super().__init__()
+        self._on_bitrate = on_bitrate
+
+    @H264Encoder.target_bitrate.setter
+    def target_bitrate(self, bitrate):
+        H264Encoder.target_bitrate.fset(self, bitrate)   # aiortc's own bookkeeping (clamps >=500k)
+        try:
+            # Forward the RAW estimate, not aiortc's 500k-floored value: the child floors at
+            # _VC_MIN_BITRATE (250k), so this lets H264 back off as far as VP8 on weak links.
+            self._on_bitrate(int(bitrate))
+        except Exception:
+            pass
+
+
 class PreEncTrack(MediaStreamTrack):
     """One per monitor; recv() yields pre-encoded VP8 packets from the child process."""
     kind = "video"
@@ -1175,9 +1196,11 @@ class VideoChild:
         self.sock = None
         self.proc = None
         self._lsock = None
-        self._queues = {}            # mi -> asyncio.Queue of _PreEncoded
+        self._queues = {}            # mi -> asyncio.Queue of (pts, encoded-bytes)
         self._alive = False          # child spawned + socket up + reader running
         self._capturing = False      # a viewer session is live (vs idle/pre-spawned)
+        self.encoder_name = "libvpx"  # chosen encoder (set once after spawn/probe)
+        self.codec_family = "vp8"     # "vp8" or "h264" (how recv wraps + how we negotiate)
         self._send_lock = threading.Lock()
 
     def spawn(self):
@@ -1207,6 +1230,23 @@ class VideoChild:
             except Exception:
                 pass
             self._lsock = None
+            # Codec handshake: the CHILD probes the encoder (so a GPU-driver crash on the
+            # probe kills only the child) and reports it back; we learn the codec here,
+            # BEFORE any session negotiates, so the negotiated SDP and the child's actual
+            # output can never diverge. A dead/silent child here -> fall back to in-process.
+            prefer = getattr(self.client.args, "video_codec", "auto") or "auto"
+            pw = int(getattr(self.client.args, "max_width", 1920) or 1920)
+            ph = max(2, (pw * 9 // 16) & ~1)      # even 16:9 height for the probe
+            _vc_send_frame(conn, _VC_CTL, json.dumps(
+                {"type": "hello", "prefer": prefer, "probe_w": pw, "probe_h": ph}).encode())
+            conn.settimeout(25)                   # allow a slow hardware probe
+            t, body = _vc_recv_frame(conn)
+            conn.settimeout(None)
+            msg = json.loads(body) if t == _VC_CTL else {}
+            if msg.get("type") != "codec":
+                raise RuntimeError("video child handshake failed")
+            self.encoder_name = msg.get("encoder") or "libvpx"
+            self.codec_family = _vc_family(self.encoder_name)
             self._alive = True
             threading.Thread(target=self._read_loop, args=(conn,), daemon=True).start()
             return True
@@ -1236,6 +1276,7 @@ class VideoChild:
             "max_width": int(self.client.args.max_width),
             "bitrate": bitrate,
             "wanted": list(self.client.wanted or []),
+            "encoder": self.encoder_name,
         })
         return True
 
@@ -1264,9 +1305,9 @@ class VideoChild:
                 break
             if t == _VC_PKT:
                 mi, _kf, pts = struct.unpack(">BBq", body[:10])
-                pre = _PreEncoded(body[10:], pts)
+                data = body[10:]
                 try:
-                    self.loop.call_soon_threadsafe(self._deliver, mi, pre)
+                    self.loop.call_soon_threadsafe(self._deliver, mi, pts, data)
                 except Exception:
                     break
             elif t == _VC_STALL:
@@ -1275,10 +1316,10 @@ class VideoChild:
                 except Exception:
                     pass
 
-    def _deliver(self, mi, pre):
-        """Loop thread: enqueue a packet. A full queue means we fell behind the child;
-        dropping individual inter-frames would corrupt decode, so flush and resync with
-        a keyframe instead."""
+    def _deliver(self, mi, pts, data):
+        """Loop thread: enqueue a (pts, bytes) packet. A full queue means we fell behind
+        the child; dropping individual inter-frames would corrupt decode, so flush and
+        resync with a keyframe instead."""
         if not self._capturing:
             return                      # stray packet after a session ended; ignore
         q = self._queues.get(mi)
@@ -1292,7 +1333,7 @@ class VideoChild:
                 pass
             self.request_keyframe(mi)
         try:
-            q.put_nowait(pre)
+            q.put_nowait((pts, data))
         except Exception:
             pass
 
@@ -1317,7 +1358,19 @@ class VideoChild:
         if q is None:
             await asyncio.sleep(3600)
             raise MediaStreamError
-        return await q.get()
+        pts, data = await q.get()
+        return self._mk_packet(pts, data)
+
+    def _mk_packet(self, pts, data):
+        """Wrap the child's pre-encoded bytes in what aiortc's pack() for this codec wants:
+        a real av.Packet for H264 (its pack asserts the type), or the lightweight
+        _PreEncoded shim for VP8 (its pack only needs bytes()/pts/time_base)."""
+        if self.codec_family == "h264":
+            p = av.Packet(data)
+            p.pts = pts
+            p.time_base = fractions.Fraction(1, _VC_CLOCK)
+            return p
+        return _PreEncoded(data, pts)
 
     def flush_and_keyframe(self):
         """New peer connection (initial offer or a media rebuild): drop any queued
@@ -1384,7 +1437,7 @@ class VideoChild:
                     pass
 
 
-def _vc_make_encoder(w, h, bitrate):
+def _vc_make_vp8(w, h, bitrate):
     """A libvpx VP8 encoder context mirroring aiortc's Vp8Encoder settings, so the
     bytes we produce behave exactly like aiortc's own on the wire / at the viewer."""
     try:
@@ -1408,6 +1461,85 @@ def _vc_make_encoder(w, h, bitrate):
     cc.thread_count = nt
     cc.time_base = fractions.Fraction(1, _VC_CLOCK)
     return cc
+
+
+# Hardware H264 (Intel QSV / NVIDIA NVENC / AMD AMF) offloads the encode off the CPU. We
+# emit Constrained-Baseline so the bitstream matches aiortc's offered profile-level-id
+# 42001f (decodable by every WebRTC browser). h264_qsv only accepts nv12 input; the others
+# take yuv420p. If no hardware encoder actually opens+encodes here (listed != usable), the
+# child stays on VP8 — a safe, proven fallback.
+_VC_H264_HW = ("h264_qsv", "h264_nvenc", "h264_amf")   # hardware, preference order
+_VC_PIXFMT = {"h264_qsv": "nv12", "h264_amf": "nv12"}  # others default to yuv420p
+_VC_PICKED = {}                                        # prefer -> encoder name (cached)
+
+
+def _vc_encoder_pixfmt(name):
+    return _VC_PIXFMT.get(name, "yuv420p")
+
+
+def _vc_family(name):
+    return "vp8" if name == "libvpx" else "h264"
+
+
+def _vc_make_encoder(w, h, bitrate, name):
+    """Build the chosen encoder context, returning (codec_context, input_pix_fmt)."""
+    if name == "libvpx":
+        return _vc_make_vp8(w, h, bitrate), "yuv420p"
+    pix = _vc_encoder_pixfmt(name)
+    cc = av.CodecContext.create(name, "w")
+    cc.width, cc.height = w, h
+    cc.pix_fmt = pix
+    cc.bit_rate = bitrate
+    cc.gop_size = 3000          # we force an IDR on demand (viewer PLI), no periodic ones
+    cc.max_b_frames = 0         # no B-frames -> lowest latency
+    cc.time_base = fractions.Fraction(1, _VC_CLOCK)
+    if name == "libx264":
+        cc.profile = "Baseline"
+        cc.options = {"tune": "zerolatency", "level": "31"}   # libx264 maps pict_type=I -> IDR
+    else:                       # hardware encoders: Constrained Baseline, minimal opts
+        cc.options = {"profile": "baseline"}
+        # pict_type=I alone is only a NON-IDR I-frame on NVENC/AMF (no SPS/PPS), so a viewer
+        # PLI never recovers. Force IDR. The ffmpeg option name differs per encoder and is
+        # matched by exact strcmp: NVENC uses "forced-idr", AMF/QSV use "forced_idr".
+        cc.options["forced-idr" if name == "h264_nvenc" else "forced_idr"] = "1"
+    return cc, pix
+
+
+def _vc_encoder_works(name, w, h):
+    """True only if the encoder actually OPENS and encodes a frame AT THE GIVEN SIZE — a
+    hardware encoder lists as available even with no GPU, and some open at a tiny size but
+    reject the real resolution (alignment/level limits), so we probe at the capped size."""
+    try:
+        cc, pix = _vc_make_encoder(w, h, 1_000_000, name)
+        fr = av.VideoFrame.from_ndarray(
+            np.zeros((h, w, 3), dtype=np.uint8), format="rgb24").reformat(format=pix)
+        fr.pts = 0
+        fr.time_base = fractions.Fraction(1, _VC_CLOCK)
+        return bool(list(cc.encode(fr)) + list(cc.encode(None)))
+    except Exception:
+        return False
+
+
+def _vc_pick_encoder(prefer, w=1920, h=1080):
+    """Resolve the encoder name for a --video-codec preference, probing at (w,h):
+    'vp8' -> libvpx; 'auto' -> a usable hardware H264 encoder else libvpx; 'h264' ->
+    hardware H264 else libx264 (software H264). MUST be run inside the CHILD process so a
+    native GPU-driver crash on the probe kills only the child, not the whole agent."""
+    if prefer == "vp8":
+        return "libvpx"
+    key = (prefer, _even(w), _even(h))
+    if key in _VC_PICKED:
+        return _VC_PICKED[key]
+    order = list(_VC_H264_HW)
+    if prefer == "h264":
+        order.append("libx264")        # software H264 only when H264 is explicitly forced
+    picked = "libvpx"
+    for name in order:
+        if _vc_encoder_works(name, _even(w), _even(h)):
+            picked = name
+            break
+    _VC_PICKED[key] = picked
+    return picked
 
 
 def _vc_convert(shot, scale_fixed, max_width):
@@ -1443,6 +1575,7 @@ def _vc_capture_session(sock, state):
     scale_fixed = cfg.get("scale")
     max_width = int(cfg.get("max_width", 1920))
     bitrate = int(cfg.get("bitrate") or _VC_DEFAULT_BITRATE)
+    encoder_name = cfg.get("encoder") or "libvpx"
     my_gen = state["gen"]
 
     IDLE_INTERVAL = 0.5          # unwanted monitors: ~2 fps (matches CaptureManager)
@@ -1458,7 +1591,12 @@ def _vc_capture_session(sock, state):
     last = {m["i"]: 0.0 for m in monitors}
     last_raw = {}               # mi -> raw bytes of the last ENCODED grab (change detect)
     last_sent = {}              # mi -> monotonic time we last encoded+sent a frame
-    last_ok = time.monotonic()
+    # Stall detection keys on successful ENCODE+SEND, not grab: if the chosen (hardware)
+    # encoder opens in the probe but fails at the real resolution, grabs still succeed but
+    # nothing is sent -> this stays stale -> we signal a stall so the parent ends the
+    # session (and resets to VP8 next time) instead of the viewer freezing on black forever.
+    # A static screen still encodes the ~1s heartbeat frame, so it never false-trips.
+    last_enc_ok = time.monotonic()
     stall_sent = False
 
     with ScreenGrabber() as sct:
@@ -1476,7 +1614,6 @@ def _vc_capture_session(sock, state):
                                      "width": m["width"], "height": m["height"]})
                 except Exception:
                     continue
-                last_ok = time.monotonic()  # capture is working (grab succeeded)
                 # Skip an unchanged screen: compare the raw grab (BGRA, pre-conversion) to
                 # the last one we encoded. Never skip a requested keyframe, and force one
                 # through every MAX_SKIP_STATIC s so the viewer's stall detector stays happy.
@@ -1503,30 +1640,37 @@ def _vc_capture_session(sock, state):
                 enc = encoders.get(mi)
                 if (enc is None or enc[1] != w or enc[2] != h
                         or abs(desired - enc[3]) / enc[3] > 0.1):
-                    enc = (_vc_make_encoder(w, h, desired), w, h, desired)
+                    cc, pix = _vc_make_encoder(w, h, desired, encoder_name)
+                    enc = (cc, w, h, desired, pix)
                     encoders[mi] = enc
                     starts.setdefault(mi, time.monotonic())
                 cc = enc[0]
                 frame = av.VideoFrame.from_ndarray(arr, format="rgb24").reformat(
-                    format="yuv420p")
+                    format=enc[4])
                 frame.pts = int((time.monotonic() - starts[mi]) * _VC_CLOCK)
                 frame.time_base = fractions.Fraction(1, _VC_CLOCK)
                 if force_kf:
                     frame.pict_type = av.video.frame.PictureType.I
                     state["kf"].discard(mi)
                 try:
+                    sent_any = False
                     for pkt in cc.encode(frame):
                         body = struct.pack(">BBq", mi, 1 if pkt.is_keyframe else 0,
                                            int(pkt.pts)) + bytes(pkt)
                         _vc_send_frame(sock, _VC_PKT, body)
+                        sent_any = True
+                    if sent_any:
+                        last_enc_ok = time.monotonic()
                 except (OSError, ConnectionError, BrokenPipeError):
                     state["stop"] = True
                     break
                 except Exception:
-                    continue          # transient encode hiccup: skip this frame
-            # Capture stopped producing (lock screen / secure desktop / display change):
-            # tell the parent so it ends the session instead of freezing on a still.
-            if not stall_sent and (time.monotonic() - last_ok) > STALE_SECS:
+                    continue          # encode hiccup / hardware-encoder failure: skip (a
+                    #                   persistent failure stops sending -> stall fires below)
+            # Capture or encode stopped producing output (lock screen / secure desktop /
+            # display change / a hardware encoder that fails at the real resolution): tell
+            # the parent so it ends the session instead of freezing on a still/black.
+            if not stall_sent and (time.monotonic() - last_enc_ok) > STALE_SECS:
                 stall_sent = True
                 try:
                     _vc_send_frame(sock, _VC_STALL, b"")
@@ -1570,6 +1714,25 @@ def run_video_child(port):
         sock.settimeout(None)
         sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
     except Exception:
+        return
+
+    # Handshake: the parent sends "hello" with the --video-codec preference and a probe
+    # size; we pick the encoder HERE (in the child), so if a hardware encoder's native
+    # driver crashes while opening/encoding the probe, only this child dies — the parent
+    # detects that and falls back to in-process VP8, instead of the whole agent crashing.
+    try:
+        t, body = _vc_recv_frame(sock)
+        hello = json.loads(body) if t == _VC_CTL else {}
+        prefer = hello.get("prefer") or "auto"
+        pw = int(hello.get("probe_w") or 1920)
+        ph = int(hello.get("probe_h") or 1080)
+        name = _vc_pick_encoder(prefer, pw, ph)
+        _vc_send_frame(sock, _VC_CTL, json.dumps({"type": "codec", "encoder": name}).encode())
+    except Exception:
+        try:
+            sock.close()
+        except Exception:
+            pass
         return
 
     state = {"stop": False, "capturing": False, "cfg": None,
@@ -2879,6 +3042,8 @@ class NetClient:
         self._video_child_ok = ok
         if not ok:
             self.vchild = None
+        # (The encoder/codec was chosen by the child during spawn's handshake — a crash-safe
+        # probe inside the child — and is already set on self.vchild.)
 
     async def _on_capture_stalled(self):
         """Screen capture stopped producing frames (lock screen, UAC/secure desktop,
@@ -3161,6 +3326,21 @@ class NetClient:
             # initial keyframe so this (possibly rebuilt) connection starts clean.
             if self._using_vchild and self.vchild is not None:
                 vc = self.vchild
+                h264 = vc.codec_family == "h264"
+                fwd_cls = _ForwardingH264Encoder if h264 else _ForwardingVp8Encoder
+                # The child encodes H264, not VP8, so the SDP must negotiate H264 (aiortc
+                # offers both and the browser would otherwise pick VP8). Restrict each video
+                # transceiver to the H264 (constrained-baseline, 42001f) the child produces.
+                if h264:
+                    try:
+                        caps = [c for c in RTCRtpSender.getCapabilities("video").codecs
+                                if c.mimeType == "video/H264"]
+                        for tcv in self.pc.getTransceivers():
+                            tr = tcv.sender.track if tcv.sender else None
+                            if getattr(tr, "mi", None) is not None and caps:
+                                tcv.setCodecPreferences(caps)
+                    except Exception:
+                        pass
                 for sender in self.pc.getSenders():
                     tr = sender.track
                     mi = getattr(tr, "mi", None)
@@ -3175,11 +3355,11 @@ class NetClient:
                         vc.request_keyframe(mi)
                     sender._send_keyframe = _wrapped
                     # Adapt the child's encode bitrate to the viewer's REMB estimate by
-                    # pre-installing an encoder that forwards it (only when the user hasn't
-                    # pinned --bitrate). Keeps aiortc's pack() path for the pre-encoded data.
+                    # pre-installing the matching forwarding encoder (only when the user
+                    # hasn't pinned --bitrate). Keeps aiortc's pack() path for pre-encoded data.
                     if self.args.bitrate is None:
                         try:
-                            sender._RTCRtpSender__encoder = _ForwardingVp8Encoder(
+                            sender._RTCRtpSender__encoder = fwd_cls(
                                 lambda bps, mi=mi: vc.set_bitrate(mi, bps))
                         except Exception:
                             pass
@@ -5141,6 +5321,11 @@ def parse_args(argv):
                    help="Auto-downscale so frames are at most this wide.")
     p.add_argument("--monitor", type=int, default=1,
                    help="Monitor index (1 = primary, 0 = all).")
+    p.add_argument("--video-codec", dest="video_codec",
+                   choices=("auto", "vp8", "h264"), default="auto",
+                   help="Video codec: 'auto' uses hardware H264 (Intel QSV / NVENC / AMD) "
+                        "when available, else VP8; 'h264' forces H264 (hardware, else "
+                        "software libx264); 'vp8' forces VP8.")
     p.add_argument("--auto-accept", action="store_true",
                    help="Start with the approval prompt disabled.")
     # Hidden diagnostic: validate this (possibly frozen) build's capture + VP8
@@ -5237,10 +5422,11 @@ def run_selfcheck(out_path):
     return result
 
 
-def run_selfcheck_vsplit(out_path):
+def run_selfcheck_vsplit(out_path, prefer="auto"):
     """Headless check of the process-split video path: spawn the capture/encode child,
-    stream pre-encoded VP8 through a loopback peer connection, confirm it decodes. On a
-    frozen build this also proves the exe can spawn and talk to its own --video-child."""
+    stream pre-encoded video (VP8 or H264 per `prefer`) through a loopback peer connection,
+    confirm it decodes. On a frozen build this also proves the exe can spawn and talk to
+    its own --video-child."""
 
     class _Args:
         fps = 10
@@ -5248,6 +5434,7 @@ def run_selfcheck_vsplit(out_path):
         max_width = 1920
         bitrate = None
         no_video_subprocess = False
+        video_codec = prefer
 
     async def _run():
         loop = asyncio.get_event_loop()
@@ -5266,13 +5453,22 @@ def run_selfcheck_vsplit(out_path):
 
         vc = VideoChild(client)
         client.vchild = vc
-        if not await loop.run_in_executor(None, vc.spawn):   # pre-spawn (idle)
+        if not await loop.run_in_executor(None, vc.spawn):   # spawn + child codec handshake
             return 0
         if not vc.begin():                                   # arm the session
             return 0
         sender = RTCPeerConnection()
         receiver = RTCPeerConnection()
         sender.addTrack(PreEncTrack(client, 0))
+        if vc.codec_family == "h264":
+            try:
+                caps = [c for c in RTCRtpSender.getCapabilities("video").codecs
+                        if c.mimeType == "video/H264"]
+                for tcv in sender.getTransceivers():
+                    if caps:
+                        tcv.setCodecPreferences(caps)
+            except Exception:
+                pass
         frames = []
 
         @receiver.on("track")
@@ -5444,7 +5640,8 @@ def main(argv=None):
         print(run_selfcheck(args.selfcheck))
         return
     if getattr(args, "selfcheck_vsplit", None):
-        print(run_selfcheck_vsplit(args.selfcheck_vsplit))
+        print(run_selfcheck_vsplit(args.selfcheck_vsplit,
+                                   getattr(args, "video_codec", "auto")))
         return
     # The capture/encode child runs ONLY this and exits — before the single-instance
     # guard (it's a second copy of this exe and must not trip the mutex) and the GUI.
