@@ -666,7 +666,7 @@ _GUI_DPI_LOGGED = False   # one-time GUI-thread DPI-awareness + raw-rect diagnos
 _SHOT_SAVED = False       # one-time: save an mss screenshot on the first blocked click
 
 
-_AGENT_BUILD = "2026-11-03-replfix2"  # bumped per diagnostic build; appears in the click log
+_AGENT_BUILD = "2026-11-03-adminprio"  # bumped per diagnostic build; appears in the click log
 
 
 def _save_debug_shot(x, y):
@@ -1524,6 +1524,25 @@ def run_video_child(port):
         _set_dpi_awareness()      # same physical-pixel space as the parent (see its note)
     except Exception:
         pass
+    # Keep the video stream smooth when the REMOTE machine is busy. Capture+encode run in
+    # THIS process; at normal priority a heavy foreground task on the remote (e.g. a browser
+    # spawning tabs, which Windows foreground-boosts) starves the encoder and the stream
+    # hitches. Nudge this whole process to ABOVE_NORMAL so the encoder keeps a fair share
+    # of CPU under load — enough to not be starved, not so high it makes the remote's own
+    # apps sluggish. Input stays ahead regardless (it's on the main process's HIGHEST net
+    # thread and needs very little CPU). Explicit signatures: GetCurrentProcess() returns
+    # the pseudo-handle (HANDLE)-1, which ctypes would otherwise truncate on 64-bit.
+    if sys.platform == "win32":
+        try:
+            _k = ctypes.windll.kernel32
+            _k.GetCurrentProcess.restype = wintypes.HANDLE
+            _k.GetCurrentProcess.argtypes = []
+            _k.SetPriorityClass.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+            _k.SetPriorityClass.restype = wintypes.BOOL
+            _ABOVE_NORMAL_PRIORITY_CLASS = 0x00008000
+            _k.SetPriorityClass(_k.GetCurrentProcess(), _ABOVE_NORMAL_PRIORITY_CLASS)
+        except Exception:
+            pass
     try:
         sock = socket.create_connection(("127.0.0.1", port), timeout=15)
         sock.settimeout(None)
@@ -5417,6 +5436,20 @@ def main(argv=None):
     _instance_guard, _already_running = _acquire_single_instance()
     if _already_running and not _replace_running_instance():
         return
+    # Put the agent process at ABOVE_NORMAL so its net thread (which runs at
+    # THREAD_PRIORITY_HIGHEST — the input path) sits a notch ABOVE the video-encode child
+    # (also ABOVE_NORMAL). Input stays strictly on top of video even when the remote is
+    # busy, so boosting the encoder for smoother video can never cost input responsiveness.
+    if sys.platform == "win32":
+        try:
+            _k = ctypes.windll.kernel32
+            _k.GetCurrentProcess.restype = wintypes.HANDLE
+            _k.GetCurrentProcess.argtypes = []
+            _k.SetPriorityClass.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+            _k.SetPriorityClass.restype = wintypes.BOOL
+            _k.SetPriorityClass(_k.GetCurrentProcess(), 0x00008000)  # ABOVE_NORMAL
+        except Exception:
+            pass
     try:
         App(args).run()
     except Exception as e:
