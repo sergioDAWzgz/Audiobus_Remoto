@@ -1441,6 +1441,50 @@ function videoStalled() {
 document.addEventListener("visibilitychange", () => {
   if (!document.hidden) lastVideoAdvance = performance.now();
 });
+
+// Returning to the foreground: the input data channel may have been throttled while the
+// tab was hidden and can report readyState "open" while no longer delivering — which would
+// SILENTLY swallow input, because send() only falls back to the WebSocket when the channel
+// is closed/absent, not when an "open" channel drops a message. That left the viewer unable
+// to control the remote after a tab switch even though video recovered. Probe the channel
+// on return; if it doesn't echo promptly, drop it so input flows over the (robust,
+// auto-reconnecting) WebSocket. The fast P2P path is rebuilt by the next agent offer.
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden || !inSession) return;
+  const ch = inputDC;
+  if (!ch || ch.readyState !== "open") return; // already on the WS fallback
+  let echoed = false;
+  const onEcho = (e) => {
+    try {
+      const m = JSON.parse(e.data);
+      if (m && m.t === "ping") echoed = true;
+    } catch {
+      /* ignore */
+    }
+  };
+  ch.addEventListener("message", onEcho);
+  try {
+    ch.send(JSON.stringify({ t: "ping", ts: performance.now() }));
+  } catch {
+    echoed = false;
+  }
+  setTimeout(() => {
+    try {
+      ch.removeEventListener("message", onEcho);
+    } catch {
+      /* ignore */
+    }
+    if (!echoed && inputDC === ch) {
+      try {
+        ch.close();
+      } catch {
+        /* ignore */
+      }
+      inputDC = null; // send() now routes input over the WebSocket until a fresh offer
+      stopInputPing();
+    }
+  }, 700);
+});
 // Our link to the server is unusable right now (closed, or no pong in time, or the
 // agent's side dropped, or the video stalled). A CONNECTING socket is neither down nor
 // up yet — we hold.
