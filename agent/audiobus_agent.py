@@ -30,11 +30,14 @@ import json
 import os
 import queue
 import secrets
+import socket
 import ssl
+import struct
 import subprocess
 import sys
 import threading
 import time
+import types
 import urllib.request
 
 import tkinter as tk
@@ -629,7 +632,7 @@ _GUI_DPI_LOGGED = False   # one-time GUI-thread DPI-awareness + raw-rect diagnos
 _SHOT_SAVED = False       # one-time: save an mss screenshot on the first blocked click
 
 
-_AGENT_BUILD = "2026-11-03-netprio2"  # bumped per diagnostic build; appears in the click log
+_AGENT_BUILD = "2026-11-03-vsplit"  # bumped per diagnostic build; appears in the click log
 
 
 def _save_debug_shot(x, y):
@@ -1024,6 +1027,427 @@ class ScreenTrack(MediaStreamTrack):
         return arr
 
 
+# ---------------------------------------------------------------------------
+# Video capture + VP8 encode in a SEPARATE PROCESS.
+#
+# Everything heavy (screen grab, the ~6 MB RGB frame copy, the rgb->yuv convert,
+# and the VP8 encode) runs in a child process with its OWN GIL, and streams
+# PRE-ENCODED VP8 packets back over a localhost socket. The main process keeps the
+# one WebRTC PeerConnection and just hands each packet to aiortc to packetize and
+# send (the "pack" path: when a track's recv() returns a non-Frame, aiortc packs it
+# without re-encoding). Input, signaling, clipboard and file transfer stay in the
+# main process on a now near-idle loop, so input RTT no longer spikes while the
+# encoder is busy. The viewer and the Worker are unchanged. If the child can't start
+# (e.g. blocked by AV), the caller falls back to the in-process CaptureManager path.
+#
+# Keyframes: the pack path never re-encodes, so a viewer that joins or loses packets
+# recovers only if WE tell the child to emit a keyframe. The main wraps each video
+# sender's _send_keyframe (fired by the viewer's PLI/FIR) to forward the request.
+# ---------------------------------------------------------------------------
+_VC_CLOCK = 90000
+_VC_PKT, _VC_CTL, _VC_STALL = 1, 2, 3           # frame type bytes
+_VC_DEFAULT_BITRATE = 1_500_000                  # bps when --bitrate is unset
+_VC_CREATE_NO_WINDOW = 0x08000000
+
+
+def _vc_send_frame(sock, t, body):
+    """Length-prefixed message: 4-byte big-endian length, 1 type byte, then body."""
+    sock.sendall(struct.pack(">I", 1 + len(body)) + bytes([t]) + body)
+
+
+def _vc_recv_exactly(sock, n):
+    buf = bytearray()
+    while len(buf) < n:
+        chunk = sock.recv(n - len(buf))
+        if not chunk:
+            return None
+        buf += chunk
+    return bytes(buf)
+
+
+def _vc_recv_frame(sock):
+    hdr = _vc_recv_exactly(sock, 4)
+    if hdr is None:
+        return None, None
+    (ln,) = struct.unpack(">I", hdr)
+    body = _vc_recv_exactly(sock, ln)
+    if body is None:
+        return None, None
+    return body[0], body[1:]
+
+
+class _PreEncoded:
+    """What the main's track hands aiortc: looks like a Packet to vpx.pack (bytes() +
+    pts + time_base) but is NOT an av.Frame, so aiortc packs it instead of encoding."""
+    __slots__ = ("_d", "pts", "time_base")
+
+    def __init__(self, data, pts):
+        self._d = data
+        self.pts = pts
+        self.time_base = fractions.Fraction(1, _VC_CLOCK)
+
+    def __bytes__(self):
+        return self._d
+
+
+class PreEncTrack(MediaStreamTrack):
+    """One per monitor; recv() yields pre-encoded VP8 packets from the child process."""
+    kind = "video"
+
+    def __init__(self, client, mi):
+        super().__init__()
+        self.client = client
+        self.mi = mi
+
+    async def recv(self):
+        if self.readyState != "live":
+            raise MediaStreamError
+        vc = self.client.vchild
+        if vc is None:
+            await asyncio.sleep(3600)
+            raise MediaStreamError
+        return await vc.recv(self.mi)
+
+
+class VideoChild:
+    """Main-process handle to the capture/encode child: spawns it, carries config and
+    keyframe/wanted requests to it, and feeds the pre-encoded packets it returns into a
+    per-monitor asyncio queue that PreEncTrack.recv() drains."""
+
+    def __init__(self, client):
+        self.client = client
+        self.loop = client.loop
+        self.sock = None
+        self.proc = None
+        self._lsock = None
+        self._queues = {}            # mi -> asyncio.Queue of _PreEncoded
+        self._alive = False
+        self._send_lock = threading.Lock()
+
+    def start(self):
+        """Spawn the child and complete the handshake. BLOCKS (run in an executor).
+        Returns True on success; on any failure the caller uses the in-process path."""
+        try:
+            ls = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            ls.bind(("127.0.0.1", 0))
+            ls.listen(1)
+            self._lsock = ls
+            port = ls.getsockname()[1]
+            if getattr(sys, "frozen", False):
+                cmd = [sys.executable, "--video-child", "--vport", str(port)]
+            else:
+                cmd = [sys.executable, os.path.abspath(__file__),
+                       "--video-child", "--vport", str(port)]
+            self.proc = subprocess.Popen(cmd, creationflags=_VC_CREATE_NO_WINDOW)
+            ls.settimeout(10)
+            conn, _ = ls.accept()                 # waits for the child to connect
+            conn.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+            self.sock = conn
+            bitrate = (int(self.client.args.bitrate) * 1000
+                       if self.client.args.bitrate else _VC_DEFAULT_BITRATE)
+            cfg = {
+                "monitors": self.client.monitors,
+                "fps": int(self.client.args.fps),
+                "scale": self.client.args.scale,
+                "max_width": int(self.client.args.max_width),
+                "bitrate": bitrate,
+                "wanted": list(self.client.wanted or []),
+            }
+            _vc_send_frame(conn, _VC_CTL, json.dumps(cfg).encode())
+            self._queues = {m["i"]: asyncio.Queue(maxsize=90)
+                            for m in self.client.monitors}
+            self._alive = True
+            threading.Thread(target=self._read_loop, daemon=True).start()
+            return True
+        except Exception:
+            self.stop()
+            return False
+
+    def _read_loop(self):
+        """Reader THREAD: shuttle already-encoded packets from the child to the loop.
+        Light work only (no capture/encode), so it barely touches the main GIL."""
+        sock = self.sock
+        while self._alive:
+            try:
+                t, body = _vc_recv_frame(sock)
+            except Exception:
+                t = None
+            if t is None:
+                self._fail()
+                break
+            if t == _VC_PKT:
+                mi, _kf, pts = struct.unpack(">BBq", body[:10])
+                pre = _PreEncoded(body[10:], pts)
+                try:
+                    self.loop.call_soon_threadsafe(self._deliver, mi, pre)
+                except Exception:
+                    break
+            elif t == _VC_STALL:
+                try:
+                    self.loop.call_soon_threadsafe(self._on_stall)
+                except Exception:
+                    pass
+
+    def _deliver(self, mi, pre):
+        """Loop thread: enqueue a packet. A full queue means we fell behind the child;
+        dropping individual inter-frames would corrupt decode, so flush and resync with
+        a keyframe instead."""
+        q = self._queues.get(mi)
+        if q is None:
+            return
+        if q.full():
+            try:
+                while True:
+                    q.get_nowait()
+            except asyncio.QueueEmpty:
+                pass
+            self.request_keyframe(mi)
+        try:
+            q.put_nowait(pre)
+        except Exception:
+            pass
+
+    def _on_stall(self):
+        if self.client.streaming:
+            asyncio.ensure_future(self.client._on_capture_stalled())
+
+    def _fail(self):
+        """The child died or the socket dropped. If we're still streaming, treat it like
+        a capture stall so the session ends cleanly rather than freezing."""
+        if self._alive:
+            self._alive = False
+            try:
+                self.loop.call_soon_threadsafe(self._on_stall)
+            except Exception:
+                pass
+
+    async def recv(self, mi):
+        q = self._queues.get(mi)
+        if q is None:
+            await asyncio.sleep(3600)
+            raise MediaStreamError
+        return await q.get()
+
+    def flush_and_keyframe(self):
+        """New peer connection (initial offer or a media rebuild): drop any queued
+        packets a previous viewer/pc was consuming and ask the child for a fresh
+        keyframe so the new viewer starts from a decodable frame."""
+        for mi, q in self._queues.items():
+            try:
+                while True:
+                    q.get_nowait()
+            except asyncio.QueueEmpty:
+                pass
+            self.request_keyframe(mi)
+
+    def _send_ctl(self, msg):
+        s = self.sock
+        if not s:
+            return
+        try:
+            with self._send_lock:
+                _vc_send_frame(s, _VC_CTL, json.dumps(msg).encode())
+        except Exception:
+            pass
+
+    def request_keyframe(self, mi):
+        self._send_ctl({"type": "keyframe", "mi": int(mi)})
+
+    def set_wanted(self, wanted):
+        self._send_ctl({"type": "wanted", "set": list(wanted or [])})
+
+    def stop(self):
+        """Tear the child down. BLOCKS briefly (run in an executor, like capture.stop)."""
+        self._alive = False
+        if self.sock:
+            self._send_ctl({"type": "stop"})
+        try:
+            if self.sock:
+                self.sock.close()
+        except Exception:
+            pass
+        self.sock = None
+        try:
+            if self._lsock:
+                self._lsock.close()
+        except Exception:
+            pass
+        self._lsock = None
+        p = self.proc
+        self.proc = None
+        if p:
+            try:
+                p.wait(timeout=2)
+            except Exception:
+                try:
+                    p.kill()
+                except Exception:
+                    pass
+
+
+def _vc_make_encoder(w, h, bitrate):
+    """A libvpx VP8 encoder context mirroring aiortc's Vp8Encoder settings, so the
+    bytes we produce behave exactly like aiortc's own on the wire / at the viewer."""
+    try:
+        import multiprocessing
+        from aiortc.codecs.vpx import number_of_threads
+        nt = number_of_threads(w * h, multiprocessing.cpu_count())
+    except Exception:
+        nt = 1
+    cc = av.CodecContext.create("libvpx", "w")
+    cc.width, cc.height = w, h
+    cc.pix_fmt = "yuv420p"
+    cc.bit_rate = bitrate
+    cc.gop_size = 3000
+    cc.qmin, cc.qmax = 2, 56
+    cc.options = {
+        "bufsize": str(bitrate), "cpu-used": "-6", "deadline": "realtime",
+        "lag-in-frames": "0", "minrate": str(bitrate), "maxrate": str(bitrate),
+        "noise-sensitivity": "4", "overshoot-pct": "15", "partitions": "0",
+        "static-thresh": "1", "undershoot-pct": "100",
+    }
+    cc.thread_count = nt
+    cc.time_base = fractions.Fraction(1, _VC_CLOCK)
+    return cc
+
+
+def _vc_grab(sct, m, scale_fixed, max_width):
+    """One monitor grab + optional downscale -> contiguous RGB array (mirrors
+    CaptureManager._grab). GIL-held, but it runs in the CHILD process."""
+    try:
+        shot = sct.grab({"left": m["left"], "top": m["top"],
+                         "width": m["width"], "height": m["height"]})
+        if scale_fixed:
+            scale = scale_fixed
+        elif m["width"] > 0:
+            scale = min(1.0, max_width / m["width"])
+        else:
+            scale = 1.0
+        ow, oh = _even(shot.width * scale), _even(shot.height * scale)
+        if (ow, oh) != (shot.width, shot.height):
+            img = Image.frombytes("RGB", (shot.width, shot.height), shot.rgb)
+            arr = np.asarray(img.resize((ow, oh)), dtype=np.uint8)
+        else:
+            arr = np.frombuffer(shot.rgb, dtype=np.uint8).reshape(
+                (shot.height, shot.width, 3))
+        return np.ascontiguousarray(arr)
+    except Exception:
+        return None
+
+
+def run_video_child(port):
+    """Child-process entry point (started via `--video-child --vport N`). Captures and
+    VP8-encodes every monitor in ITS OWN process/GIL and streams pre-encoded packets to
+    the parent. Exits when the parent says stop or the socket drops."""
+    try:
+        _set_dpi_awareness()      # same physical-pixel space as the parent (see its note)
+    except Exception:
+        pass
+    try:
+        sock = socket.create_connection(("127.0.0.1", port), timeout=15)
+        sock.settimeout(None)
+        sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+    except Exception:
+        return
+    t, body = _vc_recv_frame(sock)
+    if t != _VC_CTL:
+        return
+    cfg = json.loads(body)
+    monitors = cfg["monitors"]
+    fps = max(1, int(cfg.get("fps", 20)))
+    scale_fixed = cfg.get("scale")
+    max_width = int(cfg.get("max_width", 1920))
+    bitrate = int(cfg.get("bitrate") or _VC_DEFAULT_BITRATE)
+
+    state = {
+        "stop": False,
+        "wanted": set(cfg.get("wanted") or [m["i"] for m in monitors]),
+        "kf": set(),
+    }
+
+    def ctl_reader():
+        while not state["stop"]:
+            t, body = _vc_recv_frame(sock)
+            if t is None:                 # parent closed -> exit
+                state["stop"] = True
+                break
+            try:
+                msg = json.loads(body)
+            except Exception:
+                continue
+            typ = msg.get("type")
+            if typ == "stop":
+                state["stop"] = True
+                break
+            elif typ == "keyframe":
+                state["kf"].add(msg.get("mi"))
+            elif typ == "wanted":
+                state["wanted"] = set(msg.get("set") or [m["i"] for m in monitors])
+    threading.Thread(target=ctl_reader, daemon=True).start()
+
+    IDLE_INTERVAL = 0.5          # unwanted monitors: ~2 fps (matches CaptureManager)
+    STALE_SECS = 8.0
+    full_interval = 1.0 / fps
+    encoders = {}               # mi -> (cc, w, h)
+    starts = {}                 # mi -> monotonic start (elapsed-time PTS per monitor)
+    last = {m["i"]: 0.0 for m in monitors}
+    last_ok = time.monotonic()
+    stall_sent = False
+
+    with ScreenGrabber() as sct:
+        while not state["stop"]:
+            now = time.time()
+            for m in monitors:
+                mi = m["i"]
+                force_kf = mi in state["kf"]
+                interval = full_interval if mi in state["wanted"] else IDLE_INTERVAL
+                if not force_kf and (now - last[mi] < interval):
+                    continue
+                last[mi] = now
+                arr = _vc_grab(sct, m, scale_fixed, max_width)
+                if arr is None:
+                    continue
+                last_ok = time.monotonic()
+                h, w = int(arr.shape[0]), int(arr.shape[1])
+                enc = encoders.get(mi)
+                if enc is None or enc[1] != w or enc[2] != h:
+                    enc = (_vc_make_encoder(w, h, bitrate), w, h)
+                    encoders[mi] = enc
+                    starts.setdefault(mi, time.monotonic())
+                cc = enc[0]
+                frame = av.VideoFrame.from_ndarray(arr, format="rgb24").reformat(
+                    format="yuv420p")
+                frame.pts = int((time.monotonic() - starts[mi]) * _VC_CLOCK)
+                frame.time_base = fractions.Fraction(1, _VC_CLOCK)
+                if force_kf:
+                    frame.pict_type = av.video.frame.PictureType.I
+                    state["kf"].discard(mi)
+                try:
+                    for pkt in cc.encode(frame):
+                        body = struct.pack(">BBq", mi, 1 if pkt.is_keyframe else 0,
+                                           int(pkt.pts)) + bytes(pkt)
+                        _vc_send_frame(sock, _VC_PKT, body)
+                except (OSError, ConnectionError, BrokenPipeError):
+                    state["stop"] = True
+                    break
+                except Exception:
+                    continue          # transient encode hiccup: skip this frame
+            # Capture stopped producing (lock screen / secure desktop / display change):
+            # tell the parent so it ends the session instead of freezing on a still.
+            if not stall_sent and (time.monotonic() - last_ok) > STALE_SECS:
+                stall_sent = True
+                try:
+                    _vc_send_frame(sock, _VC_STALL, b"")
+                except Exception:
+                    pass
+            sleep = max(0.003, full_interval - (time.time() - now))
+            time.sleep(sleep)
+    try:
+        sock.close()
+    except Exception:
+        pass
+
+
 def _compute_window_rects(our_pid):
     """Return (block_rects, agent_foreground) for the agent's own windows, in PHYSICAL
     screen pixels. MUST run on a per-monitor-DPI-aware thread — the NET thread is (mss makes
@@ -1371,7 +1795,9 @@ class NetClient:
         self.ws = None
         self.streaming = False
         self.pc = None              # RTCPeerConnection carrying the video tracks
-        self.capture = None         # CaptureManager (screen grab -> frame slots)
+        self.capture = None         # CaptureManager (in-process fallback: grab -> slots)
+        self.vchild = None          # VideoChild (preferred: capture+encode in a child proc)
+        self._using_vchild = False  # True once the child started; else the capture fallback
         self.blockrects_task = None # keeps the viewer's blocked-cursor regions fresh
         self.monitors = []          # list of {"i","left","top","width","height"}
         self.primary = None         # convenience handle to monitors[0]
@@ -2407,9 +2833,22 @@ class NetClient:
             await ws.send(json.dumps({"type": "caps", "clip": True, "file": True}))
         except Exception:
             pass
-        # Start grabbing the screen and open the WebRTC video connection.
-        self.capture = CaptureManager(self)
-        self.capture.start()
+        # Start the video SOURCE, then open the WebRTC connection. Preferred: a child
+        # process that captures + VP8-encodes on its own GIL, so this process's loop
+        # stays free for input even while the encoder is busy. If the child can't start
+        # (blocked by AV, etc.), fall back to the in-process CaptureManager so video
+        # still works — exactly the old behaviour.
+        self._using_vchild = False
+        self.vchild = None
+        self.capture = None
+        if not getattr(self.args, "no_video_subprocess", False):
+            vc = VideoChild(self)
+            if await self.loop.run_in_executor(None, vc.start):
+                self.vchild = vc
+                self._using_vchild = True
+        if not self._using_vchild:
+            self.capture = CaptureManager(self)
+            self.capture.start()
         ok = await self._start_webrtc(ws)
         if not ok:
             await self._stop_stream()
@@ -2506,7 +2945,31 @@ class NetClient:
                 self._apply_input(ev)
 
             for m in self.monitors:
-                self.pc.addTrack(ScreenTrack(self, m["i"]))
+                track = (PreEncTrack(self, m["i"]) if self._using_vchild
+                         else ScreenTrack(self, m["i"]))
+                self.pc.addTrack(track)
+
+            # With the child (pre-encoded) path, aiortc never re-encodes, so a viewer's
+            # keyframe request (PLI/FIR -> sender._send_keyframe) must be forwarded to the
+            # child or the viewer never gets a decodable frame. Wrap each video sender's
+            # _send_keyframe to also ask the child, then flush stale packets and request an
+            # initial keyframe so this (possibly rebuilt) connection starts clean.
+            if self._using_vchild and self.vchild is not None:
+                vc = self.vchild
+                for sender in self.pc.getSenders():
+                    tr = sender.track
+                    mi = getattr(tr, "mi", None)
+                    if mi is None:
+                        continue
+                    orig = sender._send_keyframe
+                    def _wrapped(orig=orig, mi=mi):
+                        try:
+                            orig()
+                        except Exception:
+                            pass
+                        vc.request_keyframe(mi)
+                    sender._send_keyframe = _wrapped
+                vc.flush_and_keyframe()
 
             await self.pc.setLocalDescription(await self.pc.createOffer())
             self._apply_bitrate()
@@ -2694,6 +3157,10 @@ class NetClient:
             if i in valid and i not in req:
                 req.append(i)
         self.wanted = req if req else [m["i"] for m in self.monitors]
+        # With the child encoder, tell it which monitors to stream at full fps (the
+        # in-process CaptureManager reads self.wanted directly, so needs no notify).
+        if self.vchild is not None:
+            self.vchild.set_wanted(self.wanted)
 
     def scale_for(self, width):
         """Per-monitor downscale factor based on --scale / --max-width."""
@@ -2737,6 +3204,15 @@ class NetClient:
             try:
                 await asyncio.wait_for(
                     self.loop.run_in_executor(None, cap.stop), timeout=HB_INTERRUPT_SECS)
+            except Exception:
+                pass
+        if self.vchild:
+            vc = self.vchild
+            self.vchild = None
+            self._using_vchild = False
+            try:
+                await asyncio.wait_for(
+                    self.loop.run_in_executor(None, vc.stop), timeout=HB_INTERRUPT_SECS)
             except Exception:
                 pass
 
@@ -4457,6 +4933,18 @@ def parse_args(argv):
     # Hidden diagnostic: validate this (possibly frozen) build's capture + VP8
     # encode/decode stack headlessly, writing the result to the given file.
     p.add_argument("--selfcheck", default=None, help=argparse.SUPPRESS)
+    # Like --selfcheck but exercises the video-split path: spawns the capture/encode
+    # child and streams pre-encoded VP8 through a loopback peer connection.
+    p.add_argument("--selfcheck-vsplit", dest="selfcheck_vsplit", default=None,
+                   help=argparse.SUPPRESS)
+    # Internal: this process is the capture/encode CHILD; connect back to the parent
+    # on --vport and stream pre-encoded VP8. Not for direct use.
+    p.add_argument("--video-child", dest="video_child", action="store_true",
+                   help=argparse.SUPPRESS)
+    p.add_argument("--vport", type=int, default=0, help=argparse.SUPPRESS)
+    # Escape hatch: keep capture+encode in-process (the old path) instead of a child.
+    p.add_argument("--no-video-subprocess", dest="no_video_subprocess",
+                   action="store_true", help=argparse.SUPPRESS)
     return p.parse_args(argv)
 
 
@@ -4526,6 +5014,95 @@ def run_selfcheck(out_path):
         frames = asyncio.run(_run())
         result = ("OK frames=%s" % (frames[:2],)) if len(frames) >= 2 \
             else "FAIL no frames decoded"
+    except Exception as e:
+        result = "FAIL %r" % (e,)
+    try:
+        with open(out_path, "w", encoding="utf-8") as f:
+            f.write(result)
+    except Exception:
+        pass
+    return result
+
+
+def run_selfcheck_vsplit(out_path):
+    """Headless check of the process-split video path: spawn the capture/encode child,
+    stream pre-encoded VP8 through a loopback peer connection, confirm it decodes. On a
+    frozen build this also proves the exe can spawn and talk to its own --video-child."""
+
+    class _Args:
+        fps = 10
+        scale = 0.5
+        max_width = 1920
+        bitrate = None
+        no_video_subprocess = False
+
+    async def _run():
+        loop = asyncio.get_event_loop()
+        with ScreenGrabber() as sct:
+            mons = [dict(m) for m in sct.monitors]
+        phys = mons[1:] if len(mons) > 1 else mons[:1]
+        m = phys[0]
+        client = types.SimpleNamespace(
+            loop=loop, args=_Args(), wanted=[0], streaming=True, vchild=None,
+            monitors=[{"i": 0, "left": m["left"], "top": m["top"],
+                       "width": m["width"], "height": m["height"]}])
+
+        async def _stall():
+            pass
+        client._on_capture_stalled = _stall
+
+        vc = VideoChild(client)
+        if not await loop.run_in_executor(None, vc.start):
+            return 0
+        client.vchild = vc
+        sender = RTCPeerConnection()
+        receiver = RTCPeerConnection()
+        sender.addTrack(PreEncTrack(client, 0))
+        frames = []
+
+        @receiver.on("track")
+        def _on_track(track):
+            async def _read():
+                try:
+                    for _ in range(10):
+                        f = await track.recv()
+                        frames.append((f.width, f.height))
+                except Exception:
+                    pass
+            asyncio.ensure_future(_read())
+
+        await sender.setLocalDescription(await sender.createOffer())
+        await receiver.setRemoteDescription(sender.localDescription)
+        await receiver.setLocalDescription(await receiver.createAnswer())
+        await sender.setRemoteDescription(receiver.localDescription)
+        for s in sender.getSenders():
+            mi = getattr(s.track, "mi", None)
+            if mi is None:
+                continue
+            orig = s._send_keyframe
+            def _w(orig=orig, mi=mi):
+                try:
+                    orig()
+                except Exception:
+                    pass
+                vc.request_keyframe(mi)
+            s._send_keyframe = _w
+        vc.flush_and_keyframe()
+        for _ in range(120):
+            await asyncio.sleep(0.1)
+            if len(frames) >= 3:
+                break
+        await loop.run_in_executor(None, vc.stop)
+        try:
+            await asyncio.wait_for(
+                asyncio.gather(sender.close(), receiver.close()), timeout=4)
+        except Exception:
+            pass
+        return len(frames)
+
+    try:
+        n = asyncio.run(_run())
+        result = ("OK vsplit frames=%d" % n) if n >= 3 else ("FAIL vsplit frames=%d" % n)
     except Exception as e:
         result = "FAIL %r" % (e,)
     try:
@@ -4650,6 +5227,14 @@ def main(argv=None):
     args = parse_args(argv if argv is not None else sys.argv[1:])
     if getattr(args, "selfcheck", None):
         print(run_selfcheck(args.selfcheck))
+        return
+    if getattr(args, "selfcheck_vsplit", None):
+        print(run_selfcheck_vsplit(args.selfcheck_vsplit))
+        return
+    # The capture/encode child runs ONLY this and exits — before the single-instance
+    # guard (it's a second copy of this exe and must not trip the mutex) and the GUI.
+    if getattr(args, "video_child", False):
+        run_video_child(args.vport)
         return
     # We hold `_instance_guard` for the whole run so a later launch sees us (and can
     # offer to replace us). If another copy is already running, offer to replace it
