@@ -290,29 +290,37 @@ def _config_path():
     return os.path.join(base, "AudiobusRemote", "config.json")
 
 
-def _pidfile_path():
-    """Where the running owner records its PID, so a replacing launch can kill that exact
-    process regardless of the exe's filename (a re-downloaded update is often saved as
-    'audiobus-agent (1).exe', which a kill-by-image-name would miss)."""
-    return os.path.join(os.path.dirname(_config_path()), "agent.pid")
-
-
-def _write_pidfile():
+def _other_agent_pids():
+    """PIDs of OTHER running agent processes, matched by image-name PREFIX so a copy
+    re-downloaded under a different filename (the browser saves an update as
+    'audiobus-agent (1).exe') is still found. Excludes this process and its launcher so a
+    replace never kills our own tree. We resolve exact PIDs ourselves because taskkill
+    /IM does NOT honor a partial wildcard ('audiobus-agent*.exe' matches nothing), which
+    is why the earlier name-based replace silently missed a renamed copy."""
+    import csv
+    mine = {os.getpid()}
     try:
-        p = _pidfile_path()
-        os.makedirs(os.path.dirname(p), exist_ok=True)
-        with open(p, "w", encoding="utf-8") as f:
-            f.write(str(os.getpid()))
+        mine.add(os.getppid())  # the onefile launcher shares our image name
     except Exception:
         pass
-
-
-def _read_pidfile():
+    pids = []
     try:
-        with open(_pidfile_path(), encoding="utf-8") as f:
-            return int(f.read().strip())
+        out = subprocess.run(
+            ["tasklist", "/FO", "CSV", "/NH"],
+            creationflags=0x08000000, timeout=10, capture_output=True, text=True).stdout
+        for row in csv.reader(io.StringIO(out)):
+            if len(row) < 2:
+                continue
+            name = row[0].strip().strip('"').lower()
+            try:
+                pid = int(row[1].strip().strip('"'))
+            except ValueError:
+                continue
+            if pid not in mine and name.startswith("audiobus-agent"):
+                pids.append(pid)
     except Exception:
-        return None
+        pass
+    return pids
 
 
 # The config file is written from BOTH the Tk GUI thread (theme, auto-accept toggle) and
@@ -658,7 +666,7 @@ _GUI_DPI_LOGGED = False   # one-time GUI-thread DPI-awareness + raw-rect diagnos
 _SHOT_SAVED = False       # one-time: save an mss screenshot on the first blocked click
 
 
-_AGENT_BUILD = "2026-11-03-replfix"  # bumped per diagnostic build; appears in the click log
+_AGENT_BUILD = "2026-11-03-replfix2"  # bumped per diagnostic build; appears in the click log
 
 
 def _save_debug_shot(x, y):
@@ -5374,26 +5382,15 @@ def _replace_running_instance():
         return False
     if not replace:
         return False
-    # Force-kill the other copy (never ourselves). The old process's mutex handle, tray
-    # icon and relay socket are released as it dies; the DO then hands the session to our
-    # new connect (replace-on-connect), and its pre-spawned video child dies with it.
+    # Force-kill every OTHER agent process, by exact PID (never our own tree). Resolving
+    # PIDs by image-name prefix closes a copy re-downloaded as 'audiobus-agent (1).exe',
+    # which the previous kill-by-name missed. /T also reaps its pre-spawned video child.
+    # The old copy's mutex handle, tray icon and relay socket free as it dies; the DO then
+    # hands the session to our new connect (replace-on-connect).
     try:
-        me = os.getpid()
-        # Primary: kill the exact PID the running owner recorded, plus its child tree
-        # (/T), gated to our own exe names so a stale/reused PID can't hit something else.
-        # This works even when the running copy's exe was renamed (the common
-        # 'audiobus-agent (1).exe' re-download), which a kill-by-current-name would miss.
-        pid = _read_pidfile()
-        if pid and pid != me:
-            subprocess.run(
-                ["taskkill", "/F", "/T", "/FI", f"PID eq {pid}",
-                 "/FI", "IMAGENAME eq audiobus-agent*.exe"],
-                creationflags=0x08000000, timeout=10, capture_output=True)
-        # Fallback/sweep: any audiobus-agent*.exe except us (covers a missing pidfile and
-        # the wildcard catches the renamed-download case too).
-        subprocess.run(
-            ["taskkill", "/F", "/IM", "audiobus-agent*.exe", "/FI", f"PID ne {me}"],
-            creationflags=0x08000000, timeout=10, capture_output=True)
+        for pid in _other_agent_pids():
+            subprocess.run(["taskkill", "/F", "/T", "/PID", str(pid)],
+                           creationflags=0x08000000, timeout=10, capture_output=True)
         time.sleep(0.8)  # let the old process fully release its resources
     except Exception:
         pass
@@ -5420,9 +5417,6 @@ def main(argv=None):
     _instance_guard, _already_running = _acquire_single_instance()
     if _already_running and not _replace_running_instance():
         return
-    # Record our PID so a later launch can replace us precisely, even if its exe was
-    # saved under a different filename (e.g. a re-downloaded 'audiobus-agent (1).exe').
-    _write_pidfile()
     try:
         App(args).run()
     except Exception as e:
