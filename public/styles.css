@@ -938,3 +938,18 @@ body.app {
 /* The hidden file <input> must never occupy layout even though it carries no [hidden]
    semantics some engines style away. */
 #fileInput { display: none; }
+
+/* Special-keys popover (Ctrl+Alt+Del, Win, Alt+Tab, Esc, Alt+F4, PrtSc) in the toolbar. */
+.keys-wrap { position: relative; display: inline-flex; }
+.keys-menu {
+  position: absolute; top: calc(100% + 6px); right: 0; z-index: 60;
+  display: flex; flex-direction: column; min-width: 164px; padding: 6px;
+  background: var(--panel); border: 1px solid var(--border);
+  border-radius: 12px; box-shadow: var(--shadow);
+}
+.keys-item {
+  appearance: none; background: transparent; border: 0; color: var(--text);
+  text-align: left; padding: 9px 12px; border-radius: 8px; cursor: pointer;
+  font: inherit; white-space: nowrap;
+}
+.keys-item:hover, .keys-item:focus-visible { background: var(--bg-accent); outline: none; }

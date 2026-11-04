@@ -561,7 +561,7 @@ SPECIAL_KEYS = {
     "Control": Key.ctrl, "Alt": Key.alt, "Meta": Key.cmd, "OS": Key.cmd,
     "CapsLock": Key.caps_lock, "Delete": Key.delete, "Home": Key.home,
     "End": Key.end, "PageUp": Key.page_up, "PageDown": Key.page_down,
-    "Insert": Key.insert, " ": Key.space,
+    "Insert": Key.insert, " ": Key.space, "PrintScreen": Key.print_screen,
     "F1": Key.f1, "F2": Key.f2, "F3": Key.f3, "F4": Key.f4,
     "F5": Key.f5, "F6": Key.f6, "F7": Key.f7, "F8": Key.f8,
     "F9": Key.f9, "F10": Key.f10, "F11": Key.f11, "F12": Key.f12,
@@ -668,7 +668,7 @@ _GUI_DPI_LOGGED = False   # one-time GUI-thread DPI-awareness + raw-rect diagnos
 _SHOT_SAVED = False       # one-time: save an mss screenshot on the first blocked click
 
 
-_AGENT_BUILD = "2026-11-04-oh264smooth"  # bumped per diagnostic build; appears in the click log
+_AGENT_BUILD = "2026-11-04-speckeys"  # bumped per diagnostic build; appears in the click log
 
 
 def _save_debug_shot(x, y):
@@ -807,6 +807,19 @@ def _click_on_agent(x, y, rects):
         return True  # fail closed: keep the original protective behaviour
 
 
+def _send_sas():
+    """Trigger the Secure Attention Sequence (Ctrl+Alt+Del) on the remote. SendInput cannot
+    inject it, so use sas.dll's SendSAS. This needs the SoftwareSASGeneration policy to permit
+    apps (HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Policies\\System\\
+    SoftwareSASGeneration = 2 or 3); it is best-effort and silently no-ops otherwise. Note:
+    Ctrl+Alt+Del opens the ISOLATED secure desktop, which the agent cannot capture or drive,
+    so the stream freezes on its last frame while that screen is up."""
+    try:
+        ctypes.windll.sas.SendSAS(False)
+    except Exception:
+        pass
+
+
 def apply_event(ev, monitors=None, window_rects=None, blocked=None,
                 pressed=None, agent_foreground=False, wheel_accum=None):
     """Apply one remote input event, while protecting the agent's OWN windows so a
@@ -890,6 +903,8 @@ def apply_event(ev, monitors=None, window_rects=None, blocked=None,
             k = resolve_key(ev)
             if k is not None:
                 keyboard.release(k)
+        elif t == "sas":
+            _send_sas()   # Ctrl+Alt+Del (sent as a dedicated event; SendInput can't do it)
     except Exception:
         pass  # never let a bad event kill the stream
 

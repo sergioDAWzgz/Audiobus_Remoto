@@ -30,6 +30,9 @@ const fsHint = $("fsHint");
 const sendFileBtn = $("sendFileBtn");
 const fsSendFileBtn = $("fsSendFileBtn");
 const fileInput = $("fileInput");
+const keysWrap = $("keysWrap"); // special-keys toolbar button + popover menu
+const keysBtn = $("keysBtn");
+const keysMenu = $("keysMenu");
 const dropHint = $("dropHint");
 const transfersEl = $("transfers");
 const barActions = document.querySelector(".bar-actions");
@@ -1707,6 +1710,7 @@ function startSession(mons) {
   stageEl.hidden = false;
   fsBtn.hidden = false;
   disconnectBtn.hidden = false;
+  if (keysWrap) keysWrap.hidden = false;
   placeStatusInBar(); // connected: status returns to the top-left bar
 
   buildMonitorPicker();
@@ -1776,6 +1780,7 @@ function endSession(keepStatus) {
   joinEl.hidden = false;
   fsBtn.hidden = true;
   disconnectBtn.hidden = true;
+  if (keysWrap) { keysWrap.hidden = true; if (keysMenu) keysMenu.hidden = true; }
   placeStatusInJoin(); // back on the join screen: status below the center card
   viewControls.hidden = true;
   monitorPicker.hidden = true;
@@ -2271,6 +2276,46 @@ fsDisconnectBtn.addEventListener("click", requestDisconnect);
 if (sendFileBtn) sendFileBtn.addEventListener("click", onSendFileClick);
 if (fsSendFileBtn) fsSendFileBtn.addEventListener("click", onSendFileClick);
 if (fileInput) fileInput.addEventListener("change", onFileInputChange);
+
+// Special keys: send combinations the local browser/OS swallows (Win, Alt+Tab, Alt+F4,
+// Esc, PrtSc) by generating the key events directly, plus Ctrl+Alt+Del as a dedicated SAS
+// event (SendInput can't inject it). Each combo presses the keys in order, then releases
+// them in reverse.
+const KEY_COMBOS = {
+  win: [{ key: "Meta", code: "MetaLeft" }],
+  altTab: [{ key: "Alt", code: "AltLeft" }, { key: "Tab", code: "Tab" }],
+  esc: [{ key: "Escape", code: "Escape" }],
+  altF4: [{ key: "Alt", code: "AltLeft" }, { key: "F4", code: "F4" }],
+  prtsc: [{ key: "PrintScreen", code: "PrintScreen" }],
+};
+function sendCombo(name) {
+  const seq = KEY_COMBOS[name];
+  if (!seq || !inSession) return;
+  for (const k of seq) send({ t: "kd", key: k.key, code: k.code });
+  for (let i = seq.length - 1; i >= 0; i--) send({ t: "ku", key: seq[i].key, code: seq[i].code });
+}
+function closeKeysMenu() {
+  if (keysMenu) keysMenu.hidden = true;
+  if (keysBtn) keysBtn.setAttribute("aria-expanded", "false");
+}
+if (keysBtn && keysMenu) {
+  keysBtn.addEventListener("click", (e) => {
+    e.stopPropagation();
+    const opening = keysMenu.hidden;
+    keysMenu.hidden = !opening;
+    keysBtn.setAttribute("aria-expanded", opening ? "true" : "false");
+  });
+  keysMenu.addEventListener("click", (e) => {
+    const item = e.target.closest(".keys-item");
+    if (!item || !inSession) return;
+    if (item.dataset.sas) send({ t: "sas" });
+    else if (item.dataset.combo) sendCombo(item.dataset.combo);
+    closeKeysMenu();
+  });
+  document.addEventListener("click", (e) => {
+    if (!keysMenu.hidden && !keysWrap.contains(e.target)) closeKeysMenu();
+  });
+}
 
 // Global drag guard (always on): stop the browser from navigating away — which would
 // destroy a live session — if a file is dropped anywhere outside the stage drop zone

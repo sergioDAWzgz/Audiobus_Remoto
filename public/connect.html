@@ -111,6 +111,21 @@
           <span class="btn-label" data-i18n="connect.btn.sendFile">Send file</span>
         </button>
         <input id="fileInput" type="file" multiple hidden />
+        <div id="keysWrap" class="keys-wrap" hidden>
+          <button id="keysBtn" class="btn" type="button" data-i18n-attr="title:connect.btn.keys"
+                  aria-haspopup="true" aria-expanded="false">
+            <svg class="btn-ico"><use href="#ico-keyboard" /></svg>
+            <span class="btn-label" data-i18n="connect.btn.keys">Keys</span>
+          </button>
+          <div id="keysMenu" class="keys-menu" hidden role="menu">
+            <button class="keys-item" type="button" data-sas="1" role="menuitem">Ctrl+Alt+Del</button>
+            <button class="keys-item" type="button" data-combo="win" role="menuitem">⊞ Win</button>
+            <button class="keys-item" type="button" data-combo="altTab" role="menuitem">Alt+Tab</button>
+            <button class="keys-item" type="button" data-combo="esc" role="menuitem">Esc</button>
+            <button class="keys-item" type="button" data-combo="altF4" role="menuitem">Alt+F4</button>
+            <button class="keys-item" type="button" data-combo="prtsc" role="menuitem">PrtSc</button>
+          </div>
+        </div>
         <button id="disconnectBtn" class="btn danger" hidden type="button" data-i18n-attr="title:connect.btn.disconnect">
           <svg class="btn-ico"><use href="#ico-disconnect" /></svg>
           <span class="btn-label" data-i18n="connect.btn.disconnect">Disconnect</span>
