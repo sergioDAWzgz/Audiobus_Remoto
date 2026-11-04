@@ -668,7 +668,7 @@ _GUI_DPI_LOGGED = False   # one-time GUI-thread DPI-awareness + raw-rect diagnos
 _SHOT_SAVED = False       # one-time: save an mss screenshot on the first blocked click
 
 
-_AGENT_BUILD = "2026-11-04-hwprobe"  # bumped per diagnostic build; appears in the click log
+_AGENT_BUILD = "2026-11-04-openh264"  # bumped per diagnostic build; appears in the click log
 
 
 def _save_debug_shot(x, y):
@@ -1489,9 +1489,10 @@ def _vc_make_vp8(w, h, bitrate):
 # so _start_webrtc bumps the offered level to 5.1 before sending the SDP (see
 # _bump_h264_level) — otherwise a strict browser decoder rejects the oversized stream and
 # shows black. h264_qsv only accepts nv12 input; the others take yuv420p. If no hardware
-# encoder actually opens+encodes here (listed != usable), 'auto' falls back to VP8 — NOT
-# libx264: software H264 decodes as uniform gray in browsers (a libx264-bitstream vs
-# browser-WebRTC-decoder incompatibility). Only --video-codec h264 forces libx264.
+# encoder actually opens+encodes here (listed != usable), the software H264 encoder is
+# OpenH264 (bundled openh264.dll) — NOT libx264: libx264's bitstream decodes as uniform gray
+# in browsers (a libx264 vs browser-WebRTC-decoder incompatibility; OpenH264, the encoder
+# browsers themselves use, renders fine). VP8 is used only if the OpenH264 DLL won't load.
 _VC_H264_HW = ("h264_qsv", "h264_nvenc", "h264_amf")   # hardware, preference order
 _VC_PIXFMT = {"h264_qsv": "nv12", "h264_amf": "nv12"}  # others default to yuv420p
 _VC_PICKED = {}                                        # prefer -> encoder name (cached)
@@ -1531,6 +1532,116 @@ def _h264_nal_scan(data):
     return types, sps
 
 
+# --- Cisco OpenH264 software encoder (ctypes) -------------------------------------------
+# libx264's H264 bitstream decodes as uniform GRAY in browsers (a libx264 vs browser
+# WebRTC-decoder incompatibility: the browser reports full decode success but renders a
+# blank frame; verified against a pure in-browser H264 loopback, which renders fine).
+# OpenH264 — the same encoder browsers use for WebRTC H264 — emits a clean Constrained
+# Baseline stream ([SPS,PPS,IDR], single slice, no bulky SEI) that DOES render (verified in
+# a real browser at 720p and 1080p). It is bundled as openh264.dll and driven here via its
+# ISVCEncoder C++ vtable. Windows x64: ctypes.CFUNCTYPE is the single x64 convention.
+_OH_VIDEO_I420 = 23
+_OH_SCREEN_REAL_TIME = 1          # EUsageType.SCREEN_CONTENT_REAL_TIME
+_OH_RC_BITRATE = 1               # RC_MODES.RC_BITRATE_MODE
+_OH_FT_SKIP, _OH_FT_INVALID = 0, -1
+
+
+class _SEncParamBase(ctypes.Structure):
+    _fields_ = [("iUsageType", ctypes.c_int), ("iPicWidth", ctypes.c_int),
+                ("iPicHeight", ctypes.c_int), ("iTargetBitrate", ctypes.c_int),
+                ("iRCMode", ctypes.c_int), ("fMaxFrameRate", ctypes.c_float)]
+
+
+class _SSourcePicture(ctypes.Structure):
+    _fields_ = [("iColorFormat", ctypes.c_int), ("iStride", ctypes.c_int * 4),
+                ("pData", ctypes.POINTER(ctypes.c_ubyte) * 4), ("iPicWidth", ctypes.c_int),
+                ("iPicHeight", ctypes.c_int), ("uiTimeStamp", ctypes.c_longlong)]
+
+
+class _SLayerBSInfo(ctypes.Structure):
+    _fields_ = [("uiTemporalId", ctypes.c_ubyte), ("uiSpatialId", ctypes.c_ubyte),
+                ("uiQualityId", ctypes.c_ubyte), ("eFrameType", ctypes.c_int),
+                ("uiLayerType", ctypes.c_ubyte), ("iSubSeqId", ctypes.c_int),
+                ("iNalCount", ctypes.c_int), ("pNalLengthInByte", ctypes.POINTER(ctypes.c_int)),
+                ("pBsBuf", ctypes.POINTER(ctypes.c_ubyte))]
+
+
+class _SFrameBSInfo(ctypes.Structure):
+    _fields_ = [("iLayerNum", ctypes.c_int), ("sLayerInfo", _SLayerBSInfo * 128),
+                ("eFrameType", ctypes.c_int), ("iFrameSizeInBytes", ctypes.c_int),
+                ("uiTimeStamp", ctypes.c_longlong)]
+
+
+_OH_INIT, _OH_ENCODE, _OH_FORCEIDR, _OH_UNINIT = 0, 4, 6, 3   # ISVCEncoderVtbl indices
+_OH_PROTO_INIT = ctypes.CFUNCTYPE(ctypes.c_int, ctypes.c_void_p, ctypes.POINTER(_SEncParamBase))
+_OH_PROTO_ENCODE = ctypes.CFUNCTYPE(ctypes.c_int, ctypes.c_void_p,
+                                    ctypes.POINTER(_SSourcePicture), ctypes.POINTER(_SFrameBSInfo))
+_OH_PROTO_FORCEIDR = ctypes.CFUNCTYPE(ctypes.c_int, ctypes.c_void_p, ctypes.c_bool)
+_OH_PROTO_UNINIT = ctypes.CFUNCTYPE(ctypes.c_int, ctypes.c_void_p)
+_OH_DLL = None                    # loaded once per process (the child), lazily
+
+
+def _openh264_dll_path():
+    base = getattr(sys, "_MEIPASS", None) or os.path.dirname(os.path.abspath(__file__))
+    return os.path.join(base, "openh264.dll")
+
+
+class _OpenH264Encoder:
+    """Encode av.VideoFrame (yuv420p) -> Annex-B H264 via the bundled Cisco OpenH264 DLL."""
+
+    def __init__(self, w, h, bitrate, fps):
+        global _OH_DLL
+        if _OH_DLL is None:
+            _OH_DLL = ctypes.CDLL(_openh264_dll_path())
+            _OH_DLL.WelsCreateSVCEncoder.argtypes = [ctypes.POINTER(ctypes.c_void_p)]
+            _OH_DLL.WelsCreateSVCEncoder.restype = ctypes.c_int
+            _OH_DLL.WelsDestroySVCEncoder.argtypes = [ctypes.c_void_p]
+        self.enc = ctypes.c_void_p()
+        if _OH_DLL.WelsCreateSVCEncoder(ctypes.byref(self.enc)) != 0 or not self.enc:
+            raise RuntimeError("WelsCreateSVCEncoder failed")
+        vt = ctypes.cast(self.enc, ctypes.POINTER(ctypes.c_void_p))[0]
+        self.vt = ctypes.cast(vt, ctypes.POINTER(ctypes.c_void_p))
+        p = _SEncParamBase(_OH_SCREEN_REAL_TIME, w, h, int(bitrate), _OH_RC_BITRATE, float(fps))
+        if _OH_PROTO_INIT(self.vt[_OH_INIT])(self.enc, ctypes.byref(p)) != 0:
+            raise RuntimeError("OpenH264 Initialize failed")
+        self.w, self.h = w, h
+        self._encode = _OH_PROTO_ENCODE(self.vt[_OH_ENCODE])
+        self._forceidr = _OH_PROTO_FORCEIDR(self.vt[_OH_FORCEIDR])
+        self._bs = _SFrameBSInfo()
+
+    def force_idr(self):
+        self._forceidr(self.enc, True)
+
+    def encode(self, yuv_frame):
+        """Returns (annex_b_bytes, is_keyframe); (b'', False) on a skipped/failed frame."""
+        src = _SSourcePicture()
+        src.iColorFormat = _OH_VIDEO_I420
+        src.iPicWidth, src.iPicHeight = self.w, self.h
+        src.uiTimeStamp = int(getattr(yuv_frame, "pts", 0) or 0)
+        for i in range(3):
+            pl = yuv_frame.planes[i]
+            src.pData[i] = ctypes.cast(pl.buffer_ptr, ctypes.POINTER(ctypes.c_ubyte))
+            src.iStride[i] = pl.line_size
+        ctypes.memset(ctypes.byref(self._bs), 0, ctypes.sizeof(self._bs))
+        rc = self._encode(self.enc, ctypes.byref(src), ctypes.byref(self._bs))
+        if rc != 0 or self._bs.eFrameType in (_OH_FT_SKIP, _OH_FT_INVALID):
+            return b"", False
+        out = bytearray()
+        for li in range(self._bs.iLayerNum):
+            lyr = self._bs.sLayerInfo[li]
+            out += ctypes.string_at(lyr.pBsBuf, sum(lyr.pNalLengthInByte[n]
+                                                    for n in range(lyr.iNalCount)))
+        data = bytes(out)
+        return data, (b"\x00\x00\x00\x01\x67" in data or b"\x00\x00\x01\x67" in data)  # SPS
+
+    def close(self):
+        try:
+            _OH_PROTO_UNINIT(self.vt[_OH_UNINIT])(self.enc)
+            _OH_DLL.WelsDestroySVCEncoder(self.enc)
+        except Exception:
+            pass
+
+
 def _vc_encoder_pixfmt(name):
     return _VC_PIXFMT.get(name, "yuv420p")
 
@@ -1540,9 +1651,13 @@ def _vc_family(name):
 
 
 def _vc_make_encoder(w, h, bitrate, name):
-    """Build the chosen encoder context, returning (codec_context, input_pix_fmt)."""
+    """Build the chosen encoder context, returning (codec_context, input_pix_fmt).
+    'openh264' returns an _OpenH264Encoder (ctypes), not an av.CodecContext — the capture
+    loop branches on its type."""
     if name == "libvpx":
         return _vc_make_vp8(w, h, bitrate), "yuv420p"
+    if name == "openh264":
+        return _OpenH264Encoder(w, h, bitrate, 20), "yuv420p"
     pix = _vc_encoder_pixfmt(name)
     cc = av.CodecContext.create(name, "w")
     cc.width, cc.height = w, h
@@ -1573,6 +1688,24 @@ def _vc_encoder_works(name, w, h):
     """True only if the encoder actually OPENS and encodes a frame AT THE GIVEN SIZE — a
     hardware encoder lists as available even with no GPU, and some open at a tiny size but
     reject the real resolution (alignment/level limits), so we probe at the capped size."""
+    if name == "openh264":
+        try:
+            enc = _OpenH264Encoder(w, h, 1_000_000, 20)
+            fr = av.VideoFrame.from_ndarray(
+                np.zeros((h, w, 3), dtype=np.uint8), format="rgb24").reformat(format="yuv420p")
+            fr.pts = 0
+            enc.force_idr()
+            data, _ = enc.encode(fr)
+            enc.close()
+            ok = bool(data)
+            _click_log("[diag probe openh264 %dx%d -> %s]" % (w, h, "OK" if ok else "no-output"))
+            return ok
+        except Exception as e:
+            try:
+                _click_log("[diag probe openh264 %dx%d FAILED: %r]" % (w, h, e))
+            except Exception:
+                pass
+            return False
     try:
         cc, pix = _vc_make_encoder(w, h, 1_000_000, name)
         fr = av.VideoFrame.from_ndarray(
@@ -1595,20 +1728,20 @@ def _vc_encoder_works(name, w, h):
 
 def _vc_pick_encoder(prefer, w=1920, h=1080):
     """Resolve the encoder name for a --video-codec preference, probing at (w,h):
-    'vp8' -> libvpx; 'auto' -> a usable HARDWARE H264 encoder (QSV/NVENC/AMF) else libvpx
-    (VP8) — NEVER libx264, because software H264 decodes as gray in browsers (a libx264 vs
-    browser-WebRTC-decoder incompatibility); 'h264' -> hardware H264 else libx264 (software
-    H264, experimental — expect gray in most browsers). MUST be run inside the CHILD process
-    so a native GPU-driver crash on the probe kills only the child, not the whole agent."""
+    'vp8' -> libvpx; 'auto' and 'h264' -> a usable HARDWARE H264 encoder (QSV/NVENC/AMF) else
+    OpenH264 (software H264 that browsers actually decode), else libvpx (VP8) only if the
+    OpenH264 DLL fails to load. libx264 is NEVER selected here — its bitstream decodes as
+    uniform gray in browsers (a libx264 vs browser-WebRTC-decoder incompatibility). MUST be
+    run inside the CHILD process so a native GPU-driver crash on the probe kills only the
+    child, not the whole agent."""
     if prefer == "vp8":
         return "libvpx"
     key = (prefer, _even(w), _even(h))
     if key in _VC_PICKED:
         return _VC_PICKED[key]
     order = list(_VC_H264_HW)
-    if prefer == "h264":
-        order.append("libx264")        # software H264 only when H264 is explicitly forced
-    picked = "libvpx"                  # 'auto' falls back to VP8, never libx264 (gray)
+    order.append("openh264")           # software H264 the browser can decode (NOT libx264)
+    picked = "libvpx"                  # ultimate fallback only if the OpenH264 DLL won't load
     for name in order:
         if _vc_encoder_works(name, _even(w), _even(h)):
             picked = name
@@ -1724,16 +1857,29 @@ def _vc_capture_session(sock, state):
                     format=enc[4])
                 frame.pts = int((time.monotonic() - starts[mi]) * _VC_CLOCK)
                 frame.time_base = fractions.Fraction(1, _VC_CLOCK)
-                if force_kf:
-                    frame.pict_type = av.video.frame.PictureType.I
-                    state["kf"].discard(mi)
                 try:
                     sent_any = False
-                    for pkt in cc.encode(frame):
-                        body = struct.pack(">BBq", mi, 1 if pkt.is_keyframe else 0,
-                                           int(pkt.pts)) + bytes(pkt)
-                        _vc_send_frame(sock, _VC_PKT, body)
-                        sent_any = True
+                    if isinstance(cc, _OpenH264Encoder):
+                        # OpenH264 is driven by force_idr()/encode() -> (bytes, is_keyframe),
+                        # not av's pict_type/encode().
+                        if force_kf:
+                            cc.force_idr()
+                            state["kf"].discard(mi)
+                        data, is_kf = cc.encode(frame)
+                        if data:
+                            body = struct.pack(">BBq", mi, 1 if is_kf else 0,
+                                               int(frame.pts)) + data
+                            _vc_send_frame(sock, _VC_PKT, body)
+                            sent_any = True
+                    else:
+                        if force_kf:
+                            frame.pict_type = av.video.frame.PictureType.I
+                            state["kf"].discard(mi)
+                        for pkt in cc.encode(frame):
+                            body = struct.pack(">BBq", mi, 1 if pkt.is_keyframe else 0,
+                                               int(pkt.pts)) + bytes(pkt)
+                            _vc_send_frame(sock, _VC_PKT, body)
+                            sent_any = True
                     if sent_any:
                         last_enc_ok = time.monotonic()
                 except (OSError, ConnectionError, BrokenPipeError):
@@ -5402,10 +5548,10 @@ def parse_args(argv):
                    help="Monitor index (1 = primary, 0 = all).")
     p.add_argument("--video-codec", dest="video_codec",
                    choices=("auto", "vp8", "h264"), default="auto",
-                   help="Video codec: 'auto' (default) uses hardware H264 (Intel QSV / "
-                        "NVIDIA NVENC / AMD AMF) when it opens, else VP8 (never software "
-                        "H264, which browsers render gray); 'h264' forces H264 (hardware "
-                        "else software libx264, experimental); 'vp8' forces VP8.")
+                   help="Video codec: 'auto' (default) and 'h264' use hardware H264 (Intel "
+                        "QSV / NVIDIA NVENC / AMD AMF) when it opens, else OpenH264 (software "
+                        "H264 the browser can decode), else VP8 if the OpenH264 DLL is "
+                        "missing; 'vp8' forces VP8.")
     p.add_argument("--auto-accept", action="store_true",
                    help="Start with the approval prompt disabled.")
     # Hidden diagnostic: validate this (possibly frozen) build's capture + VP8

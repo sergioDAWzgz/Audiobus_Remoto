@@ -68,6 +68,7 @@ Invoke-OrThrow { & $py -m PyInstaller `
     --name audiobus-agent `
     --windowed `
     --uac-admin `
+    --add-binary "openh264.dll;." `
     --icon logo.ico `
     --version-file version_info.txt `
     --collect-all av `
