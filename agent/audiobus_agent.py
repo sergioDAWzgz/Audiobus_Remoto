@@ -668,7 +668,7 @@ _GUI_DPI_LOGGED = False   # one-time GUI-thread DPI-awareness + raw-rect diagnos
 _SHOT_SAVED = False       # one-time: save an mss screenshot on the first blocked click
 
 
-_AGENT_BUILD = "2026-11-04-h264sw"  # bumped per diagnostic build; appears in the click log
+_AGENT_BUILD = "2026-11-04-h264lvl"  # bumped per diagnostic build; appears in the click log
 
 
 def _save_debug_shot(x, y):
@@ -1464,13 +1464,27 @@ def _vc_make_vp8(w, h, bitrate):
 
 
 # Hardware H264 (Intel QSV / NVIDIA NVENC / AMD AMF) offloads the encode off the CPU. We
-# emit Constrained-Baseline so the bitstream matches aiortc's offered profile-level-id
-# 42001f (decodable by every WebRTC browser). h264_qsv only accepts nv12 input; the others
-# take yuv420p. If no hardware encoder actually opens+encodes here (listed != usable), the
-# child uses software H264 (libx264), falling back to VP8 only if libx264 won't open either.
+# emit Constrained-Baseline (profile 0x42 + constraint 0xe0) to match aiortc's offered
+# profile. The LEVEL aiortc offers (3.1, max ~1280x720) is too low for our 1080p+ capture,
+# so _start_webrtc bumps the offered level to 5.1 before sending the SDP (see
+# _bump_h264_level) — otherwise a strict browser decoder rejects the oversized stream and
+# shows black. h264_qsv only accepts nv12 input; the others take yuv420p. If no hardware
+# encoder actually opens+encodes here (listed != usable), the child uses software H264
+# (libx264), falling back to VP8 only if libx264 won't open either.
 _VC_H264_HW = ("h264_qsv", "h264_nvenc", "h264_amf")   # hardware, preference order
 _VC_PIXFMT = {"h264_qsv": "nv12", "h264_amf": "nv12"}  # others default to yuv420p
 _VC_PICKED = {}                                        # prefer -> encoder name (cached)
+
+
+def _bump_h264_level(sdp):
+    """Raise the H264 level in an offer SDP from aiortc's fixed 3.1 to 5.1. aiortc only
+    offers profile-level-id 42001f / 42e01f (both level 3.1 = max ~1280x720); we stream up
+    to 1920 wide (1080p+), which exceeds level 3.1, so a strict browser decoder rejects the
+    whole stream. Bumping the last byte 1f->33 (level 5.1) makes the browser negotiate a
+    level that permits our resolution. aiortc packetizes H264 identically regardless of the
+    fmtp level, and each encoder declares its own resolution-correct level in-band."""
+    return (sdp.replace("profile-level-id=42e01f", "profile-level-id=42e033")
+               .replace("profile-level-id=42001f", "profile-level-id=420033"))
 
 
 def _vc_encoder_pixfmt(name):
@@ -1495,7 +1509,13 @@ def _vc_make_encoder(w, h, bitrate, name):
     cc.time_base = fractions.Fraction(1, _VC_CLOCK)
     if name == "libx264":
         cc.profile = "Baseline"
-        cc.options = {"tune": "zerolatency", "level": "31"}   # libx264 maps pict_type=I -> IDR
+        # Level 5.1, NOT 3.1: at 1080p a level:31 SPS is non-conformant (it exceeds L3.1's
+        # macroblock limit) and strict browser decoders reject the whole stream -> black.
+        # 5.1 is valid up to 4K and matches the level we bump the SDP offer to
+        # (_bump_h264_level), so the declared stream level never exceeds the negotiated one.
+        # (Dropping the option entirely makes libx264 signal its max, 6.2 > our offer.)
+        # libx264 still maps pict_type=I -> IDR.
+        cc.options = {"tune": "zerolatency", "level": "5.1"}
     else:                       # hardware encoders: Constrained Baseline, minimal opts
         cc.options = {"profile": "baseline"}
         # pict_type=I alone is only a NON-IDR I-frame on NVENC/AMF (no SPS/PPS), so a viewer
@@ -3375,9 +3395,13 @@ class NetClient:
                 if mi is not None and tcv.mid is not None:
                     mids[tcv.mid] = mi
 
+            sdp = self.pc.localDescription.sdp
+            if (self._using_vchild and self.vchild is not None
+                    and self.vchild.codec_family == "h264"):
+                sdp = _bump_h264_level(sdp)
             await ws.send(json.dumps({
                 "type": "webrtc-offer",
-                "sdp": self.pc.localDescription.sdp,
+                "sdp": sdp,
                 "mids": mids,
             }))
             return True
