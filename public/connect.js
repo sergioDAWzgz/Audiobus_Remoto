@@ -351,9 +351,16 @@ async function sendClipImage(bytes) {
   send({ type: "clip-img-end", id });
 }
 
+// Firefox DOES expose navigator.clipboard.read()/readText() now, but it pops a native
+// "Paste" context menu on EVERY call (no persistent clipboard-read grant). Auto-sampling on
+// each pointerdown therefore spammed that menu on every click. Skip the outbound sample on
+// Firefox: host->viewer clipboard still works (writeText needs no prompt), and viewer->host
+// stays Chromium/Safari-only, as originally intended.
+const CLIP_NO_AUTOREAD = /firefox/i.test(navigator.userAgent || "");
+
 async function syncClipboardUp() {
   if (!inSession || !clipCaps || clipReadBusy) return;
-  if (!navigator.clipboard) return;
+  if (!navigator.clipboard || CLIP_NO_AUTOREAD) return;
   const now = performance.now();
   if (now - clipReadAt < 400) return; // throttle: fires on every click/focus
   clipReadAt = now;
@@ -458,7 +465,7 @@ function onClipImgEnd(msg) {
 // (no focus/permission), the provisional wire-byte hash stands (bounded to one echo).
 async function reseedClipImgGuard() {
   try {
-    if (!navigator.clipboard.read) return;
+    if (!navigator.clipboard.read || CLIP_NO_AUTOREAD) return;
     const items = await navigator.clipboard.read();
     for (const item of items) {
       const t = item.types.find((x) => x.startsWith("image/"));
