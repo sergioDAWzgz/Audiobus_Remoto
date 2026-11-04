@@ -668,7 +668,7 @@ _GUI_DPI_LOGGED = False   # one-time GUI-thread DPI-awareness + raw-rect diagnos
 _SHOT_SAVED = False       # one-time: save an mss screenshot on the first blocked click
 
 
-_AGENT_BUILD = "2026-11-04-openh264"  # bumped per diagnostic build; appears in the click log
+_AGENT_BUILD = "2026-11-04-oh264smooth"  # bumped per diagnostic build; appears in the click log
 
 
 def _save_debug_shot(x, y):
@@ -1572,7 +1572,9 @@ class _SFrameBSInfo(ctypes.Structure):
                 ("uiTimeStamp", ctypes.c_longlong)]
 
 
-_OH_INIT, _OH_ENCODE, _OH_FORCEIDR, _OH_UNINIT = 0, 4, 6, 3   # ISVCEncoderVtbl indices
+_OH_INIT, _OH_ENCODE, _OH_FORCEIDR, _OH_UNINIT, _OH_SETOPT = 0, 4, 6, 3, 7  # ISVCEncoderVtbl
+_OH_OPT_RC_FRAME_SKIP, _OH_OPT_NUMBER_REF = 9, 13   # ENCODER_OPTION indices
+_OH_PROTO_SETOPT = ctypes.CFUNCTYPE(ctypes.c_int, ctypes.c_void_p, ctypes.c_int, ctypes.c_void_p)
 _OH_PROTO_INIT = ctypes.CFUNCTYPE(ctypes.c_int, ctypes.c_void_p, ctypes.POINTER(_SEncParamBase))
 _OH_PROTO_ENCODE = ctypes.CFUNCTYPE(ctypes.c_int, ctypes.c_void_p,
                                     ctypes.POINTER(_SSourcePicture), ctypes.POINTER(_SFrameBSInfo))
@@ -1604,6 +1606,19 @@ class _OpenH264Encoder:
         p = _SEncParamBase(_OH_SCREEN_REAL_TIME, w, h, int(bitrate), _OH_RC_BITRATE, float(fps))
         if _OH_PROTO_INIT(self.vt[_OH_INIT])(self.enc, ctypes.byref(p)) != 0:
             raise RuntimeError("OpenH264 Initialize failed")
+        # Low-latency tuning (post-init SetOption): DISABLE frame skip — the default skips
+        # frames to hold the target bitrate, which is choppy/laggy on a fast link (VP8 never
+        # skips); and use a SINGLE reference frame to minimize the decoder's buffering. On a
+        # weak link REMB lowers the target, so the encoder raises QP (blurrier) instead of
+        # dropping frames — smoother for remote control.
+        try:
+            setopt = _OH_PROTO_SETOPT(self.vt[_OH_SETOPT])
+            noskip = ctypes.c_int(0)
+            setopt(self.enc, _OH_OPT_RC_FRAME_SKIP, ctypes.byref(noskip))
+            oneref = ctypes.c_int(1)
+            setopt(self.enc, _OH_OPT_NUMBER_REF, ctypes.byref(oneref))
+        except Exception:
+            pass
         self.w, self.h = w, h
         self._encode = _OH_PROTO_ENCODE(self.vt[_OH_ENCODE])
         self._forceidr = _OH_PROTO_FORCEIDR(self.vt[_OH_FORCEIDR])
