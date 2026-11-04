@@ -668,7 +668,7 @@ _GUI_DPI_LOGGED = False   # one-time GUI-thread DPI-awareness + raw-rect diagnos
 _SHOT_SAVED = False       # one-time: save an mss screenshot on the first blocked click
 
 
-_AGENT_BUILD = "2026-11-04-h264lvl"  # bumped per diagnostic build; appears in the click log
+_AGENT_BUILD = "2026-11-04-h264diag"  # bumped per diagnostic build; appears in the click log
 
 
 def _save_debug_shot(x, y):
@@ -1202,6 +1202,7 @@ class VideoChild:
         self.encoder_name = "libvpx"  # chosen encoder (set once after spawn/probe)
         self.codec_family = "vp8"     # "vp8" or "h264" (how recv wraps + how we negotiate)
         self._send_lock = threading.Lock()
+        self._diag_logged = False     # log the first delivered packet's codec structure once
 
     def spawn(self):
         """Launch the child and connect; it then IDLES until begin(). BLOCKS (run in an
@@ -1266,6 +1267,12 @@ class VideoChild:
         self._queues = {m["i"]: asyncio.Queue(maxsize=90)
                         for m in self.client.monitors}
         self._capturing = True
+        self._diag_logged = False
+        try:
+            _click_log("[diag video begin encoder=%s family=%s build=%s]"
+                       % (self.encoder_name, self.codec_family, _AGENT_BUILD))
+        except Exception:
+            pass
         bitrate = (int(self.client.args.bitrate) * 1000
                    if self.client.args.bitrate else _VC_DEFAULT_BITRATE)
         self._send_ctl({
@@ -1322,6 +1329,19 @@ class VideoChild:
         resync with a keyframe instead."""
         if not self._capturing:
             return                      # stray packet after a session ended; ignore
+        if not self._diag_logged:       # log the first delivered packet's codec structure
+            self._diag_logged = True
+            try:
+                if self.codec_family == "h264":
+                    types, sps = _h264_nal_scan(data)
+                    s = ("profile=%d constraint=0x%02x level=%d" % sps) if sps else "NO-SPS"
+                    _click_log("[diag h264 first-pkt encoder=%s bytes=%d nals=%s %s]"
+                               % (self.encoder_name, len(data), types[:16], s))
+                else:
+                    _click_log("[diag %s first-pkt encoder=%s bytes=%d]"
+                               % (self.codec_family, self.encoder_name, len(data)))
+            except Exception as e:
+                _click_log("[diag first-pkt scan failed %r]" % (e,))
         q = self._queues.get(mi)
         if q is None:
             return
@@ -1485,6 +1505,29 @@ def _bump_h264_level(sdp):
     fmtp level, and each encoder declares its own resolution-correct level in-band."""
     return (sdp.replace("profile-level-id=42e01f", "profile-level-id=42e033")
                .replace("profile-level-id=42001f", "profile-level-id=420033"))
+
+
+def _h264_nal_scan(data):
+    """Diagnostic: return (list of NAL-unit type ints in Annex-B `data`, sps) where sps is
+    (profile_idc, constraint_flags, level_idc) from the first SPS NAL, or None. Used to log
+    what a hardware H264 encoder actually emits (profile/level, inline SPS/PPS, Annex-B)."""
+    types = []
+    sps = None
+    i, n = 0, len(data)
+    while i < n - 4:
+        if data[i] == 0 and data[i + 1] == 0 and data[i + 2] == 1:
+            h = i + 3
+        elif data[i] == 0 and data[i + 1] == 0 and data[i + 2] == 0 and data[i + 3] == 1:
+            h = i + 4
+        else:
+            i += 1
+            continue
+        t = data[h] & 0x1f
+        types.append(t)
+        if t == 7 and sps is None and h + 3 < n:
+            sps = (data[h + 1], data[h + 2], data[h + 3])
+        i = h + 1
+    return types, sps
 
 
 def _vc_encoder_pixfmt(name):
