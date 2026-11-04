@@ -668,7 +668,7 @@ _GUI_DPI_LOGGED = False   # one-time GUI-thread DPI-awareness + raw-rect diagnos
 _SHOT_SAVED = False       # one-time: save an mss screenshot on the first blocked click
 
 
-_AGENT_BUILD = "2026-11-04-h264diag"  # bumped per diagnostic build; appears in the click log
+_AGENT_BUILD = "2026-11-04-hwprobe"  # bumped per diagnostic build; appears in the click log
 
 
 def _save_debug_shot(x, y):
@@ -1489,8 +1489,9 @@ def _vc_make_vp8(w, h, bitrate):
 # so _start_webrtc bumps the offered level to 5.1 before sending the SDP (see
 # _bump_h264_level) — otherwise a strict browser decoder rejects the oversized stream and
 # shows black. h264_qsv only accepts nv12 input; the others take yuv420p. If no hardware
-# encoder actually opens+encodes here (listed != usable), the child uses software H264
-# (libx264), falling back to VP8 only if libx264 won't open either.
+# encoder actually opens+encodes here (listed != usable), 'auto' falls back to VP8 — NOT
+# libx264: software H264 decodes as uniform gray in browsers (a libx264-bitstream vs
+# browser-WebRTC-decoder incompatibility). Only --video-codec h264 forces libx264.
 _VC_H264_HW = ("h264_qsv", "h264_nvenc", "h264_amf")   # hardware, preference order
 _VC_PIXFMT = {"h264_qsv": "nv12", "h264_amf": "nv12"}  # others default to yuv420p
 _VC_PICKED = {}                                        # prefer -> encoder name (cached)
@@ -1578,25 +1579,36 @@ def _vc_encoder_works(name, w, h):
             np.zeros((h, w, 3), dtype=np.uint8), format="rgb24").reformat(format=pix)
         fr.pts = 0
         fr.time_base = fractions.Fraction(1, _VC_CLOCK)
-        return bool(list(cc.encode(fr)) + list(cc.encode(None)))
-    except Exception:
+        ok = bool(list(cc.encode(fr)) + list(cc.encode(None)))
+        try:
+            _click_log("[diag probe %s %dx%d -> %s]" % (name, w, h, "OK" if ok else "no-output"))
+        except Exception:
+            pass
+        return ok
+    except Exception as e:
+        try:
+            _click_log("[diag probe %s %dx%d FAILED: %r]" % (name, w, h, e))
+        except Exception:
+            pass
         return False
 
 
 def _vc_pick_encoder(prefer, w=1920, h=1080):
     """Resolve the encoder name for a --video-codec preference, probing at (w,h):
-    'vp8' -> libvpx; 'auto' and 'h264' -> a usable hardware H264 encoder (QSV/NVENC/AMF),
-    else software H264 (libx264), else libvpx if even that won't open. MUST be run inside
-    the CHILD process so a native GPU-driver crash on the probe kills only the child, not
-    the whole agent."""
+    'vp8' -> libvpx; 'auto' -> a usable HARDWARE H264 encoder (QSV/NVENC/AMF) else libvpx
+    (VP8) — NEVER libx264, because software H264 decodes as gray in browsers (a libx264 vs
+    browser-WebRTC-decoder incompatibility); 'h264' -> hardware H264 else libx264 (software
+    H264, experimental — expect gray in most browsers). MUST be run inside the CHILD process
+    so a native GPU-driver crash on the probe kills only the child, not the whole agent."""
     if prefer == "vp8":
         return "libvpx"
     key = (prefer, _even(w), _even(h))
     if key in _VC_PICKED:
         return _VC_PICKED[key]
     order = list(_VC_H264_HW)
-    order.append("libx264")            # software H264 when no hardware encoder opens
-    picked = "libvpx"                  # ultimate fallback if even libx264 won't open
+    if prefer == "h264":
+        order.append("libx264")        # software H264 only when H264 is explicitly forced
+    picked = "libvpx"                  # 'auto' falls back to VP8, never libx264 (gray)
     for name in order:
         if _vc_encoder_works(name, _even(w), _even(h)):
             picked = name
@@ -5390,9 +5402,10 @@ def parse_args(argv):
                    help="Monitor index (1 = primary, 0 = all).")
     p.add_argument("--video-codec", dest="video_codec",
                    choices=("auto", "vp8", "h264"), default="auto",
-                   help="Video codec: 'auto' (default) and 'h264' use hardware H264 "
-                        "(Intel QSV / NVIDIA NVENC / AMD AMF) when available, else software "
-                        "H264 (libx264); 'vp8' forces VP8.")
+                   help="Video codec: 'auto' (default) uses hardware H264 (Intel QSV / "
+                        "NVIDIA NVENC / AMD AMF) when it opens, else VP8 (never software "
+                        "H264, which browsers render gray); 'h264' forces H264 (hardware "
+                        "else software libx264, experimental); 'vp8' forces VP8.")
     p.add_argument("--auto-accept", action="store_true",
                    help="Start with the approval prompt disabled.")
     # Hidden diagnostic: validate this (possibly frozen) build's capture + VP8
