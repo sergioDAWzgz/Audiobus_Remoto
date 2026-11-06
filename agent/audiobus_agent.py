@@ -668,7 +668,7 @@ _GUI_DPI_LOGGED = False   # one-time GUI-thread DPI-awareness + raw-rect diagnos
 _SHOT_SAVED = False       # one-time: save an mss screenshot on the first blocked click
 
 
-_AGENT_BUILD = "2026-11-04-speckeys"  # bumped per diagnostic build; appears in the click log
+_AGENT_BUILD = "2026-11-06-securetest"  # bumped per diagnostic build; appears in the click log
 
 
 def _save_debug_shot(x, y):
@@ -5599,7 +5599,127 @@ def parse_args(argv):
     # Escape hatch: keep capture+encode in-process (the old path) instead of a child.
     p.add_argument("--no-video-subprocess", dest="no_video_subprocess",
                    action="store_true", help=argparse.SUPPRESS)
+    # Secure-desktop (phase 1). --secure-test (run elevated) launches --secure-helper as
+    # SYSTEM via a scheduled task to validate SYSTEM capture of the (secure) desktop.
+    p.add_argument("--secure-helper", dest="secure_helper",
+                   action="store_true", help=argparse.SUPPRESS)
+    p.add_argument("--secure-test", dest="secure_test",
+                   action="store_true", help=argparse.SUPPRESS)
     return p.parse_args(argv)
+
+
+# --------------------------------------------------------------------------- #
+# Secure-desktop capture (phase 1: validate the SYSTEM technique)
+# --------------------------------------------------------------------------- #
+# The UAC consent prompt, Ctrl+Alt+Del and the login/lock screen run on an ISOLATED desktop
+# ("Winlogon" on WinSta0) whose access is granted only to SYSTEM. An elevated user app (our
+# agent) can't see or drive it. AnyDesk/TeamViewer solve this with a LocalSystem service.
+# This is the first, user-testable step: prove a SYSTEM process can attach to the interactive
+# window station + the current INPUT desktop (which becomes "Winlogon" when the secure desktop
+# is up) and capture it. `--secure-test` (run elevated) launches `--secure-helper` as SYSTEM
+# via a one-shot scheduled task; the helper logs each step and saves the latest frame.
+_SECURE_TEST_PNG = os.path.join(os.path.expanduser("~"), "audiobus-secure-test.png")
+
+
+def _secure_log(msg):
+    try:
+        with open(os.path.join(os.path.expanduser("~"), "audiobus-secure.log"),
+                  "a", encoding="utf-8") as f:
+            f.write(time.strftime("%H:%M:%S ") + msg + "\n")
+    except Exception:
+        pass
+
+
+def run_secure_helper():
+    """SYSTEM-side helper (phase 1). Attaches to WinSta0 and the current input desktop and
+    captures it for ~25 s, overwriting _SECURE_TEST_PNG each pass and logging the desktop name
+    — so if you trigger a UAC prompt while it runs, the PNG shows whether SYSTEM can see the
+    secure desktop. NOT yet wired into the live stream."""
+    import mss as _mss
+    _secure_log("helper start frozen=%s pid=%s" % (getattr(sys, "frozen", False), os.getpid()))
+    try:
+        ub = ctypes.create_unicode_buffer(256)
+        sz = wintypes.DWORD(256)
+        ctypes.windll.advapi32.GetUserNameW(ub, ctypes.byref(sz))
+        _secure_log("running as user=%s" % (ub.value,))   # expect 'SYSTEM'
+    except Exception as e:
+        _secure_log("GetUserName failed %r" % (e,))
+    user32 = ctypes.windll.user32
+    for fn in ("OpenWindowStationW", "OpenInputDesktop"):
+        try:
+            getattr(user32, fn).restype = wintypes.HANDLE
+        except Exception:
+            pass
+    try:
+        hws = user32.OpenWindowStationW("WinSta0", False, 0x10000000)  # GENERIC_ALL
+        _secure_log("OpenWindowStation WinSta0 -> %s lasterr=%s"
+                    % (hws, ctypes.GetLastError()))
+        if hws:
+            user32.SetProcessWindowStation(hws)
+    except Exception as e:
+        _secure_log("winsta attach failed %r" % (e,))
+    end = time.monotonic() + 25
+    last = None
+    while time.monotonic() < end:
+        try:
+            hdesk = user32.OpenInputDesktop(0, False, 0x01FF)   # all DESKTOP_* access
+            name = None
+            if hdesk:
+                buf = ctypes.create_unicode_buffer(256)
+                need = wintypes.DWORD()
+                user32.GetUserObjectInformationW(hdesk, 2, buf, 512, ctypes.byref(need))
+                name = buf.value
+                user32.SetThreadDesktop(hdesk)
+            if name != last:
+                _secure_log("input desktop=%r hdesk=%s lasterr=%s"
+                            % (name, hdesk, ctypes.GetLastError()))
+                last = name
+            with _mss.mss() as sct:
+                shot = sct.grab(sct.monitors[0])
+            Image.frombytes("RGB", shot.size, shot.rgb).save(_SECURE_TEST_PNG)
+            if hdesk:
+                user32.CloseDesktop(hdesk)
+        except Exception as e:
+            _secure_log("loop error %r" % (e,))
+        time.sleep(0.5)
+    _secure_log("helper done; last desktop=%r png=%s" % (last, _SECURE_TEST_PNG))
+
+
+def run_secure_test():
+    """Elevated-agent command (--secure-test): run `--secure-helper` as SYSTEM via a one-shot
+    scheduled task, so it captures the desktop with SYSTEM rights. Trigger a UAC prompt while
+    it runs to test the secure desktop. Results: _SECURE_TEST_PNG + ~/audiobus-secure.log."""
+    try:
+        os.remove(_SECURE_TEST_PNG)
+    except Exception:
+        pass
+    _secure_log("=== secure-test launched (agent elevated) ===")
+    exe = sys.executable
+    bat = os.path.join(os.path.expanduser("~"), "audiobus-secure-test.bat")
+    if getattr(sys, "frozen", False):
+        cmd = '"%s" --secure-helper' % exe
+    else:
+        cmd = '"%s" "%s" --secure-helper' % (exe, os.path.abspath(__file__))
+    try:
+        with open(bat, "w", encoding="utf-8", newline="\r\n") as f:
+            f.write("@echo off\n" + cmd + "\n")
+    except Exception as e:
+        _secure_log("write bat failed %r" % (e,))
+    tn = "AudiobusSecureTest"
+    subprocess.run(["schtasks", "/create", "/tn", tn, "/ru", "SYSTEM", "/rl", "HIGHEST",
+                    "/sc", "ONCE", "/st", "00:00", "/f", "/tr", bat],
+                   creationflags=_VC_CREATE_NO_WINDOW)
+    subprocess.run(["schtasks", "/run", "/tn", tn], creationflags=_VC_CREATE_NO_WINDOW)
+    try:
+        messagebox.showinfo(
+            "Audiobus secure-desktop test",
+            "Capturing the screen as SYSTEM for ~25 seconds.\n\nTo test the secure desktop, "
+            "trigger a UAC prompt now (e.g. right-click an app and 'Run as administrator').\n\n"
+            "Then open:\n%s\nand ~\\audiobus-secure.log\n\nClick OK when done." % _SECURE_TEST_PNG)
+    except Exception:
+        time.sleep(27)
+    subprocess.run(["schtasks", "/delete", "/tn", tn, "/f"], creationflags=_VC_CREATE_NO_WINDOW)
+    _secure_log("=== secure-test cleaned up ===")
 
 
 def run_selfcheck(out_path):
@@ -5903,6 +6023,14 @@ def main(argv=None):
     # guard (it's a second copy of this exe and must not trip the mutex) and the GUI.
     if getattr(args, "video_child", False):
         run_video_child(args.vport)
+        return
+    # Secure-desktop phase-1 helpers (run before the single-instance guard: the helper is a
+    # transient SYSTEM child and the test is a one-shot command, neither is the main agent).
+    if getattr(args, "secure_helper", False):
+        run_secure_helper()
+        return
+    if getattr(args, "secure_test", False):
+        run_secure_test()
         return
     # We hold `_instance_guard` for the whole run so a later launch sees us (and can
     # offer to replace us). If another copy is already running, offer to replace it
