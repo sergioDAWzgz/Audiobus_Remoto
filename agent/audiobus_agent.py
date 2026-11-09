@@ -703,7 +703,7 @@ _GUI_DPI_LOGGED = False   # one-time GUI-thread DPI-awareness + raw-rect diagnos
 _SHOT_SAVED = False       # one-time: save an mss screenshot on the first blocked click
 
 
-_AGENT_BUILD = "2026-11-09-rawcap1"  # topology-b split capture (T1); appears in the click log
+_AGENT_BUILD = "2026-11-09-rawcap2"  # topology-b split capture (T1) + input via worker (T2)
 
 
 def _save_debug_shot(x, y):
@@ -856,9 +856,15 @@ def _send_sas():
 
 
 def apply_event(ev, monitors=None, window_rects=None, blocked=None,
-                pressed=None, agent_foreground=False, wheel_accum=None):
+                pressed=None, agent_foreground=False, wheel_accum=None, sink=None):
     """Apply one remote input event, while protecting the agent's OWN windows so a
     remote user can't close it or drive its controls:
+
+    When `sink` is given (topology b), the agent-window FILTER still runs here, but an
+    ALLOWED event is handed to sink(ev) instead of being injected locally — the cap-worker
+    then re-runs apply_event(sink=None) to SendInput it on the current input desktop (so
+    injection reaches the secure desktop and isn't blocked by UIPI). In sink mode `pressed`
+    and `wheel_accum` are the worker's job, so the forward happens before those are touched.
 
     - Mouse CLICKS/SCROLL that land on an agent window AND where that window is actually
       the top-most one (checked Z-order aware via the owning process, so a click over
@@ -895,7 +901,10 @@ def apply_event(ev, monitors=None, window_rects=None, blocked=None,
             # sees even though the actual click is refused. The viewer already draws a blocked
             # cursor over us, so freezing the OS cursor at our edge keeps the two consistent.
             if not _click_on_agent(ax, ay, window_rects):
-                mouse.position = (ax, ay)
+                if sink is not None:
+                    sink(ev)
+                else:
+                    mouse.position = (ax, ay)
         elif t == "md":
             ax, ay = off_x + ev["x"], off_y + ev["y"]
             b = ev.get("b", 0)
@@ -905,6 +914,9 @@ def apply_event(ev, monitors=None, window_rects=None, blocked=None,
                 return
             if blocked is not None:
                 blocked.discard(b)
+            if sink is not None:
+                sink(ev)
+                return
             mouse.position = (ax, ay)
             mouse.press(BUTTONS.get(b, Button.left))
             if pressed is not None:
@@ -914,6 +926,9 @@ def apply_event(ev, monitors=None, window_rects=None, blocked=None,
             if blocked is not None and b in blocked:
                 blocked.discard(b)
                 return  # its press was suppressed; don't inject a lone release
+            if sink is not None:
+                sink(ev)
+                return
             mouse.position = (off_x + ev["x"], off_y + ev["y"])
             mouse.release(BUTTONS.get(b, Button.left))
             if pressed is not None:
@@ -922,6 +937,9 @@ def apply_event(ev, monitors=None, window_rects=None, blocked=None,
             ax, ay = off_x + ev["x"], off_y + ev["y"]
             if _click_on_agent(ax, ay, window_rects):
                 return  # don't scroll an agent window that is actually on top here
+            if sink is not None:
+                sink(ev)     # the worker accumulates the wheel on its own side
+                return
             mouse.position = (ax, ay)
             sx, sy = _accumulate_wheel(ev.get("dx", 0), ev.get("dy", 0), wheel_accum)
             if sx or sy:
@@ -929,16 +947,25 @@ def apply_event(ev, monitors=None, window_rects=None, blocked=None,
         elif t == "kd":
             if agent_foreground:
                 return  # don't let injected keys drive the agent's own window
+            if sink is not None:
+                sink(ev)
+                return
             k = resolve_key(ev)
             if k is not None:
                 keyboard.press(k)
         elif t == "ku":
             if agent_foreground:
                 return
+            if sink is not None:
+                sink(ev)
+                return
             k = resolve_key(ev)
             if k is not None:
                 keyboard.release(k)
         elif t == "sas":
+            if sink is not None:
+                sink(ev)      # the worker (SYSTEM in T3) can SendSAS; main often can't
+                return
             _send_sas()   # Ctrl+Alt+Del (sent as a dedicated event; SendInput can't do it)
     except Exception:
         pass  # never let a bad event kill the stream
@@ -1343,6 +1370,8 @@ class VideoChild:
             "bitrate": bitrate,
             "wanted": list(self.client.wanted or []),
             "encoder": self.encoder_name,
+            # Topology (b): the loopback port the cap-worker connects to for input injection.
+            "input_port": int(getattr(self.client, "_input_port", 0) or 0),
         })
         return True
 
@@ -1941,9 +1970,9 @@ class RawCaptureClient:
                 mi, w, h = struct.unpack(">BII", body[:9])
                 self._latest[mi] = _RawShot(body[9:], w, h)
 
-    def start(self, monitors, fps, wanted):
+    def start(self, monitors, fps, wanted, input_port=0):
         self._send({"type": "start", "monitors": monitors, "fps": int(fps),
-                    "wanted": list(wanted or [])})
+                    "wanted": list(wanted or []), "input_port": int(input_port or 0)})
 
     def set_wanted(self, wanted):
         self._send({"type": "wanted", "set": list(wanted or [])})
@@ -2036,7 +2065,7 @@ def _vc_capture_session(sock, state):
     raw_mode = bool(state.get("raw") and state.get("capclient"))
     capctx = state["capclient"] if raw_mode else ScreenGrabber()
     if raw_mode:
-        state["capclient"].start(monitors, fps, state["wanted"])
+        state["capclient"].start(monitors, fps, state["wanted"], state.get("input_port", 0))
     with capctx as sct:
         while (state["capturing"] and not state["stop"] and state["gen"] == my_gen):
             now = time.time()
@@ -2210,13 +2239,62 @@ def run_cap_worker(port):
     except Exception:
         return
 
-    state = {"stop": False, "capturing": False, "monitors": [], "fps": 20, "wanted": set()}
+    state = {"stop": False, "capturing": False, "monitors": [], "fps": 20, "wanted": set(),
+             "input_sock": None}
     send_lock = threading.Lock()
     try:
         _click_log("[rawcap worker connected port=%s pid=%s]" % (port, os.getpid()))
     except Exception:
         pass
     diag = {"shipped": 0}
+
+    def _input_reader(isock):
+        """Inject viewer input the main agent forwarded (already filtered) on THIS process's
+        current input desktop, via the same apply_event path. Own wheel-accum + pressed set so a
+        dropped link releases nothing-stuck. Reaches the secure desktop once this runs as SYSTEM."""
+        pressed = set()
+        wheel = {"x": 0.0, "y": 0.0}
+        try:
+            while not state["stop"]:
+                try:
+                    t, body = _vc_recv_frame(isock)
+                except Exception:
+                    break
+                if t is None:
+                    break
+                if t != _CAP_INPUT:
+                    continue
+                try:
+                    ev = json.loads(body)
+                except Exception:
+                    continue
+                try:
+                    apply_event(ev, state["monitors"], None, None, pressed, False, wheel, None)
+                except Exception:
+                    pass
+        finally:
+            for b in list(pressed):
+                try:
+                    mouse.release(BUTTONS.get(b, Button.left))
+                except Exception:
+                    pass
+            try:
+                isock.close()
+            except Exception:
+                pass
+            state["input_sock"] = None
+
+    def _connect_input(ip):
+        if not ip or state["input_sock"] is not None:
+            return
+        try:
+            isock = socket.create_connection(("127.0.0.1", int(ip)), timeout=10)
+            isock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+            state["input_sock"] = isock
+            threading.Thread(target=_input_reader, args=(isock,), daemon=True).start()
+            _click_log("[rawcap worker input connected port=%s]" % ip)
+        except Exception:
+            pass
 
     def ctl_reader():
         while not state["stop"]:
@@ -2240,6 +2318,7 @@ def run_cap_worker(port):
                 state["fps"] = max(1, int(msg.get("fps", 20)))
                 state["wanted"] = set(msg.get("wanted") or [m["i"] for m in mons])
                 state["capturing"] = True
+                _connect_input(msg.get("input_port"))
             elif typ == "wanted":
                 state["wanted"] = set(msg.get("set") or [m["i"] for m in state["monitors"]])
             elif typ == "stop-capture":
@@ -2294,10 +2373,12 @@ def run_cap_worker(port):
                 break
         sleep = max(0.003, (1.0 / max(1, int(state["fps"]))) - (time.time() - now))
         time.sleep(sleep)
-    try:
-        sock.close()
-    except Exception:
-        pass
+    for s in (state.get("input_sock"), sock):
+        try:
+            if s:
+                s.close()
+        except Exception:
+            pass
 
 
 def run_video_child(port, raw=False):
@@ -2357,7 +2438,7 @@ def run_video_child(port, raw=False):
 
     state = {"stop": False, "capturing": False, "cfg": None,
              "wanted": set(), "kf": set(), "gen": 0, "bitrates": {},
-             "raw": False, "capclient": None}
+             "raw": False, "capclient": None, "input_port": 0}
 
     # Topology (b): spawn the cap-worker that GDI-grabs and ships RAW frames. If it fails to come
     # up, fall back to in-process mss capture so a viewer session still works (just not on the
@@ -2393,6 +2474,7 @@ def run_video_child(port, raw=False):
                 state["wanted"] = set(msg.get("wanted") or [m["i"] for m in mons])
                 state["kf"] = {m["i"] for m in mons}   # keyframe every monitor on (re)start
                 state["bitrates"] = {}                  # fresh session: back to the default
+                state["input_port"] = int(msg.get("input_port") or 0)
                 state["gen"] += 1
                 state["capturing"] = True
             elif typ == "stop-capture":
@@ -2853,9 +2935,65 @@ class NetClient:
         self._media_gen = 0          # bumps per rebuild so a stale pc's handler bails out
         self._reneg_attempts = 0     # consecutive rebuilds without reaching "connected"
         self._input_dc = None        # WebRTC data channel carrying viewer input (low latency)
+        # Topology (b) input link: when --raw-capture is on, injection moves to the cap-worker so it
+        # reaches the secure desktop (T3). Main LISTENS here and the worker connects back; main keeps
+        # the agent-window filter and forwards only ALLOWED events over this socket (direct, NOT via
+        # the CPU-busy encode child, to protect input latency).
+        self._input_lsock = None     # listener
+        self._input_wsock = None     # the worker's accepted input connection (None => inject local)
+        self._input_port = 0         # port the worker connects to (passed down via begin/cap-start)
+        self._input_lock = threading.Lock()
 
     def start(self):
+        if getattr(self.args, "raw_capture", False):
+            self._setup_input_worker_link()
         threading.Thread(target=self._thread_main, daemon=True).start()
+
+    def _setup_input_worker_link(self):
+        """Bind a loopback listener for the cap-worker's input connection and accept it in the
+        background. Stable for the agent's lifetime; the port is handed to the worker via the
+        video 'start' ctl. On failure, _input_port stays 0 and injection stays local."""
+        try:
+            ls = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            ls.bind(("127.0.0.1", 0))
+            ls.listen(1)
+            self._input_lsock = ls
+            self._input_port = ls.getsockname()[1]
+            threading.Thread(target=self._input_accept_loop, daemon=True).start()
+        except Exception:
+            self._input_port = 0
+
+    def _input_accept_loop(self):
+        while True:
+            try:
+                conn, _ = self._input_lsock.accept()
+                conn.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+            except Exception:
+                time.sleep(0.5)
+                continue
+            with self._input_lock:
+                old, self._input_wsock = self._input_wsock, conn
+            if old:
+                try:
+                    old.close()
+                except Exception:
+                    pass
+            try:
+                _click_log("[rawcap input link: worker connected]")
+            except Exception:
+                pass
+
+    def _send_to_input_worker(self, ev):
+        """apply_event sink: forward one ALREADY-FILTERED event to the cap-worker. On a dead link,
+        drop the worker socket so _apply_input falls back to local injection next event."""
+        s = self._input_wsock
+        if not s:
+            return
+        try:
+            with self._input_lock:
+                _vc_send_frame(s, _CAP_INPUT, json.dumps(ev).encode())
+        except Exception:
+            self._input_wsock = None
 
     def request_stop(self):
         if self.loop and self.stop_event and not self.loop.is_closed():
@@ -3545,12 +3683,19 @@ class NetClient:
         also protects the agent's own windows."""
         if not self.streaming:
             return
+        # Topology (b): when raw capture is on AND the worker's input link is up, keep the
+        # agent-window filter here but forward allowed events to the worker for injection
+        # (so they reach the secure desktop). Otherwise inject locally as before.
+        sink = (self._send_to_input_worker
+                if (getattr(self.args, "raw_capture", False) and self._input_wsock is not None)
+                else None)
         apply_event(
             msg, self.monitors,
             getattr(self.app, "_window_rects", None),
             self._blocked_btns, self._pressed_btns,
             getattr(self.app, "_agent_foreground", False),
             self._wheel_accum,
+            sink=sink,
         )
 
     async def _handle_msg(self, ws, msg):
