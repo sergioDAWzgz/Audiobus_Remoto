@@ -703,7 +703,7 @@ _GUI_DPI_LOGGED = False   # one-time GUI-thread DPI-awareness + raw-rect diagnos
 _SHOT_SAVED = False       # one-time: save an mss screenshot on the first blocked click
 
 
-_AGENT_BUILD = "2026-11-09-rawsys6"  # T3c: respawn the cap-worker on death (+ keyframe-on-switch)
+_AGENT_BUILD = "2026-11-09-securedesktop"  # SYSTEM cap-worker default (secure desktop); --legacy-capture opts out
 
 
 def _save_debug_shot(x, y):
@@ -2288,7 +2288,7 @@ def _follow_input_desktop(cur, access=_DESKTOP_READ):
         # changed (the attach survives CloseDesktop of this probe handle). First call: name != None.
         if name != cur.get("name"):
             ok = bool(user32.SetThreadDesktop(ctypes.c_void_p(hdesk)))
-            _worker_log("[rawcap %s desktop -> %r SetThreadDesktop=%s]"
+            _worker_log("[diag %s desktop -> %r SetThreadDesktop=%s]"
                         % (cur.get("tag", ""), name, ok))
             cur["name"] = name
     finally:
@@ -2329,7 +2329,7 @@ def run_cap_worker(port):
         # Is pynput real here, or stubbed (av-import failure stubs it only if pynput itself failed
         # — it imports before the heavy modules, so this confirms SendInput is live as SYSTEM).
         py = getattr(type(mouse), "__module__", "?")
-        _worker_log("[rawcap worker connected port=%s pid=%s user=%s pynput=%s]"
+        _worker_log("[diag cap-worker up port=%s pid=%s user=%s pynput=%s]"
                     % (port, os.getpid(), who, py))
     except Exception:
         pass
@@ -2344,10 +2344,8 @@ def run_cap_worker(port):
             hws = user32.OpenWindowStationW("WinSta0", False, 0x10000000)   # GENERIC_ALL
             if hws:
                 user32.SetProcessWindowStation(ctypes.c_void_p(hws))
-            _worker_log("[rawcap worker WinSta0 attach hws=%s err=%s]" % (hws, ctypes.GetLastError()))
         except Exception as e:
-            _worker_log("[rawcap worker WinSta0 attach failed %r]" % (e,))
-    diag = {"shipped": 0}
+            _worker_log("[diag cap-worker WinSta0 attach failed %r]" % (e,))
 
     def _input_reader(isock):
         """Inject viewer input the main agent forwarded (already filtered) on THIS process's
@@ -2355,9 +2353,8 @@ def run_cap_worker(port):
         dropped link releases nothing-stuck. Reaches the secure desktop once this runs as SYSTEM."""
         pressed = set()
         wheel = {"x": 0.0, "y": 0.0}
-        rx = {}                       # event types already logged (first inject of each)
+        fail_logged = set()           # event types whose inject failure was already logged
         inp_desktop = {"name": None, "tag": "input"}   # this (input) thread's current input desktop
-        _worker_log("[rawcap worker input reader started]")
         try:
             while not state["stop"]:
                 try:
@@ -2372,7 +2369,6 @@ def run_cap_worker(port):
                     ev = json.loads(body)
                 except Exception:
                     continue
-                et = ev.get("t")
                 # Attach THIS thread to the live input desktop so SendInput reaches the secure
                 # desktop (Winlogon) when it is up — with FULL access so button events (not just
                 # cursor moves) are injected.
@@ -2380,14 +2376,11 @@ def run_cap_worker(port):
                     _follow_input_desktop(inp_desktop, _DESKTOP_ALL)
                 try:
                     apply_event(ev, state["monitors"], None, None, pressed, False, wheel, None)
-                    if et not in rx:        # log the first inject of each distinct event type
-                        rx[et] = 1
-                        _worker_log("[rawcap worker injected t=%s on=%s]"
-                                    % (et, inp_desktop.get("name")))
                 except Exception as e:
-                    if et not in rx:
-                        rx[et] = 1
-                        _worker_log("[rawcap worker inject FAILED t=%s %r]" % (et, e))
+                    et = ev.get("t")
+                    if et not in fail_logged:
+                        fail_logged.add(et)
+                        _worker_log("[diag cap-worker inject failed t=%s %r]" % (et, e))
         finally:
             for b in list(pressed):
                 try:
@@ -2408,7 +2401,6 @@ def run_cap_worker(port):
             isock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
             state["input_sock"] = isock
             threading.Thread(target=_input_reader, args=(isock,), daemon=True).start()
-            _worker_log("[rawcap worker input connected port=%s]" % ip)
         except Exception:
             pass
 
@@ -2495,10 +2487,6 @@ def run_cap_worker(port):
             try:
                 with send_lock:
                     _vc_send_frame(sock, _CAP_FRAME, header + buf)
-                diag["shipped"] += 1
-                if diag["shipped"] == 1:
-                    _worker_log("[rawcap worker first frame mi=%s %sx%s bytes=%s]"
-                                % (mi, int(m["width"]), int(m["height"]), len(buf)))
             except Exception:
                 state["stop"] = True
                 break
@@ -2583,7 +2571,7 @@ def run_video_child(port, raw=False, system=False):
         except Exception:
             state["raw"] = False
         try:
-            _click_log("[rawcap encode-child raw=%s worker=%s system=%s build=%s]"
+            _click_log("[diag capture raw=%s worker=%s system=%s build=%s]"
                        % (raw, state["raw"], system, _AGENT_BUILD))
         except Exception:
             pass
@@ -2646,10 +2634,10 @@ def run_video_child(port, raw=False, system=False):
                 newcc = RawCaptureClient(system=state.get("system", False))
                 if newcc.spawn():
                     state["capclient"] = newcc
-                    _click_log("[rawcap worker respawned system=%s]" % state.get("system", False))
+                    _click_log("[diag cap-worker respawned system=%s]" % state.get("system", False))
                 else:
                     state["raw"] = False
-                    _click_log("[rawcap worker respawn FAILED -> mss fallback]")
+                    _click_log("[diag cap-worker respawn failed -> mss fallback]")
             except Exception:
                 state["raw"] = False
         try:
@@ -3129,10 +3117,6 @@ class NetClient:
                     old.close()
                 except Exception:
                     pass
-            try:
-                _click_log("[rawcap input link: worker connected]")
-            except Exception:
-                pass
 
     def _send_to_input_worker(self, ev):
         """apply_event sink: forward one ALREADY-FILTERED event to the cap-worker. On a dead link,
@@ -3143,13 +3127,10 @@ class NetClient:
         try:
             with self._input_lock:
                 _vc_send_frame(s, _CAP_INPUT, json.dumps(ev).encode())
-            if not getattr(self, "_fwd_diag", False):
-                self._fwd_diag = True
-                _click_log("[rawcap main first forward OK t=%s]" % ev.get("t"))
         except Exception as e:
             if not getattr(self, "_fwd_fail_diag", False):
                 self._fwd_fail_diag = True
-                _click_log("[rawcap main forward FAILED %r]" % (e,))
+                _click_log("[cap-worker input link dropped: %r]" % (e,))
             self._input_wsock = None
 
     def request_stop(self):
@@ -3846,11 +3827,6 @@ class NetClient:
         sink = (self._send_to_input_worker
                 if (getattr(self.args, "raw_capture", False) and self._input_wsock is not None)
                 else None)
-        if not getattr(self, "_in_diag", False):
-            self._in_diag = True
-            _click_log("[rawcap main apply_input raw=%s wsock=%s sink=%s t=%s]"
-                       % (getattr(self.args, "raw_capture", False),
-                          self._input_wsock is not None, sink is not None, msg.get("t")))
         apply_event(
             msg, self.monitors,
             getattr(self.app, "_window_rects", None),
@@ -6299,12 +6275,13 @@ def parse_args(argv):
     p.add_argument("--video-child", dest="video_child", action="store_true",
                    help=argparse.SUPPRESS)
     p.add_argument("--vport", type=int, default=0, help=argparse.SUPPRESS)
-    # Topology (b) split capture (secure-desktop live): the encode child grabs RAW frames from a
-    # separate cap-worker (GDI, pure ctypes) over loopback, so capture can later run as SYSTEM on the
-    # secure desktop while av-encode stays in a user process. Opt-in; the old mss pipeline is default.
+    # Capture topology. The SYSTEM cap-worker (secure desktop + UIPI input fix) is the DEFAULT now;
+    # --legacy-capture falls back to the in-process mss path (escape hatch if the SYSTEM worker misbehaves
+    # on a given machine). --raw-capture (encode child grabs RAW from a user-context cap-worker, no
+    # SYSTEM) and --raw-system (that worker runs as SYSTEM via a LocalSystem service) stay for testing /
+    # explicit selection.
+    p.add_argument("--legacy-capture", dest="legacy_capture", action="store_true", help=argparse.SUPPRESS)
     p.add_argument("--raw-capture", dest="raw_capture", action="store_true", help=argparse.SUPPRESS)
-    # --raw-system (implies --raw-capture): spawn the cap-worker as SYSTEM via a LocalSystem service so
-    # capture+input reach the secure desktop (UAC / Ctrl-Alt-Del / lock). Needs elevated admin.
     p.add_argument("--raw-system", dest="raw_system", action="store_true", help=argparse.SUPPRESS)
     # Internal: the cap-worker entry point. GDI-grabs every monitor and ships RAW BGRX over loopback to
     # the encode child on --capport. Pure ctypes (no PIL/numpy/av). Not for direct use.
@@ -7139,9 +7116,20 @@ def _replace_running_instance():
 
 def main(argv=None):
     args = parse_args(argv if argv is not None else sys.argv[1:])
-    # --raw-system (spawn the cap-worker as SYSTEM for the secure desktop) implies the split pipeline.
+    # Capture topology. The SYSTEM cap-worker (secure desktop + UIPI input fix) is the DEFAULT; pass
+    # --legacy-capture to fall back to the in-process mss path. --raw-capture (user-worker, no SYSTEM)
+    # stays available for testing. A child mode (--video-child / --cap-worker / --secure-*) carries its
+    # own flags from the parent, so don't re-default those.
+    _child_mode = any(getattr(args, a, False) for a in
+                      ("video_child", "cap_worker", "secure_service", "secure_helper", "secure_test"))
+    if not _child_mode:
+        if getattr(args, "legacy_capture", False):
+            args.raw_capture = False
+            args.raw_system = False
+        elif not (getattr(args, "raw_capture", False) or getattr(args, "raw_system", False)):
+            args.raw_system = True        # default: SYSTEM secure-desktop worker
     if getattr(args, "raw_system", False):
-        args.raw_capture = True
+        args.raw_capture = True           # --raw-system implies the split pipeline
     if getattr(args, "selfcheck", None):
         print(run_selfcheck(args.selfcheck))
         return
