@@ -703,7 +703,7 @@ _GUI_DPI_LOGGED = False   # one-time GUI-thread DPI-awareness + raw-rect diagnos
 _SHOT_SAVED = False       # one-time: save an mss screenshot on the first blocked click
 
 
-_AGENT_BUILD = "2026-11-09-securedesktop"  # SYSTEM cap-worker default (secure desktop); --legacy-capture opts out
+_AGENT_BUILD = "2026-11-09-securedesktop4"  # _MEI dialog fix via Popen env; revert broken SYSTEM-worker env block
 
 
 def _save_debug_shot(x, y):
@@ -1169,6 +1169,20 @@ _VC_CREATE_NO_WINDOW = 0x08000000
 _CAP_CTL, _CAP_FRAME, _CAP_INPUT = 1, 2, 3
 
 
+def _child_env():
+    """Environment for a spawned COPY of this frozen onefile exe (encode child, cap-worker, service).
+    Without this, the child inherits `_PYI_APPLICATION_HOME_DIR` and REUSES our extracted onefile temp
+    dir — holding files in it open, so when WE exit first our bootloader can't delete it and pops the
+    'Failed to remove temporary directory' dialog. PYINSTALLER_RESET_ENVIRONMENT=1 makes the child
+    extract + own + clean its OWN dir instead; dropping the _PYI_* vars is belt-and-suspenders."""
+    env = dict(os.environ)
+    env["PYINSTALLER_RESET_ENVIRONMENT"] = "1"
+    for _k in ("_PYI_APPLICATION_HOME_DIR", "_PYI_ARCHIVE_FILE", "_PYI_PARENT_PROCESS_LEVEL",
+               "_MEIPASS2"):
+        env.pop(_k, None)
+    return env
+
+
 def _vc_send_frame(sock, t, body):
     """Length-prefixed message: 4-byte big-endian length, 1 type byte, then body."""
     sock.sendall(struct.pack(">I", 1 + len(body)) + bytes([t]) + body)
@@ -1310,7 +1324,8 @@ class VideoChild:
                 cmd.append("--raw-capture")
             if getattr(self.client.args, "raw_system", False):
                 cmd.append("--raw-system")
-            self.proc = subprocess.Popen(cmd, creationflags=_VC_CREATE_NO_WINDOW)
+            self.proc = subprocess.Popen(cmd, creationflags=_VC_CREATE_NO_WINDOW,
+                                         env=_child_env())
             ls.settimeout(12)
             conn, _ = ls.accept()                 # waits for the child to connect
             conn.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
@@ -1953,7 +1968,8 @@ class RawCaptureClient:
                 else:
                     cmd = [sys.executable, os.path.abspath(__file__),
                            "--cap-worker", "--capport", str(port)]
-                self.proc = subprocess.Popen(cmd, creationflags=_VC_CREATE_NO_WINDOW)
+                self.proc = subprocess.Popen(cmd, creationflags=_VC_CREATE_NO_WINDOW,
+                                             env=_child_env())
                 ls.settimeout(15)
             conn, _ = ls.accept()
             conn.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
@@ -6493,6 +6509,11 @@ def _spawn_helper_in_console_session(desktop):
     si.lpDesktop = desktop
     pi = _PROCESS_INFORMATION()
     buf = ctypes.create_unicode_buffer(cmdline)
+    # lpEnvironment=None: the worker inherits the service's environment (needs SystemRoot/PATH/etc.).
+    # NOTE: do NOT pass a hand-built Unicode env block here — create_unicode_buffer() truncates at the
+    # first embedded NUL, so the worker would get a one-variable env and misbehave (its input socket
+    # aborted -> secure-desktop clicks died). The worker reusing this service's onefile _MEI only leaks
+    # an invisible session-0 dir in C:\WINDOWS\TEMP, which is an acceptable trade for a stable worker.
     ok = adv.CreateProcessAsUserW(dup, None, buf, None, None, False, 0x08000000,
                                   None, None, ctypes.byref(si), ctypes.byref(pi))  # CREATE_NO_WINDOW
     _secure_log("CreateProcessAsUser ok=%s err=%s child_pid=%s"
@@ -7043,6 +7064,29 @@ def _set_dpi_awareness():
                    f"thread_dpi_ctx={_dpi_awareness_name()} GetDpiForSystem={dpi}]")
 
 
+def _reap_stale_meipass():
+    """We os._exit() on shutdown (see __main__) to dodge PyInstaller's onefile cleanup dialog
+    ("Failed to remove temporary directory: ..._MEI..."), which the bootloader pops in windowed
+    mode when a native DLL (av / ffmpeg / openh264) is still mapped as the process exits. That
+    leaves our _MEIPASS behind, so remove leftover _MEI* dirs from PRIOR runs here at startup
+    instead. Our own current dir, and any dir a live copy still locks, are skipped (rmtree just
+    partially fails and that dir is retried next launch)."""
+    if not getattr(sys, "frozen", False) or sys.platform != "win32":
+        return
+    try:
+        import glob
+        import shutil
+        import tempfile
+        cur = os.path.normcase(getattr(sys, "_MEIPASS", "") or "")
+        tmp = os.environ.get("TEMP") or tempfile.gettempdir()
+        for d in glob.glob(os.path.join(tmp, "_MEI*")):
+            if not os.path.isdir(d) or os.path.normcase(d) == cur:
+                continue
+            shutil.rmtree(d, ignore_errors=True)
+    except Exception:
+        pass
+
+
 def _acquire_single_instance():
     """Detect/claim single-instance ownership on this machine.
 
@@ -7170,6 +7214,9 @@ def main(argv=None):
     if getattr(args, "secure_test", False):
         run_secure_test()
         return
+    # Remove leftover PyInstaller _MEI* temp dirs from prior runs (we os._exit to dodge the
+    # onefile cleanup dialog, so they linger — see __main__ / _reap_stale_meipass).
+    _reap_stale_meipass()
     # We hold `_instance_guard` for the whole run so a later launch sees us (and can
     # offer to replace us). If another copy is already running, offer to replace it
     # rather than silently leaving the user on the old copy (e.g. after downloading an
@@ -7204,3 +7251,9 @@ def main(argv=None):
 
 if __name__ == "__main__":
     main()
+    # Exit HARD so PyInstaller's onefile bootloader never runs its _MEIPASS cleanup — in windowed
+    # mode a still-mapped native DLL makes that cleanup fail and pop a "Failed to remove temporary
+    # directory" dialog. The leftover dir is reaped at the next launch (see _reap_stale_meipass).
+    # Covers every process that reaches here: the agent, the encode child, and the cap-worker.
+    if getattr(sys, "frozen", False):
+        os._exit(0)
