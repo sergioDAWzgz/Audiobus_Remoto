@@ -68,16 +68,51 @@ try:
     from aiortc.codecs.vpx import Vp8Encoder
     from aiortc.codecs.h264 import H264Encoder
 except ImportError as exc:  # pragma: no cover - dependency guard
-    try:
-        messagebox.showerror(
-            "Audiobus Remote",
-            f"Missing dependency: {exc.name}\n\n"
-            "Install requirements first:\n"
-            "    python -m pip install -r requirements.txt",
-        )
-    except Exception:
-        sys.stderr.write(f"Missing dependency: {exc.name}\n")
-    sys.exit(1)
+    # The secure-desktop helper/service and the cap-worker use ONLY ctypes + GDI, never the video
+    # stack. In a service-spawned child (session 1, SYSTEM) the bundled PyAV DLLs can fail to load
+    # (Defender strips the av pyds from the SYSTEM temp); since these modes never touch av/aiortc, let
+    # the module finish loading with stubs for whatever didn't bind — the class bodies below subclass
+    # MediaStreamTrack / Vp8Encoder / H264Encoder at import time, so those must stay classes.
+    if any(a in ("--secure-helper", "--secure-service", "--cap-worker") for a in sys.argv[1:]):
+        class _MissingDep:
+            def __getattr__(self, _n):
+                return None
+
+        class _StubEncoder:
+            # The forwarding encoder classes decorate with @Vp8Encoder.target_bitrate.setter at
+            # class-definition time, so the stub base must expose target_bitrate as a property.
+            def __init__(self, *a, **k):
+                pass
+
+            @property
+            def target_bitrate(self):
+                return None
+
+            @target_bitrate.setter
+            def target_bitrate(self, _v):
+                pass
+
+        _g = globals()
+        _g.setdefault("av", None)
+        _g.setdefault("MediaStreamTrack", object)   # ScreenTrack/PreEncTrack only subclass it
+        _g.setdefault("Vp8Encoder", _StubEncoder)
+        _g.setdefault("H264Encoder", _StubEncoder)
+        for _n in ("websockets", "ScreenGrabber", "Image", "ImageGrab", "Button",
+                   "MouseController", "KeyboardController", "Key", "KeyCode", "np",
+                   "RTCConfiguration", "RTCIceServer", "RTCPeerConnection", "RTCRtpSender",
+                   "RTCSessionDescription", "MediaStreamError", "candidate_from_sdp"):
+            _g.setdefault(_n, _MissingDep())
+    else:
+        try:
+            messagebox.showerror(
+                "Audiobus Remote",
+                f"Missing dependency: {exc.name}\n\n"
+                "Install requirements first:\n"
+                "    python -m pip install -r requirements.txt",
+            )
+        except Exception:
+            sys.stderr.write(f"Missing dependency: {exc.name}\n")
+        sys.exit(1)
 
 # Set to the deployed Worker URL. Override with --server or $AUDIOBUS_SERVER.
 DEFAULT_SERVER = "https://audiobus-remote.soft-daf.workers.dev"
@@ -668,7 +703,7 @@ _GUI_DPI_LOGGED = False   # one-time GUI-thread DPI-awareness + raw-rect diagnos
 _SHOT_SAVED = False       # one-time: save an mss screenshot on the first blocked click
 
 
-_AGENT_BUILD = "2026-11-06-securetest"  # bumped per diagnostic build; appears in the click log
+_AGENT_BUILD = "2026-11-09-rawcap1"  # topology-b split capture (T1); appears in the click log
 
 
 def _save_debug_shot(x, y):
@@ -1100,6 +1135,11 @@ _VC_PKT, _VC_CTL, _VC_STALL = 1, 2, 3           # frame type bytes
 _VC_DEFAULT_BITRATE = 1_500_000                  # bps when --bitrate is unset (= aiortc max)
 _VC_MIN_BITRATE = 250_000                        # floor REMB can adapt down to (= aiortc min)
 _VC_CREATE_NO_WINDOW = 0x08000000
+# cap-worker <-> encode-child transport (topology b). Same framing as _vc_send_frame.
+# _CAP_CTL: JSON (encode child -> worker: start/monitors/fps/wanted/stop).
+# _CAP_FRAME: struct.pack(">BII", mi, w, h) + raw BGRX (top-down), worker -> encode child.
+# _CAP_INPUT (T2): remote input events, main -> worker -> SendInput.
+_CAP_CTL, _CAP_FRAME, _CAP_INPUT = 1, 2, 3
 
 
 def _vc_send_frame(sock, t, body):
@@ -1236,6 +1276,10 @@ class VideoChild:
             else:
                 cmd = [sys.executable, os.path.abspath(__file__),
                        "--video-child", "--vport", str(port)]
+            # Topology (b): tell the encode child to grab RAW frames from a cap-worker (so capture
+            # can later run as SYSTEM on the secure desktop). Opt-in via the agent's --raw-capture.
+            if getattr(self.client.args, "raw_capture", False):
+                cmd.append("--raw-capture")
             self.proc = subprocess.Popen(cmd, creationflags=_VC_CREATE_NO_WINDOW)
             ls.settimeout(12)
             conn, _ = ls.accept()                 # waits for the child to connect
@@ -1803,6 +1847,155 @@ def _vc_convert(shot, scale_fixed, max_width):
         return None
 
 
+def _vc_convert_raw(buf, w, h, scale_fixed, max_width):
+    """Encode-side counterpart of _vc_convert for the cap-worker transport: raw top-down BGRX
+    bytes (w*h*4) -> contiguous RGB uint8 array, optionally downscaled. Runs in the encode
+    child (has numpy/PIL); the worker ships only raw bytes."""
+    try:
+        arr = np.frombuffer(buf, dtype=np.uint8).reshape((h, w, 4))[:, :, 2::-1]  # BGRX -> RGB
+        if scale_fixed:
+            scale = scale_fixed
+        elif w > 0:
+            scale = min(1.0, max_width / w)
+        else:
+            scale = 1.0
+        ow, oh = _even(w * scale), _even(h * scale)
+        if (ow, oh) != (w, h):
+            img = Image.fromarray(np.ascontiguousarray(arr))
+            arr = np.asarray(img.resize((ow, oh)), dtype=np.uint8)
+        return np.ascontiguousarray(arr)
+    except Exception:
+        return None
+
+
+class _RawShot:
+    """Minimal ScreenShot stand-in carrying the cap-worker's raw BGRX frame. `.raw` feeds the
+    session's static-skip (bytes compare); `.width/.height` size the _vc_convert_raw decode."""
+    __slots__ = ("raw", "width", "height")
+
+    def __init__(self, raw, w, h):
+        self.raw = raw
+        self.width = w
+        self.height = h
+
+
+class RawCaptureClient:
+    """Encode-child side of the cap-worker transport (topology b). Spawns the cap-worker, accepts
+    its loopback connection, and keeps the LATEST raw frame per monitor (filled by a reader
+    thread). Drop-in for ScreenGrabber in _vc_capture_session: `.grab(m)` -> _RawShot or None.
+    The worker is kept across viewer sessions (like the pre-spawned encode child), so __exit__
+    is a no-op; shutdown() ends it for good."""
+
+    def __init__(self):
+        self.sock = None
+        self.proc = None
+        self._lsock = None
+        self._latest = {}            # mi -> _RawShot (most recent grab the worker shipped)
+        self._alive = False
+        self._send_lock = threading.Lock()
+
+    def spawn(self):
+        """Launch + connect the worker. BLOCKS on accept. Returns True on success."""
+        try:
+            ls = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            ls.bind(("127.0.0.1", 0))
+            ls.listen(1)
+            self._lsock = ls
+            port = ls.getsockname()[1]
+            if getattr(sys, "frozen", False):
+                cmd = [sys.executable, "--cap-worker", "--capport", str(port)]
+            else:
+                cmd = [sys.executable, os.path.abspath(__file__),
+                       "--cap-worker", "--capport", str(port)]
+            self.proc = subprocess.Popen(cmd, creationflags=_VC_CREATE_NO_WINDOW)
+            ls.settimeout(15)
+            conn, _ = ls.accept()
+            conn.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+            self.sock = conn
+            try:
+                ls.close()
+            except Exception:
+                pass
+            self._lsock = None
+            self._alive = True
+            threading.Thread(target=self._read_loop, args=(conn,), daemon=True).start()
+            return True
+        except Exception:
+            self.shutdown()
+            return False
+
+    def alive(self):
+        return (self.sock is not None and self._alive
+                and self.proc is not None and self.proc.poll() is None)
+
+    def _read_loop(self, sock):
+        while self._alive:
+            try:
+                t, body = _vc_recv_frame(sock)
+            except Exception:
+                t = None
+            if t is None:
+                self._alive = False
+                break
+            if t == _CAP_FRAME and len(body) >= 9:
+                mi, w, h = struct.unpack(">BII", body[:9])
+                self._latest[mi] = _RawShot(body[9:], w, h)
+
+    def start(self, monitors, fps, wanted):
+        self._send({"type": "start", "monitors": monitors, "fps": int(fps),
+                    "wanted": list(wanted or [])})
+
+    def set_wanted(self, wanted):
+        self._send({"type": "wanted", "set": list(wanted or [])})
+
+    def stop_capture(self):
+        self._send({"type": "stop-capture"})
+
+    def _send(self, msg):
+        s = self.sock
+        if not s:
+            return
+        try:
+            with self._send_lock:
+                _vc_send_frame(s, _CAP_CTL, json.dumps(msg).encode())
+        except Exception:
+            pass
+
+    def grab(self, m):
+        return self._latest.get(m["i"])
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False            # keep the worker alive for the next session
+
+    def shutdown(self):
+        self._alive = False
+        try:
+            self._send({"type": "stop"})
+        except Exception:
+            pass
+        for x in (self.sock, self._lsock):
+            try:
+                if x:
+                    x.close()
+            except Exception:
+                pass
+        self.sock = None
+        self._lsock = None
+        p = self.proc
+        self.proc = None
+        if p:
+            try:
+                p.wait(timeout=2)
+            except Exception:
+                try:
+                    p.kill()
+                except Exception:
+                    pass
+
+
 def _vc_capture_session(sock, state):
     """Grab + VP8-encode every monitor and stream packets, until the parent stops the
     capture (end of a viewer session), bumps the generation (reconfig), or asks us to
@@ -1837,7 +2030,14 @@ def _vc_capture_session(sock, state):
     last_enc_ok = time.monotonic()
     stall_sent = False
 
-    with ScreenGrabber() as sct:
+    # Capture backend: the proven mss ScreenGrabber, or (topology b) the cap-worker over loopback.
+    # In raw mode the worker already grabs + static-skips; the pre-spawned client stays across
+    # sessions, so start() (re)arms it with this session's geometry and __exit__ leaves it running.
+    raw_mode = bool(state.get("raw") and state.get("capclient"))
+    capctx = state["capclient"] if raw_mode else ScreenGrabber()
+    if raw_mode:
+        state["capclient"].start(monitors, fps, state["wanted"])
+    with capctx as sct:
         while (state["capturing"] and not state["stop"] and state["gen"] == my_gen):
             now = time.time()
             for m in monitors:
@@ -1848,9 +2048,14 @@ def _vc_capture_session(sock, state):
                     continue
                 last[mi] = now
                 try:
-                    shot = sct.grab({"left": m["left"], "top": m["top"],
-                                     "width": m["width"], "height": m["height"]})
+                    if raw_mode:
+                        shot = sct.grab(m)       # worker's latest raw frame for this monitor
+                    else:
+                        shot = sct.grab({"left": m["left"], "top": m["top"],
+                                         "width": m["width"], "height": m["height"]})
                 except Exception:
+                    continue
+                if shot is None:                 # worker hasn't shipped this monitor yet
                     continue
                 # Skip an unchanged screen: compare the raw grab (BGRA, pre-conversion) to
                 # the last one we encoded. Never skip a requested keyframe, and force one
@@ -1860,7 +2065,11 @@ def _vc_capture_session(sock, state):
                         and raw == last_raw[mi]
                         and (time.monotonic() - last_sent.get(mi, 0.0)) < MAX_SKIP_STATIC):
                     continue
-                arr = _vc_convert(shot, scale_fixed, max_width)
+                if raw_mode:
+                    arr = _vc_convert_raw(shot.raw, shot.width, shot.height,
+                                          scale_fixed, max_width)
+                else:
+                    arr = _vc_convert(shot, scale_fixed, max_width)
                 if arr is None:
                     continue
                 if raw is not None:
@@ -1931,7 +2140,167 @@ def _vc_capture_session(sock, state):
             time.sleep(sleep)
 
 
-def run_video_child(port):
+def _gdi_grab_rect(x, y, w, h):
+    """Raw GDI grab of a screen rect -> top-down BGRX bytes (len == w*h*4), or None. Pure ctypes
+    (no PIL/numpy), no window created, so it works after SetThreadDesktop (secure desktop). x,y are
+    virtual-screen coords (may be negative on a secondary monitor); BitBlt handles that."""
+    if w <= 0 or h <= 0:
+        return None
+    user32 = ctypes.windll.user32
+    gdi32 = ctypes.windll.gdi32
+    for lib, fn in ((user32, "GetDC"), (gdi32, "CreateCompatibleDC"),
+                    (gdi32, "CreateCompatibleBitmap"), (gdi32, "SelectObject")):
+        getattr(lib, fn).restype = ctypes.c_void_p
+    hdc = user32.GetDC(0)
+    if not hdc:
+        return None
+    memdc = gdi32.CreateCompatibleDC(ctypes.c_void_p(hdc))
+    bmp = gdi32.CreateCompatibleBitmap(ctypes.c_void_p(hdc), w, h)
+    old = gdi32.SelectObject(ctypes.c_void_p(memdc), ctypes.c_void_p(bmp))
+    try:
+        if not gdi32.BitBlt(ctypes.c_void_p(memdc), 0, 0, w, h,
+                            ctypes.c_void_p(hdc), x, y, 0x00CC0020):   # SRCCOPY
+            return None
+
+        class _BMIH(ctypes.Structure):
+            _fields_ = [("biSize", wintypes.DWORD), ("biWidth", wintypes.LONG),
+                        ("biHeight", wintypes.LONG), ("biPlanes", wintypes.WORD),
+                        ("biBitCount", wintypes.WORD), ("biCompression", wintypes.DWORD),
+                        ("biSizeImage", wintypes.DWORD), ("biXPPM", wintypes.LONG),
+                        ("biYPPM", wintypes.LONG), ("biClrUsed", wintypes.DWORD),
+                        ("biClrImportant", wintypes.DWORD)]
+
+        bi = _BMIH()
+        bi.biSize = ctypes.sizeof(bi)
+        bi.biWidth = w
+        bi.biHeight = -h            # top-down
+        bi.biPlanes = 1
+        bi.biBitCount = 32
+        bi.biCompression = 0        # BI_RGB
+        buf = (ctypes.c_char * (w * h * 4))()
+        got = gdi32.GetDIBits(ctypes.c_void_p(memdc), ctypes.c_void_p(bmp), 0, h, buf,
+                              ctypes.byref(bi), 0)   # DIB_RGB_COLORS
+        if not got:
+            return None
+        return bytes(buf)
+    finally:
+        try:
+            gdi32.SelectObject(ctypes.c_void_p(memdc), ctypes.c_void_p(old))
+            gdi32.DeleteObject(ctypes.c_void_p(bmp))
+            gdi32.DeleteDC(ctypes.c_void_p(memdc))
+            user32.ReleaseDC(0, ctypes.c_void_p(hdc))
+        except Exception:
+            pass
+
+
+def run_cap_worker(port):
+    """cap-worker entry point (topology b). Connects to the encode child on 127.0.0.1:<port>,
+    receives a 'start' ctl (monitors geometry + fps + wanted), then GDI-grabs each monitor rect,
+    static-skips byte-identical frames, and ships RAW BGRX over loopback. Pure ctypes/socket/struct
+    — NO PIL/numpy/av — so when this later runs as SYSTEM, Defender has no av pyds to strip. T2 will
+    add input injection here (SendInput on the current input desktop)."""
+    try:
+        _set_dpi_awareness()      # physical pixels, matching the encode child / parent
+    except Exception:
+        pass
+    try:
+        sock = socket.create_connection(("127.0.0.1", port), timeout=15)
+        sock.settimeout(None)
+        sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+    except Exception:
+        return
+
+    state = {"stop": False, "capturing": False, "monitors": [], "fps": 20, "wanted": set()}
+    send_lock = threading.Lock()
+    try:
+        _click_log("[rawcap worker connected port=%s pid=%s]" % (port, os.getpid()))
+    except Exception:
+        pass
+    diag = {"shipped": 0}
+
+    def ctl_reader():
+        while not state["stop"]:
+            try:
+                t, body = _vc_recv_frame(sock)
+            except Exception:
+                t = None
+            if t is None:                 # encode child closed / died -> exit
+                state["stop"] = True
+                break
+            if t != _CAP_CTL:
+                continue
+            try:
+                msg = json.loads(body)
+            except Exception:
+                continue
+            typ = msg.get("type")
+            if typ == "start":
+                mons = msg.get("monitors") or []
+                state["monitors"] = mons
+                state["fps"] = max(1, int(msg.get("fps", 20)))
+                state["wanted"] = set(msg.get("wanted") or [m["i"] for m in mons])
+                state["capturing"] = True
+            elif typ == "wanted":
+                state["wanted"] = set(msg.get("set") or [m["i"] for m in state["monitors"]])
+            elif typ == "stop-capture":
+                state["capturing"] = False
+            elif typ == "stop":
+                state["stop"] = True
+                break
+    threading.Thread(target=ctl_reader, daemon=True).start()
+
+    IDLE_INTERVAL = 0.5          # unwanted monitors: ~2 fps (matches the encode session)
+    MAX_SKIP_STATIC = 1.0       # force one frame through at least this often (static screen)
+    last = {}                   # mi -> last grab time (fps pacing)
+    last_raw = {}               # mi -> last shipped raw bytes (static-skip)
+    last_sent = {}              # mi -> monotonic time we last shipped a frame
+
+    while not state["stop"]:
+        if not state["capturing"]:
+            time.sleep(0.03)
+            continue
+        monitors = state["monitors"]
+        fps = max(1, int(state["fps"]))
+        full_interval = 1.0 / fps
+        now = time.time()
+        for m in monitors:
+            mi = m["i"]
+            interval = full_interval if mi in state["wanted"] else IDLE_INTERVAL
+            if (now - last.get(mi, 0.0)) < interval:
+                continue
+            last[mi] = now
+            try:
+                buf = _gdi_grab_rect(int(m["left"]), int(m["top"]),
+                                     int(m["width"]), int(m["height"]))
+            except Exception:
+                buf = None
+            if buf is None:
+                continue
+            if (last_raw.get(mi) == buf
+                    and (time.monotonic() - last_sent.get(mi, 0.0)) < MAX_SKIP_STATIC):
+                continue
+            last_raw[mi] = buf
+            last_sent[mi] = time.monotonic()
+            header = struct.pack(">BII", mi & 0xFF, int(m["width"]), int(m["height"]))
+            try:
+                with send_lock:
+                    _vc_send_frame(sock, _CAP_FRAME, header + buf)
+                diag["shipped"] += 1
+                if diag["shipped"] == 1:
+                    _click_log("[rawcap worker first frame mi=%s %sx%s bytes=%s]"
+                               % (mi, int(m["width"]), int(m["height"]), len(buf)))
+            except Exception:
+                state["stop"] = True
+                break
+        sleep = max(0.003, (1.0 / max(1, int(state["fps"]))) - (time.time() - now))
+        time.sleep(sleep)
+    try:
+        sock.close()
+    except Exception:
+        pass
+
+
+def run_video_child(port, raw=False):
     """Child-process entry point (started via `--video-child --vport N`). Connects back to
     the parent and IDLES until told to capture, so the parent can pre-spawn it at startup
     and a viewer session then begins instantly (no process-launch / import delay). Captures
@@ -1987,7 +2356,25 @@ def run_video_child(port):
         return
 
     state = {"stop": False, "capturing": False, "cfg": None,
-             "wanted": set(), "kf": set(), "gen": 0, "bitrates": {}}
+             "wanted": set(), "kf": set(), "gen": 0, "bitrates": {},
+             "raw": False, "capclient": None}
+
+    # Topology (b): spawn the cap-worker that GDI-grabs and ships RAW frames. If it fails to come
+    # up, fall back to in-process mss capture so a viewer session still works (just not on the
+    # secure desktop). The worker is kept across sessions, mirroring this pre-spawned child.
+    if raw:
+        try:
+            cc = RawCaptureClient()
+            if cc.spawn():
+                state["raw"] = True
+                state["capclient"] = cc
+        except Exception:
+            state["raw"] = False
+        try:
+            _click_log("[rawcap encode-child raw=%s worker=%s build=%s]"
+                       % (raw, state["raw"], _AGENT_BUILD))
+        except Exception:
+            pass
 
     def ctl_reader():
         while not state["stop"]:
@@ -2010,11 +2397,15 @@ def run_video_child(port):
                 state["capturing"] = True
             elif typ == "stop-capture":
                 state["capturing"] = False               # back to idle; process stays alive
+                if state["capclient"]:
+                    state["capclient"].stop_capture()
             elif typ == "keyframe":
                 state["kf"].add(msg.get("mi"))
             elif typ == "wanted":
                 mons = (state["cfg"] or {}).get("monitors") or []
                 state["wanted"] = set(msg.get("set") or [m["i"] for m in mons])
+                if state["capclient"]:
+                    state["capclient"].set_wanted(state["wanted"])
             elif typ == "bitrate":
                 mi, bps = msg.get("mi"), msg.get("bps")
                 if mi is not None and bps:
@@ -2032,6 +2423,11 @@ def run_video_child(port):
             _vc_capture_session(sock, state)
         except Exception:
             state["capturing"] = False       # never let one session's error kill the child
+    if state["capclient"]:
+        try:
+            state["capclient"].shutdown()
+        except Exception:
+            pass
     try:
         sock.close()
     except Exception:
@@ -5596,6 +5992,14 @@ def parse_args(argv):
     p.add_argument("--video-child", dest="video_child", action="store_true",
                    help=argparse.SUPPRESS)
     p.add_argument("--vport", type=int, default=0, help=argparse.SUPPRESS)
+    # Topology (b) split capture (secure-desktop live): the encode child grabs RAW frames from a
+    # separate cap-worker (GDI, pure ctypes) over loopback, so capture can later run as SYSTEM on the
+    # secure desktop while av-encode stays in a user process. Opt-in; the old mss pipeline is default.
+    p.add_argument("--raw-capture", dest="raw_capture", action="store_true", help=argparse.SUPPRESS)
+    # Internal: the cap-worker entry point. GDI-grabs every monitor and ships RAW BGRX over loopback to
+    # the encode child on --capport. Pure ctypes (no PIL/numpy/av). Not for direct use.
+    p.add_argument("--cap-worker", dest="cap_worker", action="store_true", help=argparse.SUPPRESS)
+    p.add_argument("--capport", type=int, default=0, help=argparse.SUPPRESS)
     # Escape hatch: keep capture+encode in-process (the old path) instead of a child.
     p.add_argument("--no-video-subprocess", dest="no_video_subprocess",
                    action="store_true", help=argparse.SUPPRESS)
@@ -5605,6 +6009,17 @@ def parse_args(argv):
                    action="store_true", help=argparse.SUPPRESS)
     p.add_argument("--secure-test", dest="secure_test",
                    action="store_true", help=argparse.SUPPRESS)
+    # Internal: SCM runs this as the LocalSystem service ServiceMain (via --secure-test's
+    # sc create). Spawns --secure-helper into the console session as SYSTEM. Not for direct use.
+    p.add_argument("--secure-service", dest="secure_service",
+                   action="store_true", help=argparse.SUPPRESS)
+    # Internal: user-visible log/frame paths threaded from --secure-test to the SYSTEM service and
+    # helper so every process (SYSTEM included) writes the one file. Not for direct use.
+    p.add_argument("--secure-log", dest="secure_log", default=None, help=argparse.SUPPRESS)
+    p.add_argument("--secure-png", dest="secure_png", default=None, help=argparse.SUPPRESS)
+    # Internal: unique per-run service name (AudiobusSecure_<pid>) so a leftover service still
+    # 'marked for deletion' from a prior run can't block sc create. Not for direct use.
+    p.add_argument("--secure-svcname", dest="secure_svcname", default=None, help=argparse.SUPPRESS)
     return p.parse_args(argv)
 
 
@@ -5618,24 +6033,306 @@ def parse_args(argv):
 # window station + the current INPUT desktop (which becomes "Winlogon" when the secure desktop
 # is up) and capture it. `--secure-test` (run elevated) launches `--secure-helper` as SYSTEM
 # via a one-shot scheduled task; the helper logs each step and saves the latest frame.
+# Log + frame paths. CRITICAL: the SYSTEM service's os.path.expanduser("~") resolves to
+# C:\Windows\System32\config\systemprofile, NOT the user's home — so if each process picked its
+# own path, the whole SYSTEM side (service + its helper) would log to an invisible file. Instead
+# --secure-test computes a user-visible path once and threads it to the service and helper via
+# --secure-log/--secure-png, so every process (SYSTEM included; SYSTEM can write the user's dir)
+# appends to the SAME file. These globals are the live paths; _set_secure_paths() overrides them.
+_SECURE_LOG_PATH = os.path.join(os.path.expanduser("~"), "audiobus-secure.log")
 _SECURE_TEST_PNG = os.path.join(os.path.expanduser("~"), "audiobus-secure-test.png")
+
+
+def _set_secure_paths(log_path, png_path):
+    global _SECURE_LOG_PATH, _SECURE_TEST_PNG
+    if log_path:
+        _SECURE_LOG_PATH = log_path
+    if png_path:
+        _SECURE_TEST_PNG = png_path
+
+
+def _set_secure_svcname(name):
+    global _SVC_NAME
+    if name:
+        _SVC_NAME = name
 
 
 def _secure_log(msg):
     try:
-        with open(os.path.join(os.path.expanduser("~"), "audiobus-secure.log"),
-                  "a", encoding="utf-8") as f:
+        with open(_SECURE_LOG_PATH, "a", encoding="utf-8") as f:
             f.write(time.strftime("%H:%M:%S ") + msg + "\n")
     except Exception:
         pass
 
 
+if sys.platform == "win32":
+    class _STARTUPINFOW(ctypes.Structure):
+        _fields_ = [("cb", wintypes.DWORD), ("lpReserved", wintypes.LPWSTR),
+                    ("lpDesktop", wintypes.LPWSTR), ("lpTitle", wintypes.LPWSTR),
+                    ("dwX", wintypes.DWORD), ("dwY", wintypes.DWORD),
+                    ("dwXSize", wintypes.DWORD), ("dwYSize", wintypes.DWORD),
+                    ("dwXCountChars", wintypes.DWORD), ("dwYCountChars", wintypes.DWORD),
+                    ("dwFillAttribute", wintypes.DWORD), ("dwFlags", wintypes.DWORD),
+                    ("wShowWindow", wintypes.WORD), ("cbReserved2", wintypes.WORD),
+                    ("lpReserved2", ctypes.c_void_p), ("hStdInput", wintypes.HANDLE),
+                    ("hStdOutput", wintypes.HANDLE), ("hStdError", wintypes.HANDLE)]
+
+    class _PROCESS_INFORMATION(ctypes.Structure):
+        _fields_ = [("hProcess", wintypes.HANDLE), ("hThread", wintypes.HANDLE),
+                    ("dwProcessId", wintypes.DWORD), ("dwThreadId", wintypes.DWORD)]
+
+
+def _enable_privilege(name):
+    """Enable a named privilege (e.g. SeDebugPrivilege) in the current process token."""
+    adv = ctypes.windll.advapi32
+    k = ctypes.windll.kernel32
+
+    class _LUID(ctypes.Structure):
+        _fields_ = [("lo", wintypes.DWORD), ("hi", wintypes.LONG)]
+
+    class _LAA(ctypes.Structure):
+        _fields_ = [("Luid", _LUID), ("Attributes", wintypes.DWORD)]
+
+    class _TP(ctypes.Structure):
+        _fields_ = [("count", wintypes.DWORD), ("priv", _LAA * 1)]
+
+    tok = wintypes.HANDLE()
+    # Current-process pseudo-handle is (HANDLE)-1. Pass c_void_p(-1) directly: with
+    # GetCurrentProcess.restype=HANDLE it returns 0xFFFFFFFFFFFFFFFF, which then overflows
+    # ('argument 1: int too long to convert') when ctypes passes it to OpenProcessToken as a C int.
+    if not adv.OpenProcessToken(ctypes.c_void_p(-1), 0x0028, ctypes.byref(tok)):
+        return False
+    luid = _LUID()
+    if not adv.LookupPrivilegeValueW(None, name, ctypes.byref(luid)):
+        return False
+    tp = _TP(1, (_LAA * 1)(_LAA(luid, 0x00000002)))  # SE_PRIVILEGE_ENABLED
+    adv.AdjustTokenPrivileges(tok, False, ctypes.byref(tp), 0, None, None)
+    return ctypes.GetLastError() == 0
+
+
+# --- LocalSystem service (the AnyDesk/TeamViewer model). The elevated agent installs this
+# service (sc create, LocalSystem); the SCM runs it as SYSTEM. The service then launches the
+# capture helper INTO the active console session on the target desktop ("WinSta0\\Winlogon"
+# for the secure desktop) using the service's OWN token re-sessioned to that session (NOT
+# another process's token) + CreateProcessAsUser. No winlogon token theft.
+_SVC_NAME = "AudiobusSecure"
+_svc_status_handle = None
+_svc_main_cb = None      # keep ctypes callbacks alive for the dispatcher's whole lifetime
+_svc_ctrl_cb = None
+
+if sys.platform == "win32":
+    class _SERVICE_STATUS(ctypes.Structure):
+        _fields_ = [("dwServiceType", wintypes.DWORD), ("dwCurrentState", wintypes.DWORD),
+                    ("dwControlsAccepted", wintypes.DWORD), ("dwWin32ExitCode", wintypes.DWORD),
+                    ("dwServiceSpecificExitCode", wintypes.DWORD), ("dwCheckPoint", wintypes.DWORD),
+                    ("dwWaitHint", wintypes.DWORD)]
+
+
+def _svc_set_status(state, checkpoint=0, waithint=5000):
+    if not _svc_status_handle:
+        return
+    ss = _SERVICE_STATUS(0x10, state, 0, 0, 0, checkpoint, waithint)  # SERVICE_WIN32_OWN_PROCESS
+    # The status handle is pointer-sized. Passing the raw Python int truncates it to a 32-bit C
+    # int on 64-bit (OverflowError / invalid handle), so SetServiceStatus never registers RUNNING
+    # and the service hangs in START_PENDING. Wrap it in c_void_p (same gotcha as the GDI handles).
+    ctypes.windll.advapi32.SetServiceStatus(ctypes.c_void_p(_svc_status_handle), ctypes.byref(ss))
+
+
+def _spawn_helper_in_console_session(desktop):
+    """From the SYSTEM service (session 0), launch `--secure-helper` into the active CONSOLE
+    session on `desktop`, still as SYSTEM: duplicate the service's OWN token, re-session it
+    (SetTokenInformation TokenSessionId; needs SeTcbPrivilege) and CreateProcessAsUser. Returns
+    True on success. This is the documented 'service launches interactive process' pattern."""
+    adv = ctypes.windll.advapi32
+    k = ctypes.windll.kernel32
+    for p in ("SeTcbPrivilege", "SeAssignPrimaryTokenPrivilege", "SeIncreaseQuotaPrivilege"):
+        _enable_privilege(p)
+    session = k.WTSGetActiveConsoleSessionId()
+    _secure_log("active console session=%s desktop=%s" % (session, desktop))
+    if session == 0xFFFFFFFF:
+        return False
+    htok = wintypes.HANDLE()  # c_void_p(-1) = current-process pseudo-handle (avoids HANDLE overflow)
+    if not adv.OpenProcessToken(ctypes.c_void_p(-1), 0x0002 | 0x0008, ctypes.byref(htok)):
+        _secure_log("OpenProcessToken(self) failed err=%s" % ctypes.GetLastError())
+        return False
+    dup = wintypes.HANDLE()
+    if not adv.DuplicateTokenEx(htok, 0x02000000, None, 2, 1, ctypes.byref(dup)):  # MAX_ALLOWED, primary
+        _secure_log("DuplicateTokenEx(self) failed err=%s" % ctypes.GetLastError())
+        return False
+    sid = wintypes.DWORD(session)
+    if not adv.SetTokenInformation(dup, 12, ctypes.byref(sid), ctypes.sizeof(sid)):  # TokenSessionId
+        _secure_log("SetTokenInformation(session) failed err=%s" % ctypes.GetLastError())
+    exe = sys.executable
+    hargs = '--secure-helper --secure-log "%s" --secure-png "%s"' % (_SECURE_LOG_PATH, _SECURE_TEST_PNG)
+    if getattr(sys, "frozen", False):
+        cmdline = '"%s" %s' % (exe, hargs)
+    else:
+        cmdline = '"%s" "%s" %s' % (exe, os.path.abspath(__file__), hargs)
+    si = _STARTUPINFOW()
+    si.cb = ctypes.sizeof(si)
+    si.lpDesktop = desktop
+    pi = _PROCESS_INFORMATION()
+    buf = ctypes.create_unicode_buffer(cmdline)
+    ok = adv.CreateProcessAsUserW(dup, None, buf, None, None, False, 0x08000000,
+                                  None, None, ctypes.byref(si), ctypes.byref(pi))  # CREATE_NO_WINDOW
+    _secure_log("CreateProcessAsUser ok=%s err=%s child_pid=%s"
+                % (ok, ctypes.GetLastError(), pi.dwProcessId))
+    return bool(ok)
+
+
+def _secure_service_work():
+    """What the SYSTEM service does once RUNNING (phase 1): confirm it is SYSTEM and launch the
+    capture helper into the console session. Returns IMMEDIATELY — the helper is an independent
+    process that captures for ~25 s on its own; the service must NOT stay alive, or the dispatcher
+    never returns and the service hangs 'marked for deletion' and locks the exe."""
+    try:
+        ub = ctypes.create_unicode_buffer(256)
+        sz = wintypes.DWORD(256)
+        ctypes.windll.advapi32.GetUserNameW(ub, ctypes.byref(sz))
+        _secure_log("service running as user=%s (expect SYSTEM)" % ub.value)
+    except Exception as e:
+        _secure_log("service GetUserName failed %r" % (e,))
+    ok = _spawn_helper_in_console_session("WinSta0\\Default")  # helper follows to Winlogon itself
+    _secure_log("service spawned helper ok=%s; exiting (helper runs on its own)" % ok)
+
+
+def run_secure_service():
+    """Service entry (--secure-service): launched by the SCM as SYSTEM. Hand-rolled ctypes SCM
+    dispatch (no pywin32). Keeps the callbacks alive and reports status, then does the work."""
+    global _svc_status_handle, _svc_main_cb, _svc_ctrl_cb
+    _secure_log("run_secure_service: entering dispatcher")
+    adv = ctypes.windll.advapi32
+    _HANDLER = ctypes.WINFUNCTYPE(wintypes.DWORD, wintypes.DWORD, wintypes.DWORD,
+                                  ctypes.c_void_p, ctypes.c_void_p)
+    _MAIN = ctypes.WINFUNCTYPE(None, wintypes.DWORD, ctypes.POINTER(wintypes.LPWSTR))
+
+    def _ctrl(ctrl, evtype, evdata, ctx):
+        if ctrl in (1, 5):   # SERVICE_CONTROL_STOP / SHUTDOWN
+            _svc_set_status(0x01)   # STOPPED
+        return 0
+
+    def _main(argc, argv):
+        global _svc_status_handle
+        try:
+            adv.RegisterServiceCtrlHandlerExW.restype = wintypes.HANDLE
+            _svc_status_handle = adv.RegisterServiceCtrlHandlerExW(_SVC_NAME, _svc_ctrl_cb, None)
+            _secure_log("ServiceMain entered status_handle=%s" % _svc_status_handle)
+            _svc_set_status(0x04)   # RUNNING
+            _secure_service_work()
+        except Exception as e:
+            _secure_log("ServiceMain raised %r" % (e,))
+        try:
+            _svc_set_status(0x01)   # STOPPED
+        except Exception as e:
+            _secure_log("set STOPPED raised %r" % (e,))
+
+    _svc_ctrl_cb = _HANDLER(_ctrl)
+    _svc_main_cb = _MAIN(_main)
+
+    class _STE(ctypes.Structure):
+        _fields_ = [("lpServiceName", wintypes.LPWSTR), ("lpServiceProc", _MAIN)]
+
+    table = (_STE * 2)(_STE(_SVC_NAME, _svc_main_cb), _STE(None, ctypes.cast(None, _MAIN)))
+    if not adv.StartServiceCtrlDispatcherW(table):
+        _secure_log("StartServiceCtrlDispatcher failed err=%s" % ctypes.GetLastError())
+
+
+def _gdi_grab_to(path):
+    """Capture the CURRENT thread's desktop via raw GDI (no window created, so it works after
+    SetThreadDesktop) and save it as PNG. Explicit restype=c_void_p on handle-returning calls
+    avoids 64-bit truncation."""
+    user32 = ctypes.windll.user32
+    gdi32 = ctypes.windll.gdi32
+    for lib, fn in ((user32, "GetDC"), (gdi32, "CreateCompatibleDC"),
+                    (gdi32, "CreateCompatibleBitmap"), (gdi32, "SelectObject")):
+        getattr(lib, fn).restype = ctypes.c_void_p
+    x = user32.GetSystemMetrics(76)   # SM_XVIRTUALSCREEN
+    y = user32.GetSystemMetrics(77)
+    w = user32.GetSystemMetrics(78)   # SM_CXVIRTUALSCREEN
+    h = user32.GetSystemMetrics(79)
+    if w <= 0 or h <= 0:
+        x = y = 0
+        w = user32.GetSystemMetrics(0)
+        h = user32.GetSystemMetrics(1)
+    hdc = user32.GetDC(0)
+    memdc = gdi32.CreateCompatibleDC(ctypes.c_void_p(hdc))
+    bmp = gdi32.CreateCompatibleBitmap(ctypes.c_void_p(hdc), w, h)
+    gdi32.SelectObject(ctypes.c_void_p(memdc), ctypes.c_void_p(bmp))
+    gdi32.BitBlt(ctypes.c_void_p(memdc), 0, 0, w, h, ctypes.c_void_p(hdc), x, y, 0x00CC0020)
+
+    class _BMIH(ctypes.Structure):
+        _fields_ = [("biSize", wintypes.DWORD), ("biWidth", wintypes.LONG),
+                    ("biHeight", wintypes.LONG), ("biPlanes", wintypes.WORD),
+                    ("biBitCount", wintypes.WORD), ("biCompression", wintypes.DWORD),
+                    ("biSizeImage", wintypes.DWORD), ("biXPPM", wintypes.LONG),
+                    ("biYPPM", wintypes.LONG), ("biClrUsed", wintypes.DWORD),
+                    ("biClrImportant", wintypes.DWORD)]
+
+    bi = _BMIH()
+    bi.biSize = ctypes.sizeof(bi)
+    bi.biWidth = w
+    bi.biHeight = -h            # top-down
+    bi.biPlanes = 1
+    bi.biBitCount = 32
+    buf = (ctypes.c_char * (w * h * 4))()
+    gdi32.GetDIBits(ctypes.c_void_p(memdc), ctypes.c_void_p(bmp), 0, h, buf,
+                    ctypes.byref(bi), 0)
+    Image.frombuffer("RGB", (w, h), buf, "raw", "BGRX", 0, 1).save(path)
+    gdi32.DeleteObject(ctypes.c_void_p(bmp))
+    gdi32.DeleteDC(ctypes.c_void_p(memdc))
+    user32.ReleaseDC(0, ctypes.c_void_p(hdc))
+
+
+def _secure_av_diag():
+    """T0 diagnostic: capture WHY PyAV fails to import when this process runs as SYSTEM in the
+    console session (it worked in the session-0 service and as the elevated user). Decides the
+    phase-2 topology: if cheaply fixable, the SYSTEM worker can capture+encode (av) directly;
+    otherwise it captures RAW and a user-context child encodes."""
+    import traceback as _tb
+    meip = getattr(sys, "_MEIPASS", None)
+    _secure_log("av-diag exe=%s frozen=%s" % (sys.executable, getattr(sys, "frozen", False)))
+    _secure_log("av-diag _MEIPASS=%s" % meip)
+    _secure_log("av-diag TEMP=%s TMP=%s cwd=%s"
+                % (os.environ.get("TEMP"), os.environ.get("TMP"), os.getcwd()))
+    try:
+        import glob
+        if meip:
+            pyds = [os.path.basename(p) for p in glob.glob(os.path.join(meip, "av", "*.pyd"))]
+            _secure_log("av-diag av/*.pyd=%s" % pyds[:12])
+            avlibs = glob.glob(os.path.join(meip, "av.libs", "*")) or \
+                glob.glob(os.path.join(meip, "av", ".libs", "*"))
+            _secure_log("av-diag av.libs count=%s sample=%s"
+                        % (len(avlibs), [os.path.basename(p) for p in avlibs[:6]]))
+            _secure_log("av-diag _MEIPASS dll count=%s" % len(glob.glob(os.path.join(meip, "*.dll"))))
+            # Decisive disk check: is the av/container subdir (input.pyd) actually EXTRACTED here?
+            cdir = os.path.join(meip, "av", "container")
+            cpyds = [os.path.basename(p) for p in glob.glob(os.path.join(cdir, "*.pyd"))]
+            _secure_log("av-diag av/container exists=%s pyds=%s"
+                        % (os.path.isdir(cdir), cpyds))
+            inp = os.path.join(cdir, "input.pyd")
+            _secure_log("av-diag input.pyd exists=%s size=%s"
+                        % (os.path.exists(inp),
+                           (os.path.getsize(inp) if os.path.exists(inp) else "-")))
+            subdirs = [os.path.basename(p) for p in glob.glob(os.path.join(meip, "av", "*"))
+                       if os.path.isdir(p)]
+            _secure_log("av-diag av/ subdirs=%s" % subdirs)
+    except Exception as e:
+        _secure_log("av-diag listing failed %r" % (e,))
+    import importlib
+    for mod in ("av", "av.format", "av.codec", "av.container.input"):
+        try:
+            importlib.import_module(mod)
+            _secure_log("av-diag import %s -> OK" % mod)
+        except Exception as e:
+            _secure_log("av-diag import %s -> FAIL %r" % (mod, e))
+            _secure_log("av-diag %s traceback: %s" % (mod, _tb.format_exc().replace("\n", " | ")))
+
+
 def run_secure_helper():
-    """SYSTEM-side helper (phase 1). Attaches to WinSta0 and the current input desktop and
-    captures it for ~25 s, overwriting _SECURE_TEST_PNG each pass and logging the desktop name
-    — so if you trigger a UAC prompt while it runs, the PNG shows whether SYSTEM can see the
-    secure desktop. NOT yet wired into the live stream."""
-    import mss as _mss
+    """SYSTEM-side helper (phase 1). Joins WinSta0 and, on a FRESH thread (so SetThreadDesktop
+    isn't refused with ERROR_BUSY for owning windows), follows the current INPUT desktop
+    (which becomes 'Winlogon' when the secure desktop is up) and GDI-captures it for ~25 s
+    into _SECURE_TEST_PNG. Logs the account + desktop + SetThreadDesktop result each change."""
     _secure_log("helper start frozen=%s pid=%s" % (getattr(sys, "frozen", False), os.getpid()))
     try:
         ub = ctypes.create_unicode_buffer(256)
@@ -5644,82 +6341,133 @@ def run_secure_helper():
         _secure_log("running as user=%s" % (ub.value,))   # expect 'SYSTEM'
     except Exception as e:
         _secure_log("GetUserName failed %r" % (e,))
+    _secure_av_diag()
     user32 = ctypes.windll.user32
-    for fn in ("OpenWindowStationW", "OpenInputDesktop"):
-        try:
-            getattr(user32, fn).restype = wintypes.HANDLE
-        except Exception:
-            pass
+    user32.OpenWindowStationW.restype = wintypes.HANDLE
+    user32.OpenInputDesktop.restype = wintypes.HANDLE
     try:
         hws = user32.OpenWindowStationW("WinSta0", False, 0x10000000)  # GENERIC_ALL
-        _secure_log("OpenWindowStation WinSta0 -> %s lasterr=%s"
-                    % (hws, ctypes.GetLastError()))
+        _secure_log("OpenWindowStation WinSta0 -> %s err=%s" % (hws, ctypes.GetLastError()))
         if hws:
-            user32.SetProcessWindowStation(hws)
+            user32.SetProcessWindowStation(ctypes.c_void_p(hws))
     except Exception as e:
         _secure_log("winsta attach failed %r" % (e,))
-    end = time.monotonic() + 25
-    last = None
-    while time.monotonic() < end:
-        try:
-            hdesk = user32.OpenInputDesktop(0, False, 0x01FF)   # all DESKTOP_* access
-            name = None
-            if hdesk:
-                buf = ctypes.create_unicode_buffer(256)
-                need = wintypes.DWORD()
-                user32.GetUserObjectInformationW(hdesk, 2, buf, 512, ctypes.byref(need))
-                name = buf.value
-                user32.SetThreadDesktop(hdesk)
-            if name != last:
-                _secure_log("input desktop=%r hdesk=%s lasterr=%s"
-                            % (name, hdesk, ctypes.GetLastError()))
-                last = name
-            with _mss.mss() as sct:
-                shot = sct.grab(sct.monitors[0])
-            Image.frombytes("RGB", shot.size, shot.rgb).save(_SECURE_TEST_PNG)
-            if hdesk:
-                user32.CloseDesktop(hdesk)
-        except Exception as e:
-            _secure_log("loop error %r" % (e,))
-        time.sleep(0.5)
-    _secure_log("helper done; last desktop=%r png=%s" % (last, _SECURE_TEST_PNG))
+
+    def _cap():
+        end = time.monotonic() + 60  # long enough for the user to trigger a UAC prompt in time
+        last = None
+        while time.monotonic() < end:
+            try:
+                hdesk = user32.OpenInputDesktop(0, False, 0x0100 | 0x0001)  # SWITCHDESKTOP|READ
+                name = None
+                set_ok = False
+                serr = 0
+                if hdesk:
+                    b = ctypes.create_unicode_buffer(256)
+                    need = wintypes.DWORD()
+                    user32.GetUserObjectInformationW(hdesk, 2, b, 512, ctypes.byref(need))
+                    name = b.value
+                    set_ok = bool(user32.SetThreadDesktop(ctypes.c_void_p(hdesk)))
+                    serr = 0 if set_ok else ctypes.GetLastError()
+                    try:
+                        _gdi_grab_to(_SECURE_TEST_PNG)
+                        # Keep the secure-desktop frame in its own file; the loop otherwise
+                        # overwrites _SECURE_TEST_PNG with the next 'Default' frame.
+                        if name and name.lower() == "winlogon":
+                            wpath = _SECURE_TEST_PNG.replace(".png", "-winlogon.png")
+                            _gdi_grab_to(wpath)
+                            _secure_log("saved SECURE-DESKTOP frame -> %s" % wpath)
+                    except Exception as e:
+                        _secure_log("grab error %r" % (e,))
+                    user32.CloseDesktop(ctypes.c_void_p(hdesk))
+                if name != last:
+                    _secure_log("input desktop=%r SetThreadDesktop=%s err=%s"
+                                % (name, set_ok, serr))
+                    last = name
+            except Exception as e:
+                _secure_log("cap loop error %r" % (e,))
+            time.sleep(0.5)
+        _secure_log("helper done; last desktop=%r png=%s" % (last, _SECURE_TEST_PNG))
+
+    t = threading.Thread(target=_cap, daemon=False)
+    t.start()
+    t.join()
+
+
+def _sc(*args):
+    """Run `sc <args>`, log the result, return (returncode, output)."""
+    try:
+        p = subprocess.run(["sc"] + list(args), capture_output=True, text=True,
+                           creationflags=0x08000000)  # CREATE_NO_WINDOW
+        out = ((p.stdout or "") + (p.stderr or "")).strip()
+        _secure_log("sc %s -> rc=%s %s" % (" ".join(args), p.returncode, out[:300]))
+        return p.returncode, out
+    except Exception as e:
+        _secure_log("sc %s raised %r" % (" ".join(args), e))
+        return -1, repr(e)
 
 
 def run_secure_test():
-    """Elevated-agent command (--secure-test): run `--secure-helper` as SYSTEM via a one-shot
-    scheduled task, so it captures the desktop with SYSTEM rights. Trigger a UAC prompt while
-    it runs to test the secure desktop. Results: _SECURE_TEST_PNG + ~/audiobus-secure.log."""
+    """Elevated-agent command (--secure-test): install a LocalSystem service that runs this exe
+    with `--secure-service`, start it (SCM runs it as SYSTEM), let it spawn the capture helper
+    into the console session, then stop+delete the service. Trigger a UAC prompt while it runs to
+    test the secure desktop. Results: _SECURE_TEST_PNG + ~/audiobus-secure.log. The service model
+    is how AnyDesk/TeamViewer reach the secure desktop; elevated-admin alone cannot."""
+    # Fix the log/frame paths to this (visible) user profile and thread them to the SYSTEM
+    # service + helper, so their lines land here instead of the hidden systemprofile dir.
+    log_path = os.path.join(os.path.expanduser("~"), "audiobus-secure.log")
+    png_path = os.path.join(os.path.expanduser("~"), "audiobus-secure-test.png")
+    _set_secure_paths(log_path, png_path)
+    # Unique per-run service name so a leftover service still 'marked for deletion' from a prior
+    # hung run (its process still alive) can't block us with ERROR 1072 on sc create.
+    svc_name = "AudiobusSecure_%d" % os.getpid()
+    _set_secure_svcname(svc_name)
     try:
         os.remove(_SECURE_TEST_PNG)
     except Exception:
         pass
-    _secure_log("=== secure-test launched (agent elevated) ===")
+    _secure_log("=== secure-test launched (agent elevated) svc=%s ===" % svc_name)
     exe = sys.executable
-    bat = os.path.join(os.path.expanduser("~"), "audiobus-secure-test.bat")
+    svc_args = ('--secure-service --secure-svcname "%s" --secure-log "%s" --secure-png "%s"'
+                % (svc_name, log_path, png_path))
     if getattr(sys, "frozen", False):
-        cmd = '"%s" --secure-helper' % exe
+        bin_path = '"%s" %s' % (exe, svc_args)
     else:
-        cmd = '"%s" "%s" --secure-helper' % (exe, os.path.abspath(__file__))
+        bin_path = '"%s" "%s" %s' % (exe, os.path.abspath(__file__), svc_args)
+    installed = started = False
     try:
-        with open(bat, "w", encoding="utf-8", newline="\r\n") as f:
-            f.write("@echo off\n" + cmd + "\n")
+        _sc("stop", _SVC_NAME)        # clean up any leftover from a previous run
+        _sc("delete", _SVC_NAME)
+        rc, _ = _sc("create", _SVC_NAME, "binPath=", bin_path, "type=", "own",
+                    "start=", "demand", "DisplayName=", "Audiobus Secure Capture")
+        installed = (rc == 0)
+        if installed:
+            rc, _ = _sc("start", _SVC_NAME)
+            started = (rc == 0)
+            time.sleep(1.5)
+            _sc("query", _SVC_NAME)   # RUNNING vs STOPPED tells us if ServiceMain lived
     except Exception as e:
-        _secure_log("write bat failed %r" % (e,))
-    tn = "AudiobusSecureTest"
-    subprocess.run(["schtasks", "/create", "/tn", tn, "/ru", "SYSTEM", "/rl", "HIGHEST",
-                    "/sc", "ONCE", "/st", "00:00", "/f", "/tr", bat],
-                   creationflags=_VC_CREATE_NO_WINDOW)
-    subprocess.run(["schtasks", "/run", "/tn", tn], creationflags=_VC_CREATE_NO_WINDOW)
+        _secure_log("service install/start raised %r" % (e,))
     try:
-        messagebox.showinfo(
-            "Audiobus secure-desktop test",
-            "Capturing the screen as SYSTEM for ~25 seconds.\n\nTo test the secure desktop, "
-            "trigger a UAC prompt now (e.g. right-click an app and 'Run as administrator').\n\n"
-            "Then open:\n%s\nand ~\\audiobus-secure.log\n\nClick OK when done." % _SECURE_TEST_PNG)
+        if started:
+            messagebox.showinfo(
+                "Audiobus secure-desktop test",
+                "Capturing the screen as SYSTEM for ~60 seconds.\n\nTo test the secure desktop, "
+                "trigger a UAC prompt NOW (right-click an app and 'Run as administrator') and leave "
+                "it on screen a few seconds. Do it within ~50 s of this dialog.\n\n"
+                "Then open:\n%s\nand ~\\audiobus-secure.log\n\nClick OK when done." % _SECURE_TEST_PNG)
+        else:
+            messagebox.showerror(
+                "Audiobus secure-desktop test",
+                "Could not install/start the SYSTEM service (see ~\\audiobus-secure.log). "
+                "Make sure you ran the agent as administrator.")
     except Exception:
         time.sleep(27)
-    subprocess.run(["schtasks", "/delete", "/tn", tn, "/f"], creationflags=_VC_CREATE_NO_WINDOW)
-    _secure_log("=== secure-test cleaned up ===")
+    finally:
+        if installed:
+            _sc("stop", _SVC_NAME)
+            _sc("delete", _SVC_NAME)
+    _secure_log("=== secure-test done ===")
 
 
 def run_selfcheck(out_path):
@@ -6022,10 +6770,23 @@ def main(argv=None):
     # The capture/encode child runs ONLY this and exits — before the single-instance
     # guard (it's a second copy of this exe and must not trip the mutex) and the GUI.
     if getattr(args, "video_child", False):
-        run_video_child(args.vport)
+        run_video_child(args.vport, raw=getattr(args, "raw_capture", False))
+        return
+    # The cap-worker (topology b): a second copy of this exe that GDI-grabs and ships RAW frames to
+    # the encode child. Runs before the single-instance guard (it is not the main agent).
+    if getattr(args, "cap_worker", False):
+        run_cap_worker(args.capport)
         return
     # Secure-desktop phase-1 helpers (run before the single-instance guard: the helper is a
     # transient SYSTEM child and the test is a one-shot command, neither is the main agent).
+    # Adopt the user-visible log/frame paths first so the SYSTEM service + helper log where we
+    # can see them (their own expanduser("~") would point at the hidden systemprofile dir).
+    if getattr(args, "secure_service", False) or getattr(args, "secure_helper", False):
+        _set_secure_paths(getattr(args, "secure_log", None), getattr(args, "secure_png", None))
+    if getattr(args, "secure_service", False):
+        _set_secure_svcname(getattr(args, "secure_svcname", None))
+        run_secure_service()
+        return
     if getattr(args, "secure_helper", False):
         run_secure_helper()
         return
