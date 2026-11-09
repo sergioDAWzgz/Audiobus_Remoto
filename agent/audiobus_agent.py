@@ -703,7 +703,7 @@ _GUI_DPI_LOGGED = False   # one-time GUI-thread DPI-awareness + raw-rect diagnos
 _SHOT_SAVED = False       # one-time: save an mss screenshot on the first blocked click
 
 
-_AGENT_BUILD = "2026-11-09-rawsys4"  # T3b: input desktop opened with full access so SendInput clicks land
+_AGENT_BUILD = "2026-11-09-rawsys6"  # T3c: respawn the cap-worker on death (+ keyframe-on-switch)
 
 
 def _save_debug_shot(x, y):
@@ -1902,13 +1902,16 @@ def _vc_convert_raw(buf, w, h, scale_fixed, max_width):
 
 class _RawShot:
     """Minimal ScreenShot stand-in carrying the cap-worker's raw BGRX frame. `.raw` feeds the
-    session's static-skip (bytes compare); `.width/.height` size the _vc_convert_raw decode."""
-    __slots__ = ("raw", "width", "height")
+    session's static-skip (bytes compare); `.width/.height` size the _vc_convert_raw decode; `.kf`
+    (set by the worker right after a desktop switch) asks the encoder for a keyframe so the new
+    desktop (e.g. a UAC prompt) decodes crisply instead of as a big residual P-frame."""
+    __slots__ = ("raw", "width", "height", "kf")
 
-    def __init__(self, raw, w, h):
+    def __init__(self, raw, w, h, kf=0):
         self.raw = raw
         self.width = w
         self.height = h
+        self.kf = kf
 
 
 class RawCaptureClient:
@@ -1991,9 +1994,9 @@ class RawCaptureClient:
             if t is None:
                 self._alive = False
                 break
-            if t == _CAP_FRAME and len(body) >= 9:
-                mi, w, h = struct.unpack(">BII", body[:9])
-                self._latest[mi] = _RawShot(body[9:], w, h)
+            if t == _CAP_FRAME and len(body) >= 10:
+                mi, w, h, kf = struct.unpack(">BIIB", body[:10])
+                self._latest[mi] = _RawShot(body[10:], w, h, kf)
 
     def start(self, monitors, fps, wanted, input_port=0):
         self._send({"type": "start", "monitors": monitors, "fps": int(fps),
@@ -2118,6 +2121,8 @@ def _vc_capture_session(sock, state):
                     continue
                 if shot is None:                 # worker hasn't shipped this monitor yet
                     continue
+                if raw_mode and getattr(shot, "kf", 0):
+                    force_kf = True              # worker switched desktop: keyframe the new scene
                 # Skip an unchanged screen: compare the raw grab (BGRA, pre-conversion) to
                 # the last one we encoded. Never skip a requested keyframe, and force one
                 # through every MAX_SKIP_STATIC s so the viewer's stall detector stays happy.
@@ -2444,6 +2449,7 @@ def run_cap_worker(port):
     last = {}                   # mi -> last grab time (fps pacing)
     last_raw = {}               # mi -> last shipped raw bytes (static-skip)
     last_sent = {}              # mi -> monotonic time we last shipped a frame
+    kf_pending = set()          # monitors whose next shipped frame must be a keyframe (desktop switch)
     cap_desktop = {"name": None, "tag": "cap"}   # this (capture) thread's current input desktop
 
     while not state["stop"]:
@@ -2458,11 +2464,13 @@ def run_cap_worker(port):
             # Re-attach THIS thread to the live input desktop so the GDI grab captures the secure
             # desktop (Winlogon) when a UAC / Ctrl-Alt-Del / lock screen is up, else Default. When
             # it switches, force every monitor through next (last_raw cleared) so the viewer isn't
-            # left on a stale static-skipped frame from the other desktop.
+            # left on a stale static-skipped frame, and flag a keyframe so the new desktop decodes
+            # crisply (a full scene change encoded as a P-frame can look blocky for a moment).
             prev = cap_desktop["name"]
             _follow_input_desktop(cap_desktop)
             if cap_desktop["name"] != prev:
                 last_raw.clear()
+                kf_pending = {m["i"] for m in monitors}
         for m in monitors:
             mi = m["i"]
             interval = full_interval if mi in state["wanted"] else IDLE_INTERVAL
@@ -2481,7 +2489,9 @@ def run_cap_worker(port):
                 continue
             last_raw[mi] = buf
             last_sent[mi] = time.monotonic()
-            header = struct.pack(">BII", mi & 0xFF, int(m["width"]), int(m["height"]))
+            kf = 1 if mi in kf_pending else 0
+            kf_pending.discard(mi)
+            header = struct.pack(">BIIB", mi & 0xFF, int(m["width"]), int(m["height"]), kf)
             try:
                 with send_lock:
                     _vc_send_frame(sock, _CAP_FRAME, header + buf)
@@ -2559,7 +2569,7 @@ def run_video_child(port, raw=False, system=False):
 
     state = {"stop": False, "capturing": False, "cfg": None,
              "wanted": set(), "kf": set(), "gen": 0, "bitrates": {},
-             "raw": False, "capclient": None, "input_port": 0}
+             "raw": False, "capclient": None, "input_port": 0, "system": system}
 
     # Topology (b): spawn the cap-worker that GDI-grabs and ships RAW frames. If it fails to come
     # up, fall back to in-process mss capture so a viewer session still works (just not on the
@@ -2622,6 +2632,26 @@ def run_video_child(port, raw=False, system=False):
         if not state["capturing"]:
             time.sleep(0.03)                 # idle: cheap wait for the next 'start'
             continue
+        # T3c respawn-on-death: the cap-worker is spawned once and reused across sessions. If it
+        # died (crash / killed / a mid-session stall that ended the session), bring up a fresh one
+        # before this session captures. If the respawn fails, fall back to in-process mss so the
+        # session still streams (just not the secure desktop) instead of freezing.
+        if state["raw"] and state["capclient"] is not None and not state["capclient"].alive():
+            try:
+                state["capclient"].shutdown()
+            except Exception:
+                pass
+            state["capclient"] = None
+            try:
+                newcc = RawCaptureClient(system=state.get("system", False))
+                if newcc.spawn():
+                    state["capclient"] = newcc
+                    _click_log("[rawcap worker respawned system=%s]" % state.get("system", False))
+                else:
+                    state["raw"] = False
+                    _click_log("[rawcap worker respawn FAILED -> mss fallback]")
+            except Exception:
+                state["raw"] = False
         try:
             _vc_capture_session(sock, state)
         except Exception:
