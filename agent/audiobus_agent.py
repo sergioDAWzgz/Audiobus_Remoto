@@ -703,7 +703,7 @@ _GUI_DPI_LOGGED = False   # one-time GUI-thread DPI-awareness + raw-rect diagnos
 _SHOT_SAVED = False       # one-time: save an mss screenshot on the first blocked click
 
 
-_AGENT_BUILD = "2026-11-09-rawcap2"  # topology-b split capture (T1) + input via worker (T2)
+_AGENT_BUILD = "2026-11-09-rawsys4"  # T3b: input desktop opened with full access so SendInput clicks land
 
 
 def _save_debug_shot(x, y):
@@ -1304,9 +1304,12 @@ class VideoChild:
                 cmd = [sys.executable, os.path.abspath(__file__),
                        "--video-child", "--vport", str(port)]
             # Topology (b): tell the encode child to grab RAW frames from a cap-worker (so capture
-            # can later run as SYSTEM on the secure desktop). Opt-in via the agent's --raw-capture.
+            # can later run as SYSTEM on the secure desktop). Opt-in via the agent's --raw-capture;
+            # --raw-system additionally spawns that worker as SYSTEM (reaches the secure desktop).
             if getattr(self.client.args, "raw_capture", False):
                 cmd.append("--raw-capture")
+            if getattr(self.client.args, "raw_system", False):
+                cmd.append("--raw-system")
             self.proc = subprocess.Popen(cmd, creationflags=_VC_CREATE_NO_WINDOW)
             ls.settimeout(12)
             conn, _ = ls.accept()                 # waits for the child to connect
@@ -1915,29 +1918,40 @@ class RawCaptureClient:
     The worker is kept across viewer sessions (like the pre-spawned encode child), so __exit__
     is a no-op; shutdown() ends it for good."""
 
-    def __init__(self):
+    def __init__(self, system=False):
         self.sock = None
-        self.proc = None
+        self.proc = None             # the worker process (normal mode); None when SYSTEM-spawned
+        self.system = system         # T3: spawn the worker as SYSTEM via the service (secure desktop)
+        self._svc = None             # the one-shot service name used to spawn a SYSTEM worker
         self._lsock = None
         self._latest = {}            # mi -> _RawShot (most recent grab the worker shipped)
         self._alive = False
         self._send_lock = threading.Lock()
 
     def spawn(self):
-        """Launch + connect the worker. BLOCKS on accept. Returns True on success."""
+        """Launch + connect the worker. BLOCKS on accept. Returns True on success. In SYSTEM mode
+        the worker is spawned by a LocalSystem service (CreateProcessAsUser into the console
+        session) so it can reach the secure desktop; otherwise it's a plain user subprocess."""
         try:
             ls = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             ls.bind(("127.0.0.1", 0))
             ls.listen(1)
             self._lsock = ls
             port = ls.getsockname()[1]
-            if getattr(sys, "frozen", False):
-                cmd = [sys.executable, "--cap-worker", "--capport", str(port)]
+            if self.system:
+                self._svc = _spawn_cap_worker_as_system(port)
+                if not self._svc:
+                    self.shutdown()
+                    return False
+                ls.settimeout(30)    # SYSTEM spawn via the SCM + CreateProcessAsUser is slower
             else:
-                cmd = [sys.executable, os.path.abspath(__file__),
-                       "--cap-worker", "--capport", str(port)]
-            self.proc = subprocess.Popen(cmd, creationflags=_VC_CREATE_NO_WINDOW)
-            ls.settimeout(15)
+                if getattr(sys, "frozen", False):
+                    cmd = [sys.executable, "--cap-worker", "--capport", str(port)]
+                else:
+                    cmd = [sys.executable, os.path.abspath(__file__),
+                           "--cap-worker", "--capport", str(port)]
+                self.proc = subprocess.Popen(cmd, creationflags=_VC_CREATE_NO_WINDOW)
+                ls.settimeout(15)
             conn, _ = ls.accept()
             conn.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
             self.sock = conn
@@ -1947,6 +1961,14 @@ class RawCaptureClient:
                 pass
             self._lsock = None
             self._alive = True
+            if self.system and self._svc:
+                # The worker is independent and now connected; retire the one-shot service.
+                try:
+                    _sc("stop", self._svc)
+                    _sc("delete", self._svc)
+                except Exception:
+                    pass
+                self._svc = None
             threading.Thread(target=self._read_loop, args=(conn,), daemon=True).start()
             return True
         except Exception:
@@ -1954,8 +1976,11 @@ class RawCaptureClient:
             return False
 
     def alive(self):
-        return (self.sock is not None and self._alive
-                and self.proc is not None and self.proc.poll() is None)
+        if self.sock is None or not self._alive:
+            return False
+        if self.system:
+            return True              # no local proc handle; liveness tracked via the socket
+        return self.proc is not None and self.proc.poll() is None
 
     def _read_loop(self, sock):
         while self._alive:
@@ -2013,6 +2038,13 @@ class RawCaptureClient:
                 pass
         self.sock = None
         self._lsock = None
+        if self._svc:                 # a SYSTEM-spawn service that never got retired
+            try:
+                _sc("stop", self._svc)
+                _sc("delete", self._svc)
+            except Exception:
+                pass
+            self._svc = None
         p = self.proc
         self.proc = None
         if p:
@@ -2222,12 +2254,50 @@ def _gdi_grab_rect(x, y, w, h):
             pass
 
 
+_DESKTOP_READ = 0x0100 | 0x0001          # SWITCHDESKTOP|READOBJECTS: enough for a GDI grab
+_DESKTOP_ALL = 0x01FF                     # all desktop rights: SendInput button events need WRITE/
+#                                          JOURNALPLAYBACK (cursor MOVE via SetCursorPos needs less,
+#                                          which is why a read-only handle let moves through but not clicks)
+
+
+def _follow_input_desktop(cur, access=_DESKTOP_READ):
+    """Re-attach the CALLING thread to the current INPUT desktop — 'Default' normally, 'Winlogon'
+    when the secure desktop (UAC / Ctrl-Alt-Del / lock) is up — so a SYSTEM thread's GDI grab and
+    SendInput act on whatever the user is actually looking at. This is the AnyDesk/TeamViewer trick.
+    `access` is the OpenInputDesktop mask: capture uses READ, the input thread uses ALL so SendInput
+    clicks (not just SetCursorPos moves) land. `cur` tracks the last name (logged once on change).
+    Returns the current desktop name, or None. SetThreadDesktop is per-thread, so the capture loop
+    and the input reader each call this on their own thread."""
+    user32 = ctypes.windll.user32
+    user32.OpenInputDesktop.restype = wintypes.HANDLE
+    hdesk = user32.OpenInputDesktop(0, False, access)   # follows the current input desktop
+    if not hdesk:
+        return cur.get("name")
+    name = None
+    try:
+        b = ctypes.create_unicode_buffer(256)
+        need = wintypes.DWORD()
+        user32.GetUserObjectInformationW(hdesk, 2, b, 512, ctypes.byref(need))   # UOI_NAME
+        name = b.value
+        # SetThreadDesktop persists until the next call, so only re-attach when the desktop actually
+        # changed (the attach survives CloseDesktop of this probe handle). First call: name != None.
+        if name != cur.get("name"):
+            ok = bool(user32.SetThreadDesktop(ctypes.c_void_p(hdesk)))
+            _worker_log("[rawcap %s desktop -> %r SetThreadDesktop=%s]"
+                        % (cur.get("tag", ""), name, ok))
+            cur["name"] = name
+    finally:
+        user32.CloseDesktop(ctypes.c_void_p(hdesk))
+    return name
+
+
 def run_cap_worker(port):
     """cap-worker entry point (topology b). Connects to the encode child on 127.0.0.1:<port>,
     receives a 'start' ctl (monitors geometry + fps + wanted), then GDI-grabs each monitor rect,
     static-skips byte-identical frames, and ships RAW BGRX over loopback. Pure ctypes/socket/struct
-    — NO PIL/numpy/av — so when this later runs as SYSTEM, Defender has no av pyds to strip. T2 will
-    add input injection here (SendInput on the current input desktop)."""
+    — NO PIL/numpy/av — so as SYSTEM Defender has no av pyds to strip. Input injection (SendInput)
+    runs on a reader thread. As SYSTEM both threads FOLLOW the input desktop (Default<->Winlogon) so
+    capture + input reach the secure desktop."""
     try:
         _set_dpi_awareness()      # physical pixels, matching the encode child / parent
     except Exception:
@@ -2240,12 +2310,38 @@ def run_cap_worker(port):
         return
 
     state = {"stop": False, "capturing": False, "monitors": [], "fps": 20, "wanted": set(),
-             "input_sock": None}
+             "input_sock": None, "follow": False}
     send_lock = threading.Lock()
+    who = "?"
     try:
-        _click_log("[rawcap worker connected port=%s pid=%s]" % (port, os.getpid()))
+        try:
+            ub = ctypes.create_unicode_buffer(256)
+            sz = wintypes.DWORD(256)
+            ctypes.windll.advapi32.GetUserNameW(ub, ctypes.byref(sz))
+            who = ub.value
+        except Exception:
+            pass
+        # Is pynput real here, or stubbed (av-import failure stubs it only if pynput itself failed
+        # — it imports before the heavy modules, so this confirms SendInput is live as SYSTEM).
+        py = getattr(type(mouse), "__module__", "?")
+        _worker_log("[rawcap worker connected port=%s pid=%s user=%s pynput=%s]"
+                    % (port, os.getpid(), who, py))
     except Exception:
         pass
+    # SYSTEM worker only: follow the input desktop so capture + input reach the secure desktop.
+    # Attach the process to WinSta0 first (Winlogon lives there). A normal-user worker can't and
+    # doesn't need to, so it keeps the simple Default-only path (unchanged from T1/T2).
+    if who == "SYSTEM":
+        state["follow"] = True
+        try:
+            user32 = ctypes.windll.user32
+            user32.OpenWindowStationW.restype = wintypes.HANDLE
+            hws = user32.OpenWindowStationW("WinSta0", False, 0x10000000)   # GENERIC_ALL
+            if hws:
+                user32.SetProcessWindowStation(ctypes.c_void_p(hws))
+            _worker_log("[rawcap worker WinSta0 attach hws=%s err=%s]" % (hws, ctypes.GetLastError()))
+        except Exception as e:
+            _worker_log("[rawcap worker WinSta0 attach failed %r]" % (e,))
     diag = {"shipped": 0}
 
     def _input_reader(isock):
@@ -2254,6 +2350,9 @@ def run_cap_worker(port):
         dropped link releases nothing-stuck. Reaches the secure desktop once this runs as SYSTEM."""
         pressed = set()
         wheel = {"x": 0.0, "y": 0.0}
+        rx = {}                       # event types already logged (first inject of each)
+        inp_desktop = {"name": None, "tag": "input"}   # this (input) thread's current input desktop
+        _worker_log("[rawcap worker input reader started]")
         try:
             while not state["stop"]:
                 try:
@@ -2268,10 +2367,22 @@ def run_cap_worker(port):
                     ev = json.loads(body)
                 except Exception:
                     continue
+                et = ev.get("t")
+                # Attach THIS thread to the live input desktop so SendInput reaches the secure
+                # desktop (Winlogon) when it is up — with FULL access so button events (not just
+                # cursor moves) are injected.
+                if state["follow"]:
+                    _follow_input_desktop(inp_desktop, _DESKTOP_ALL)
                 try:
                     apply_event(ev, state["monitors"], None, None, pressed, False, wheel, None)
-                except Exception:
-                    pass
+                    if et not in rx:        # log the first inject of each distinct event type
+                        rx[et] = 1
+                        _worker_log("[rawcap worker injected t=%s on=%s]"
+                                    % (et, inp_desktop.get("name")))
+                except Exception as e:
+                    if et not in rx:
+                        rx[et] = 1
+                        _worker_log("[rawcap worker inject FAILED t=%s %r]" % (et, e))
         finally:
             for b in list(pressed):
                 try:
@@ -2292,7 +2403,7 @@ def run_cap_worker(port):
             isock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
             state["input_sock"] = isock
             threading.Thread(target=_input_reader, args=(isock,), daemon=True).start()
-            _click_log("[rawcap worker input connected port=%s]" % ip)
+            _worker_log("[rawcap worker input connected port=%s]" % ip)
         except Exception:
             pass
 
@@ -2333,6 +2444,7 @@ def run_cap_worker(port):
     last = {}                   # mi -> last grab time (fps pacing)
     last_raw = {}               # mi -> last shipped raw bytes (static-skip)
     last_sent = {}              # mi -> monotonic time we last shipped a frame
+    cap_desktop = {"name": None, "tag": "cap"}   # this (capture) thread's current input desktop
 
     while not state["stop"]:
         if not state["capturing"]:
@@ -2342,6 +2454,15 @@ def run_cap_worker(port):
         fps = max(1, int(state["fps"]))
         full_interval = 1.0 / fps
         now = time.time()
+        if state["follow"]:
+            # Re-attach THIS thread to the live input desktop so the GDI grab captures the secure
+            # desktop (Winlogon) when a UAC / Ctrl-Alt-Del / lock screen is up, else Default. When
+            # it switches, force every monitor through next (last_raw cleared) so the viewer isn't
+            # left on a stale static-skipped frame from the other desktop.
+            prev = cap_desktop["name"]
+            _follow_input_desktop(cap_desktop)
+            if cap_desktop["name"] != prev:
+                last_raw.clear()
         for m in monitors:
             mi = m["i"]
             interval = full_interval if mi in state["wanted"] else IDLE_INTERVAL
@@ -2366,8 +2487,8 @@ def run_cap_worker(port):
                     _vc_send_frame(sock, _CAP_FRAME, header + buf)
                 diag["shipped"] += 1
                 if diag["shipped"] == 1:
-                    _click_log("[rawcap worker first frame mi=%s %sx%s bytes=%s]"
-                               % (mi, int(m["width"]), int(m["height"]), len(buf)))
+                    _worker_log("[rawcap worker first frame mi=%s %sx%s bytes=%s]"
+                                % (mi, int(m["width"]), int(m["height"]), len(buf)))
             except Exception:
                 state["stop"] = True
                 break
@@ -2381,7 +2502,7 @@ def run_cap_worker(port):
             pass
 
 
-def run_video_child(port, raw=False):
+def run_video_child(port, raw=False, system=False):
     """Child-process entry point (started via `--video-child --vport N`). Connects back to
     the parent and IDLES until told to capture, so the parent can pre-spawn it at startup
     and a viewer session then begins instantly (no process-launch / import delay). Captures
@@ -2445,15 +2566,15 @@ def run_video_child(port, raw=False):
     # secure desktop). The worker is kept across sessions, mirroring this pre-spawned child.
     if raw:
         try:
-            cc = RawCaptureClient()
+            cc = RawCaptureClient(system=system)
             if cc.spawn():
                 state["raw"] = True
                 state["capclient"] = cc
         except Exception:
             state["raw"] = False
         try:
-            _click_log("[rawcap encode-child raw=%s worker=%s build=%s]"
-                       % (raw, state["raw"], _AGENT_BUILD))
+            _click_log("[rawcap encode-child raw=%s worker=%s system=%s build=%s]"
+                       % (raw, state["raw"], system, _AGENT_BUILD))
         except Exception:
             pass
 
@@ -2992,7 +3113,13 @@ class NetClient:
         try:
             with self._input_lock:
                 _vc_send_frame(s, _CAP_INPUT, json.dumps(ev).encode())
-        except Exception:
+            if not getattr(self, "_fwd_diag", False):
+                self._fwd_diag = True
+                _click_log("[rawcap main first forward OK t=%s]" % ev.get("t"))
+        except Exception as e:
+            if not getattr(self, "_fwd_fail_diag", False):
+                self._fwd_fail_diag = True
+                _click_log("[rawcap main forward FAILED %r]" % (e,))
             self._input_wsock = None
 
     def request_stop(self):
@@ -3689,6 +3816,11 @@ class NetClient:
         sink = (self._send_to_input_worker
                 if (getattr(self.args, "raw_capture", False) and self._input_wsock is not None)
                 else None)
+        if not getattr(self, "_in_diag", False):
+            self._in_diag = True
+            _click_log("[rawcap main apply_input raw=%s wsock=%s sink=%s t=%s]"
+                       % (getattr(self.args, "raw_capture", False),
+                          self._input_wsock is not None, sink is not None, msg.get("t")))
         apply_event(
             msg, self.monitors,
             getattr(self.app, "_window_rects", None),
@@ -6141,10 +6273,17 @@ def parse_args(argv):
     # separate cap-worker (GDI, pure ctypes) over loopback, so capture can later run as SYSTEM on the
     # secure desktop while av-encode stays in a user process. Opt-in; the old mss pipeline is default.
     p.add_argument("--raw-capture", dest="raw_capture", action="store_true", help=argparse.SUPPRESS)
+    # --raw-system (implies --raw-capture): spawn the cap-worker as SYSTEM via a LocalSystem service so
+    # capture+input reach the secure desktop (UAC / Ctrl-Alt-Del / lock). Needs elevated admin.
+    p.add_argument("--raw-system", dest="raw_system", action="store_true", help=argparse.SUPPRESS)
     # Internal: the cap-worker entry point. GDI-grabs every monitor and ships RAW BGRX over loopback to
     # the encode child on --capport. Pure ctypes (no PIL/numpy/av). Not for direct use.
     p.add_argument("--cap-worker", dest="cap_worker", action="store_true", help=argparse.SUPPRESS)
     p.add_argument("--capport", type=int, default=0, help=argparse.SUPPRESS)
+    # Internal: the SYSTEM service reads this and spawns `--cap-worker --capport N` into the console
+    # session (instead of phase-1's --secure-helper). Not for direct use.
+    p.add_argument("--capworker-port", dest="capworker_port", type=int, default=0,
+                   help=argparse.SUPPRESS)
     # Escape hatch: keep capture+encode in-process (the old path) instead of a child.
     p.add_argument("--no-video-subprocess", dest="no_video_subprocess",
                    action="store_true", help=argparse.SUPPRESS)
@@ -6202,12 +6341,33 @@ def _set_secure_svcname(name):
         _SVC_NAME = name
 
 
+# T3: when non-zero, the SYSTEM service spawns `--cap-worker --capport N` into the console session
+# (instead of phase-1's `--secure-helper`), re-using the same token/CreateProcessAsUser plumbing.
+_CAPWORKER_PORT = 0
+
+
+def _set_capworker_port(port):
+    global _CAPWORKER_PORT
+    if port:
+        _CAPWORKER_PORT = int(port)
+
+
 def _secure_log(msg):
     try:
         with open(_SECURE_LOG_PATH, "a", encoding="utf-8") as f:
             f.write(time.strftime("%H:%M:%S ") + msg + "\n")
     except Exception:
         pass
+
+
+def _worker_log(msg):
+    """cap-worker diagnostics. The SYSTEM worker is spawned with --secure-log (its own ~ is the
+    hidden systemprofile dir), so it logs to that visible path; the normal-user worker uses the
+    click log."""
+    if "--secure-log" in sys.argv[1:]:
+        _secure_log(msg)
+    else:
+        _click_log(msg)
 
 
 if sys.platform == "win32":
@@ -6308,11 +6468,19 @@ def _spawn_helper_in_console_session(desktop):
     if not adv.SetTokenInformation(dup, 12, ctypes.byref(sid), ctypes.sizeof(sid)):  # TokenSessionId
         _secure_log("SetTokenInformation(session) failed err=%s" % ctypes.GetLastError())
     exe = sys.executable
-    hargs = '--secure-helper --secure-log "%s" --secure-png "%s"' % (_SECURE_LOG_PATH, _SECURE_TEST_PNG)
+    if _CAPWORKER_PORT:
+        # T3: spawn the live cap-worker as SYSTEM into the console session. --secure-log gives it a
+        # VISIBLE log path (its own ~ is the hidden systemprofile dir). It connects back to the
+        # encode child on --capport and injects input via the main agent's input link.
+        hargs = '--cap-worker --capport %d --secure-log "%s"' % (_CAPWORKER_PORT, _SECURE_LOG_PATH)
+    else:
+        hargs = ('--secure-helper --secure-log "%s" --secure-png "%s"'
+                 % (_SECURE_LOG_PATH, _SECURE_TEST_PNG))
     if getattr(sys, "frozen", False):
         cmdline = '"%s" %s' % (exe, hargs)
     else:
         cmdline = '"%s" "%s" %s' % (exe, os.path.abspath(__file__), hargs)
+    _secure_log("console-session child cmdline=%s" % hargs)
     si = _STARTUPINFOW()
     si.cb = ctypes.sizeof(si)
     si.lpDesktop = desktop
@@ -6615,6 +6783,42 @@ def run_secure_test():
     _secure_log("=== secure-test done ===")
 
 
+def _spawn_cap_worker_as_system(capport):
+    """T3: install + start a LocalSystem service that CreateProcessAsUser's `--cap-worker --capport
+    <capport>` into the console session as SYSTEM, so capture+input can reach the secure desktop.
+    The worker connects back to the encode child (loopback, cross-session). Returns the service name
+    (the caller sc-deletes it once the worker has connected) or None. Needs elevated admin (sc create;
+    the agent runs --uac-admin, and the encode child inherits that elevation)."""
+    log_path = os.path.join(os.path.expanduser("~"), "audiobus-secure.log")
+    _set_secure_paths(log_path, None)
+    svc_name = "AudiobusCap_%d" % os.getpid()
+    _secure_log("=== cap-worker SYSTEM spawn: svc=%s capport=%s ===" % (svc_name, capport))
+    exe = sys.executable
+    svc_args = ('--secure-service --capworker-port %d --secure-svcname "%s" --secure-log "%s"'
+                % (int(capport), svc_name, log_path))
+    if getattr(sys, "frozen", False):
+        bin_path = '"%s" %s' % (exe, svc_args)
+    else:
+        bin_path = '"%s" "%s" %s' % (exe, os.path.abspath(__file__), svc_args)
+    try:
+        _sc("stop", svc_name)        # clear any leftover ghost from a prior run
+        _sc("delete", svc_name)
+        rc, _ = _sc("create", svc_name, "binPath=", bin_path, "type=", "own",
+                    "start=", "demand", "DisplayName=", "Audiobus Live Capture")
+        if rc != 0:
+            _secure_log("cap-worker service create failed rc=%s" % rc)
+            return None
+        rc, _ = _sc("start", svc_name)
+        if rc != 0:
+            _secure_log("cap-worker service start failed rc=%s" % rc)
+            _sc("delete", svc_name)
+            return None
+        return svc_name
+    except Exception as e:
+        _secure_log("cap-worker service spawn raised %r" % (e,))
+        return None
+
+
 def run_selfcheck(out_path):
     """Headless check that this build can grab the screen and run the full
     capture -> VP8 encode -> decode path over a loopback peer connection (no GUI).
@@ -6905,6 +7109,9 @@ def _replace_running_instance():
 
 def main(argv=None):
     args = parse_args(argv if argv is not None else sys.argv[1:])
+    # --raw-system (spawn the cap-worker as SYSTEM for the secure desktop) implies the split pipeline.
+    if getattr(args, "raw_system", False):
+        args.raw_capture = True
     if getattr(args, "selfcheck", None):
         print(run_selfcheck(args.selfcheck))
         return
@@ -6915,11 +7122,15 @@ def main(argv=None):
     # The capture/encode child runs ONLY this and exits — before the single-instance
     # guard (it's a second copy of this exe and must not trip the mutex) and the GUI.
     if getattr(args, "video_child", False):
-        run_video_child(args.vport, raw=getattr(args, "raw_capture", False))
+        run_video_child(args.vport, raw=getattr(args, "raw_capture", False),
+                        system=getattr(args, "raw_system", False))
         return
     # The cap-worker (topology b): a second copy of this exe that GDI-grabs and ships RAW frames to
-    # the encode child. Runs before the single-instance guard (it is not the main agent).
+    # the encode child. Runs before the single-instance guard (it is not the main agent). A SYSTEM
+    # worker is spawned with --secure-log, so adopt that visible path for its diagnostics.
     if getattr(args, "cap_worker", False):
+        if getattr(args, "secure_log", None):
+            _set_secure_paths(args.secure_log, getattr(args, "secure_png", None))
         run_cap_worker(args.capport)
         return
     # Secure-desktop phase-1 helpers (run before the single-instance guard: the helper is a
@@ -6930,6 +7141,9 @@ def main(argv=None):
         _set_secure_paths(getattr(args, "secure_log", None), getattr(args, "secure_png", None))
     if getattr(args, "secure_service", False):
         _set_secure_svcname(getattr(args, "secure_svcname", None))
+        # T3: if a cap-worker port was threaded in, the service spawns the live cap-worker (not the
+        # phase-1 --secure-helper) into the console session.
+        _set_capworker_port(getattr(args, "capworker_port", 0))
         run_secure_service()
         return
     if getattr(args, "secure_helper", False):
