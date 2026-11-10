@@ -703,7 +703,7 @@ _GUI_DPI_LOGGED = False   # one-time GUI-thread DPI-awareness + raw-rect diagnos
 _SHOT_SAVED = False       # one-time: save an mss screenshot on the first blocked click
 
 
-_AGENT_BUILD = "2026-11-10-elev5"  # elevation in place: swap USER->SYSTEM cap-worker live, no agent restart
+_AGENT_BUILD = "2026-11-10-elev8"  # elevation is a toggle: viewer can elevate AND de-elevate; agent reports capture mode
 
 
 def _save_debug_shot(x, y):
@@ -1428,6 +1428,26 @@ class VideoChild:
                     self.loop.call_soon_threadsafe(self._on_stall)
                 except Exception:
                     pass
+            elif t == _VC_CTL:
+                # The child reports a live capture-mode change (USER<->SYSTEM elevation toggle).
+                try:
+                    cmsg = json.loads(body)
+                except Exception:
+                    cmsg = None
+                if cmsg and cmsg.get("type") == "capture-mode":
+                    sysmode = bool(cmsg.get("system"))
+                    try:
+                        self.loop.call_soon_threadsafe(self._on_capture_mode, sysmode)
+                    except Exception:
+                        pass
+
+    def _on_capture_mode(self, system):
+        """Loop thread: the encode child reported its live capture mode (SYSTEM = elevated / secure
+        desktop). Relay it to the viewer so its Elevate control shows the real state and toggles."""
+        try:
+            asyncio.ensure_future(self.client._send_json({"type": "capture-mode", "elevated": bool(system)}))
+        except Exception:
+            pass
 
     def _deliver(self, mi, pts, data):
         """Loop thread: enqueue a (pts, bytes) packet. A full queue means we fell behind
@@ -1537,6 +1557,12 @@ class VideoChild:
         (its short-lived service installer); this process, the relay session and consent all stay up.
         Idempotent — a no-op in the child once it's already on the SYSTEM worker."""
         self._send_ctl({"type": "elevate-capture"})
+
+    def deelevate_capture(self):
+        """Drop on-demand elevation: ask the LIVE encode child to swap its SYSTEM cap-worker back to a
+        USER one (normal desktop, no secure desktop). Dropping privilege is safe, so this needs NO local
+        dialog and NO UAC. Idempotent — a no-op once already on the USER worker."""
+        self._send_ctl({"type": "deelevate-capture"})
 
     def shutdown(self):
         """Terminate the child for good (agent exit). BLOCKS briefly (run in an executor).
@@ -2067,13 +2093,13 @@ class RawCaptureClient:
                 pass
         self.sock = None
         self._lsock = None
-        if self._svc:                 # a SYSTEM-spawn service that never got retired
-            try:
+        if self._svc and not str(self._svc).startswith("ELEV:"):   # a SYSTEM-spawn service we must retire
+            try:                       # (an ELEV: token was installed+deleted by the elevated helper)
                 _sc("stop", self._svc)
                 _sc("delete", self._svc)
             except Exception:
                 pass
-            self._svc = None
+        self._svc = None
         p = self.proc
         self.proc = None
         if p:
@@ -2129,6 +2155,13 @@ def _vc_capture_session(sock, state):
         state["capclient"].start(monitors, fps, state["wanted"], state.get("input_port", 0))
     with capctx as sct:
         while (state["capturing"] and not state["stop"] and state["gen"] == my_gen):
+            if state.pop("report_mode", False):
+                # Tell the parent (-> viewer) the live capture mode so the Elevate control reflects it.
+                try:
+                    _vc_send_frame(sock, _VC_CTL, json.dumps(
+                        {"type": "capture-mode", "system": bool(state.get("system"))}).encode())
+                except Exception:
+                    pass
             now = time.time()
             for m in monitors:
                 mi = m["i"]
@@ -2362,16 +2395,44 @@ def run_cap_worker(port):
     — NO PIL/numpy/av — so as SYSTEM Defender has no av pyds to strip. Input injection (SendInput)
     runs on a reader thread. As SYSTEM both threads FOLLOW the input desktop (Default<->Winlogon) so
     capture + input reach the secure desktop."""
+    # Diag: log that we reached Python (vs a bootloader/launch crash) + our session id. A SYSTEM worker
+    # is CreateProcessAsUser'd into the console session; if this never appears the process never ran.
+    try:
+        _sess = wintypes.DWORD(0)
+        ctypes.windll.kernel32.ProcessIdToSessionId(os.getpid(), ctypes.byref(_sess))
+        _worker_log("[diag cap-worker START port=%s pid=%s session=%s]"
+                    % (port, os.getpid(), _sess.value))
+    except Exception:
+        pass
     try:
         _set_dpi_awareness()      # physical pixels, matching the encode child / parent
     except Exception:
         pass
-    _boost_background_process()   # ABOVE_NORMAL + no EcoQoS throttling, else capture lags in the tray
     try:
-        sock = socket.create_connection(("127.0.0.1", port), timeout=15)
-        sock.settimeout(None)
-        sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        _boost_background_process()   # ABOVE_NORMAL + no EcoQoS throttling, else capture lags in the tray
     except Exception:
+        pass
+    # Connect to the encode child's loopback listener. Retry (the listener may be a beat late and a
+    # SYSTEM worker races the encode child's accept), and LOG a persistent failure instead of returning
+    # silently — a swallowed connect error here is what made an elevation hang look like "nothing happened".
+    sock = None
+    _last_err = None
+    for _i in range(40):
+        try:
+            sock = socket.create_connection(("127.0.0.1", port), timeout=2)
+            sock.settimeout(None)
+            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+            break
+        except Exception as e:
+            _last_err = e
+            sock = None
+            time.sleep(0.5)
+    if sock is None:
+        try:
+            _worker_log("[diag cap-worker CONNECT FAILED port=%s pid=%s err=%r]"
+                        % (port, os.getpid(), _last_err))
+        except Exception:
+            pass
         return
 
     state = {"stop": False, "capturing": False, "monitors": [], "fps": 20, "wanted": set(),
@@ -2619,7 +2680,7 @@ def run_video_child(port, raw=False, system=False):
     state = {"stop": False, "capturing": False, "cfg": None,
              "wanted": set(), "kf": set(), "gen": 0, "bitrates": {},
              "raw": False, "capclient": None, "input_port": 0, "system": system,
-             "elev_inflight": False}
+             "elev_inflight": False, "report_mode": False}
 
     # Topology (b): spawn the cap-worker that GDI-grabs and ships RAW frames. If it fails to come
     # up, fall back to in-process mss capture so a viewer session still works (just not on the
@@ -2638,34 +2699,37 @@ def run_video_child(port, raw=False, system=False):
         except Exception:
             pass
 
-    def _elevate_swap():
-        """On-demand elevation (runs off the ctl thread so control stays responsive while the SYSTEM
-        worker comes up): spawn a SYSTEM cap-worker, and only when it is up retire the USER one and
-        bump the generation so the running session re-enters bound to it (re-arming input on the SAME
-        port). A cancelled UAC / failed spawn leaves the USER worker capturing — the viewer can retry."""
-        if state.get("elev_inflight") or state.get("system") or not state.get("raw"):
+    def _swap_capture(target_system):
+        """On-demand elevation TOGGLE (runs off the ctl thread so control stays responsive). Swap the
+        live cap-worker to/from SYSTEM: elevate (target_system True) raises ONE UAC via the install
+        helper and reaches the secure desktop; de-elevate (False) spawns a plain USER worker (no UAC).
+        Spawn the new worker FIRST and only retire the old one if it comes up (a cancelled UAC leaves
+        the current worker), then bump the generation so the running session re-enters bound to the new
+        client (re-arming input on the SAME port). Reports the resulting mode to the parent either way."""
+        if state.get("elev_inflight") or bool(state.get("system")) == bool(target_system) or not state.get("raw"):
             return
         state["elev_inflight"] = True
         try:
-            newcc = RawCaptureClient(system=True)
+            newcc = RawCaptureClient(system=target_system)
             if newcc.spawn():
                 old = state.get("capclient")
                 state["capclient"] = newcc
-                state["system"] = True
+                state["system"] = bool(target_system)
                 state["kf"] = {m["i"] for m in (state.get("cfg") or {}).get("monitors") or []}
-                state["gen"] += 1          # end the current session; it re-enters with the SYSTEM client
+                state["gen"] += 1          # end the current session; it re-enters with the new client
                 if old:
                     try:
                         old.shutdown()
                     except Exception:
                         pass
-                _click_log("[diag elevate-capture OK -> SYSTEM worker (no restart)]")
+                _click_log("[diag capture swap -> system=%s OK (no restart)]" % bool(target_system))
             else:
-                _click_log("[diag elevate-capture: SYSTEM spawn failed (UAC cancelled?)]")
+                _click_log("[diag capture swap -> system=%s FAILED (UAC cancelled?)]" % bool(target_system))
         except Exception as e:
-            _click_log("[diag elevate-capture raised %r]" % (e,))
+            _click_log("[diag capture swap raised %r]" % (e,))
         finally:
             state["elev_inflight"] = False
+            state["report_mode"] = True    # tell the viewer the resulting (or unchanged) mode either way
 
     def ctl_reader():
         while not state["stop"]:
@@ -2687,6 +2751,7 @@ def run_video_child(port, raw=False, system=False):
                 state["input_port"] = int(msg.get("input_port") or 0)
                 state["gen"] += 1
                 state["capturing"] = True
+                state["report_mode"] = True   # a (re)connecting viewer learns the current elevation mode
             elif typ == "stop-capture":
                 state["capturing"] = False               # back to idle; process stays alive
                 if state["capclient"]:
@@ -2705,7 +2770,11 @@ def run_video_child(port, raw=False, system=False):
             elif typ == "elevate-capture":
                 # Viewer-requested elevation (authorized locally): swap USER->SYSTEM cap-worker live.
                 if state.get("raw") and state.get("capclient"):
-                    threading.Thread(target=_elevate_swap, daemon=True).start()
+                    threading.Thread(target=lambda: _swap_capture(True), daemon=True).start()
+            elif typ == "deelevate-capture":
+                # Viewer dropped elevation: swap SYSTEM->USER cap-worker live (no UAC).
+                if state.get("raw") and state.get("capclient"):
+                    threading.Thread(target=lambda: _swap_capture(False), daemon=True).start()
             elif typ == "stop":
                 state["stop"] = True
                 break
@@ -3985,6 +4054,14 @@ class NetClient:
             # authorization dialog on the GUI thread is the real gate (the viewer can only ASK).
             if self.streaming and not _is_elevated():
                 self.app.post(self.app.on_elevation_requested)
+        elif mtype == "request-deelevation":
+            # The viewer asks us to DROP elevated capture (back to the USER worker). This reduces access,
+            # so it needs no local dialog and no UAC — apply it directly. Only for a streaming session.
+            if self.streaming and self.vchild:
+                try:
+                    self.vchild.deelevate_capture()
+                except Exception:
+                    pass
         elif mtype == "clip":
             # The viewer's clipboard changed; mirror it onto this machine's clipboard.
             # Only for an approved, streaming session (same gate as injected input).
@@ -6649,13 +6726,28 @@ def _spawn_helper_in_console_session(desktop):
     si.lpDesktop = desktop
     pi = _PROCESS_INFORMATION()
     buf = ctypes.create_unicode_buffer(cmdline)
-    # lpEnvironment=None: the worker inherits the service's environment (needs SystemRoot/PATH/etc.).
-    # NOTE: do NOT pass a hand-built Unicode env block here — create_unicode_buffer() truncates at the
-    # first embedded NUL, so the worker would get a one-variable env and misbehave (its input socket
-    # aborted -> secure-desktop clicks died). The worker reusing this service's onefile _MEI only leaks
-    # an invisible session-0 dir in C:\WINDOWS\TEMP, which is an acceptable trade for a stable worker.
-    ok = adv.CreateProcessAsUserW(dup, None, buf, None, None, False, 0x08000000,
-                                  None, None, ctypes.byref(si), ctypes.byref(pi))  # CREATE_NO_WINDOW
+    # Give the worker the service's env (it needs SystemRoot/PATH/TEMP/etc.) MINUS the onefile _MEI
+    # vars PLUS PYINSTALLER_RESET_ENVIRONMENT=1, so it extracts + owns its OWN _MEI. It must NOT reuse
+    # the service's _MEI: the service exits right after this and its bootloader DELETES that _MEI mid-
+    # load, so the worker crashed importing numpy ("[WinError 3] ...\\numpy\\_core"). Build the block
+    # RAW (UTF-16-LE, embedded NULs preserved) — create_unicode_buffer() truncates at the first NUL,
+    # which once gave the worker a one-variable env and aborted its input socket. On any build error,
+    # fall back to the inherited env (lpEnvironment=None) so the spawn still happens.
+    env_flags = 0x08000000                      # CREATE_NO_WINDOW
+    env_ptr = None
+    env_blk = None                              # keep a reference alive across the CreateProcessAsUser call
+    try:
+        _items = sorted(_child_env().items(), key=lambda kv: kv[0].upper())   # CreateProcess wants it sorted
+        _raw = ("".join("%s=%s\0" % (k, v) for k, v in _items) + "\0").encode("utf-16-le")
+        env_blk = (ctypes.c_char * len(_raw)).from_buffer_copy(_raw)
+        env_ptr = ctypes.cast(env_blk, ctypes.c_void_p)
+        env_flags |= 0x00000400                 # CREATE_UNICODE_ENVIRONMENT (the block is wide)
+    except Exception as e:
+        _secure_log("worker env block build failed %r; using inherited env" % (e,))
+        env_ptr = None
+        env_flags = 0x08000000
+    ok = adv.CreateProcessAsUserW(dup, None, buf, None, None, False, env_flags,
+                                  env_ptr, None, ctypes.byref(si), ctypes.byref(pi))
     _secure_log("CreateProcessAsUser ok=%s err=%s child_pid=%s"
                 % (ok, ctypes.GetLastError(), pi.dwProcessId))
     return bool(ok)

@@ -29,7 +29,8 @@ const fsDisconnectBtn = $("fsDisconnectBtn");
 const fsHint = $("fsHint");
 const sendFileBtn = $("sendFileBtn");
 const fsSendFileBtn = $("fsSendFileBtn");
-const elevateBtn = $("elevateBtn"); // ask the agent for on-demand elevated privileges
+const elevateBtn = $("elevateBtn"); // on-demand elevation toggle (elevate <-> de-elevate)
+let agentElevated = false; // agent's live capture mode (true = SYSTEM / secure-desktop), per its reports
 const fileInput = $("fileInput");
 const keysWrap = $("keysWrap"); // special-keys toolbar button + popover menu
 const keysBtn = $("keysBtn");
@@ -1147,6 +1148,12 @@ async function onMessage(ev) {
       fileCaps = !!msg.file;
       updateTransferUI();
       break;
+    case "capture-mode":
+      // The agent reported its live capture mode (elevated = SYSTEM / secure desktop). Reflect it on
+      // the Elevate toggle so its appearance and action (elevate vs de-elevate) match reality.
+      agentElevated = !!msg.elevated;
+      updateElevateBtn();
+      break;
     case "clip":
       // The host clipboard changed; mirror it into ours (best-effort).
       if (typeof msg.text === "string") applyRemoteClipboard(msg.text);
@@ -1712,7 +1719,11 @@ function startSession(mons) {
   fsBtn.hidden = false;
   disconnectBtn.hidden = false;
   if (keysWrap) keysWrap.hidden = false;
-  if (elevateBtn) elevateBtn.hidden = false; // offer on-demand elevation while in a session
+  if (elevateBtn) {
+    elevateBtn.hidden = false; // offer the on-demand elevation toggle while in a session
+    agentElevated = false;     // assume not elevated until the agent reports its mode (it does on start)
+    updateElevateBtn();
+  }
   placeStatusInBar(); // connected: status returns to the top-left bar
 
   buildMonitorPicker();
@@ -1782,7 +1793,7 @@ function endSession(keepStatus) {
   joinEl.hidden = false;
   fsBtn.hidden = true;
   disconnectBtn.hidden = true;
-  if (elevateBtn) elevateBtn.hidden = true;
+  if (elevateBtn) { elevateBtn.hidden = true; agentElevated = false; updateElevateBtn(); }
   if (keysWrap) { keysWrap.hidden = true; if (keysMenu) keysMenu.hidden = true; }
   placeStatusInJoin(); // back on the join screen: status below the center card
   viewControls.hidden = true;
@@ -2280,13 +2291,26 @@ if (sendFileBtn) sendFileBtn.addEventListener("click", onSendFileClick);
 if (fsSendFileBtn) fsSendFileBtn.addEventListener("click", onSendFileClick);
 if (fileInput) fileInput.addEventListener("change", onFileInputChange);
 
+// Reflect the agent's live capture mode on the toggle: filled "on" + de-elevate label/title when
+// elevated, outline + elevate label/title when not. Also clears the post-click disabled state.
+function updateElevateBtn() {
+  if (!elevateBtn) return;
+  elevateBtn.classList.toggle("on", agentElevated);
+  elevateBtn.setAttribute("aria-pressed", agentElevated ? "true" : "false");
+  const lbl = elevateBtn.querySelector(".btn-label");
+  if (lbl) lbl.textContent = t(agentElevated ? "connect.btn.deelevate" : "connect.btn.elevate");
+  elevateBtn.title = t(agentElevated ? "connect.btn.deelevate.title" : "connect.btn.elevate.title");
+  elevateBtn.disabled = false;
+}
+
 function onElevateClick() {
-  // Ask the agent to gain elevated privileges. The REMOTE user must approve a dialog there and
-  // accept a UAC prompt, so this only sends the request; disable briefly to avoid spamming.
+  // Toggle elevation. Elevating: the REMOTE user must approve a local dialog + a UAC prompt there, so
+  // this only REQUESTS it. De-elevating: dropped immediately (no UAC). Either way the agent replies with
+  // a capture-mode message that sets the real state; disable meanwhile, with a safety-net re-enable.
   if (!inSession) return;
-  send({ type: "request-elevation" });
+  send({ type: agentElevated ? "request-deelevation" : "request-elevation" });
   elevateBtn.disabled = true;
-  setTimeout(() => { if (elevateBtn) elevateBtn.disabled = false; }, 5000);
+  setTimeout(() => { if (elevateBtn) elevateBtn.disabled = false; }, 10000);
 }
 if (elevateBtn) elevateBtn.addEventListener("click", onElevateClick);
 
