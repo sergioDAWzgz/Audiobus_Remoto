@@ -1139,8 +1139,11 @@ async function onMessage(ev) {
       break;
     case "blockrects":
       // Where the agent's own windows are (per monitor, local pixels): clicks there
-      // are ignored by the agent, so show a "blocked" cursor over them.
+      // are ignored by the agent, so show a "blocked" cursor over them. inputBlocked =
+      // an elevated app has the foreground and the session isn't elevated -> forbidden cursor everywhere.
       blockRects = Array.isArray(msg.rects) ? msg.rects : [];
+      inputBlocked = !!msg.inputBlocked;
+      applyGlobalCursor();
       break;
     case "caps":
       // The agent advertised its optional capabilities (clipboard / file transfer).
@@ -1149,10 +1152,9 @@ async function onMessage(ev) {
       updateTransferUI();
       break;
     case "capture-mode":
-      // The agent reported its live capture mode (elevated = SYSTEM / secure desktop). Reflect it on
-      // the Elevate toggle so its appearance and action (elevate vs de-elevate) match reality.
-      agentElevated = !!msg.elevated;
-      updateElevateBtn();
+      // The agent reported its live capture mode (elevated = SYSTEM / secure desktop). Settle the
+      // Elevate toggle on the truth — confirming or correcting the optimistic flip from the click.
+      settleElevateBtn(msg.elevated);
       break;
     case "clip":
       // The host clipboard changed; mirror it into ours (best-effort).
@@ -1193,6 +1195,16 @@ function updateTransferUI() {
 
 // Agent-window regions where input is blocked (per monitor), for the cursor hint.
 let blockRects = [];
+// True while the remote has an ELEVATED app in the foreground and the session is NOT elevated: the
+// agent can't inject there (UIPI), so show a forbidden cursor over the whole screen until it clears.
+let inputBlocked = false;
+function applyGlobalCursor() {
+  try {
+    for (const s of screens.values()) {
+      if (s && s.el) s.el.style.cursor = inputBlocked ? "not-allowed" : "";
+    }
+  } catch (e) {}
+}
 function inBlockRect(m, x, y) {
   for (const r of blockRects) {
     if (r.m === m && x >= r.x && x < r.x + r.w && y >= r.y && y < r.y + r.h) {
@@ -1700,6 +1712,7 @@ function startSession(mons) {
   pendingPin = null;
   inSession = true;
   blockRects = []; // fresh session: clear any stale agent-window regions
+  inputBlocked = false; applyGlobalCursor();
   clipLast = null; // fresh session: no clipboard reconciled yet (caps arrives right after)
   clipLastImg = null;
   clipImgRx = null;
@@ -1721,8 +1734,7 @@ function startSession(mons) {
   if (keysWrap) keysWrap.hidden = false;
   if (elevateBtn) {
     elevateBtn.hidden = false; // offer the on-demand elevation toggle while in a session
-    agentElevated = false;     // assume not elevated until the agent reports its mode (it does on start)
-    updateElevateBtn();
+    settleElevateBtn(false);   // assume not elevated until the agent reports its mode (it does on start)
   }
   placeStatusInBar(); // connected: status returns to the top-left bar
 
@@ -1767,6 +1779,7 @@ function endSession(keepStatus) {
     reaskTimer = null;
   }
   blockRects = [];
+  inputBlocked = false; applyGlobalCursor();
   if (dismissModal) dismissModal(); // force-close a confirmation modal if one is open
   closePeer();
   if (fsActive) exitFsBar();
@@ -1793,7 +1806,7 @@ function endSession(keepStatus) {
   joinEl.hidden = false;
   fsBtn.hidden = true;
   disconnectBtn.hidden = true;
-  if (elevateBtn) { elevateBtn.hidden = true; agentElevated = false; updateElevateBtn(); }
+  if (elevateBtn) { elevateBtn.hidden = true; settleElevateBtn(false); }
   if (keysWrap) { keysWrap.hidden = true; if (keysMenu) keysMenu.hidden = true; }
   placeStatusInJoin(); // back on the join screen: status below the center card
   viewControls.hidden = true;
@@ -2102,9 +2115,9 @@ function attachInput(el, mon) {
       return;
     }
     const p = mediaXY(el, mon, e);
-    // Over the agent's own window the agent ignores clicks, so hint with a
-    // "not-allowed" cursor (updated every move; "" reverts to the CSS arrow cursor).
-    el.style.cursor = inBlockRect(mon.i, p.x, p.y) ? "not-allowed" : "";
+    // Over the agent's own window the agent ignores clicks — or, when inputBlocked, an elevated app
+    // has blocked ALL injected input — so hint with a "not-allowed" cursor (updated every move).
+    el.style.cursor = (inputBlocked || inBlockRect(mon.i, p.x, p.y)) ? "not-allowed" : "";
     const now = performance.now();
     if (now - lastMove < 15) return; // ~66 moves/sec max (snappier remote cursor)
     lastMove = now;
@@ -2291,8 +2304,8 @@ if (sendFileBtn) sendFileBtn.addEventListener("click", onSendFileClick);
 if (fsSendFileBtn) fsSendFileBtn.addEventListener("click", onSendFileClick);
 if (fileInput) fileInput.addEventListener("change", onFileInputChange);
 
-// Reflect the agent's live capture mode on the toggle: filled "on" + de-elevate label/title when
-// elevated, outline + elevate label/title when not. Also clears the post-click disabled state.
+// Paint the toggle for the CURRENT agentElevated value only (appearance, no pending/disabled state):
+// filled "on" + de-elevate label/title when elevated, outline + elevate label/title when not.
 function updateElevateBtn() {
   if (!elevateBtn) return;
   elevateBtn.classList.toggle("on", agentElevated);
@@ -2300,17 +2313,30 @@ function updateElevateBtn() {
   const lbl = elevateBtn.querySelector(".btn-label");
   if (lbl) lbl.textContent = t(agentElevated ? "connect.btn.deelevate" : "connect.btn.elevate");
   elevateBtn.title = t(agentElevated ? "connect.btn.deelevate.title" : "connect.btn.elevate.title");
-  elevateBtn.disabled = false;
+}
+
+// The agent confirmed its real capture mode (also sent after a FAILED swap, e.g. a cancelled UAC): settle
+// the button on the truth and clear the in-progress hint. Corrects an optimistic flip that didn't happen.
+function settleElevateBtn(elevated) {
+  agentElevated = !!elevated;
+  updateElevateBtn();
+  if (elevateBtn) { elevateBtn.classList.remove("pending"); elevateBtn.disabled = false; }
 }
 
 function onElevateClick() {
-  // Toggle elevation. Elevating: the REMOTE user must approve a local dialog + a UAC prompt there, so
-  // this only REQUESTS it. De-elevating: dropped immediately (no UAC). Either way the agent replies with
-  // a capture-mode message that sets the real state; disable meanwhile, with a safety-net re-enable.
+  // Toggle elevation. Elevating: the REMOTE user must approve a local dialog + UAC there. De-elevating:
+  // dropped immediately (no UAC). Flip the button OPTIMISTICALLY so it responds instantly, with a pending
+  // pulse; the agent's capture-mode reply then confirms it (or corrects it back if the swap didn't take).
   if (!inSession) return;
-  send({ type: agentElevated ? "request-deelevation" : "request-elevation" });
+  const target = !agentElevated;
+  send({ type: target ? "request-elevation" : "request-deelevation" });
+  agentElevated = target;
+  updateElevateBtn();
+  elevateBtn.classList.add("pending");
   elevateBtn.disabled = true;
-  setTimeout(() => { if (elevateBtn) elevateBtn.disabled = false; }, 10000);
+  setTimeout(() => {
+    if (elevateBtn) { elevateBtn.disabled = false; elevateBtn.classList.remove("pending"); }
+  }, 15000); // safety net only; the capture-mode reply normally clears this far sooner
 }
 if (elevateBtn) elevateBtn.addEventListener("click", onElevateClick);
 

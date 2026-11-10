@@ -703,7 +703,7 @@ _GUI_DPI_LOGGED = False   # one-time GUI-thread DPI-awareness + raw-rect diagnos
 _SHOT_SAVED = False       # one-time: save an mss screenshot on the first blocked click
 
 
-_AGENT_BUILD = "2026-11-10-elev8"  # elevation is a toggle: viewer can elevate AND de-elevate; agent reports capture mode
+_AGENT_BUILD = "2026-11-11-elev12"  # gated unstick (no spurious right-click) + exit cleanup; viewer forbidden-cursor when input UIPI-blocked
 
 
 def _save_debug_shot(x, y):
@@ -1443,9 +1443,16 @@ class VideoChild:
 
     def _on_capture_mode(self, system):
         """Loop thread: the encode child reported its live capture mode (SYSTEM = elevated / secure
-        desktop). Relay it to the viewer so its Elevate control shows the real state and toggles."""
+        desktop). Relay it to the viewer so its Elevate control shows the real state and toggles, and
+        notify the LOCAL agent UI so the remote user sees the privilege change (esp. when it DROPS)."""
+        # When elevated (SYSTEM worker) input reaches elevated windows, so don't flag input as blocked.
+        self.client._capture_elevated = bool(system)
         try:
             asyncio.ensure_future(self.client._send_json({"type": "capture-mode", "elevated": bool(system)}))
+        except Exception:
+            pass
+        try:
+            self.client.app.post(lambda s=bool(system): self.client.app.on_capture_mode(s))
         except Exception:
             pass
 
@@ -2436,7 +2443,7 @@ def run_cap_worker(port):
         return
 
     state = {"stop": False, "capturing": False, "monitors": [], "fps": 20, "wanted": set(),
-             "input_sock": None, "follow": False}
+             "input_sock": None, "follow": False, "pressed": set()}
     send_lock = threading.Lock()
     who = "?"
     try:
@@ -2468,11 +2475,32 @@ def run_cap_worker(port):
         except Exception as e:
             _worker_log("[diag cap-worker WinSta0 attach failed %r]" % (e,))
 
+    # (viewer button index, pynput button, GetAsyncKeyState VK) — index matches BUTTONS/the web.
+    _UNSTICK_BTNS = ((0, Button.left, 0x01), (2, Button.right, 0x02), (1, Button.middle, 0x04))
+
+    def _btn_down(vk):
+        try:
+            return bool(ctypes.windll.user32.GetAsyncKeyState(vk) & 0x8000)
+        except Exception:
+            return False
+
+    def _release_stuck():
+        """Release any mouse button the OS reports DOWN that the viewer is NOT holding — i.e. one whose
+        injected release was UIPI-blocked and left stuck (clicks then act as drags / left reads as right).
+        Gating on GetAsyncKeyState means we never inject a LONE button-up (a spurious right-up can fire a
+        context menu); skipping buttons the viewer holds (`idx in pressed`) means we never cut a real drag."""
+        for idx, btn, vk in _UNSTICK_BTNS:
+            try:
+                if idx not in state["pressed"] and _btn_down(vk):
+                    mouse.release(btn)
+            except Exception:
+                pass
+
     def _input_reader(isock):
         """Inject viewer input the main agent forwarded (already filtered) on THIS process's
         current input desktop, via the same apply_event path. Own wheel-accum + pressed set so a
         dropped link releases nothing-stuck. Reaches the secure desktop once this runs as SYSTEM."""
-        pressed = set()
+        pressed = state["pressed"]       # shared with the unstick loop (frees a UIPI-stuck button)
         wheel = {"x": 0.0, "y": 0.0}
         fail_logged = set()           # event types whose inject failure was already logged
         inp_desktop = {"name": None, "tag": "input"}   # this (input) thread's current input desktop
@@ -2508,6 +2536,8 @@ def run_cap_worker(port):
                     mouse.release(BUTTONS.get(b, Button.left))
                 except Exception:
                     pass
+            pressed.clear()
+            _release_stuck()   # the link ended: free any button left stuck DOWN so it can't persist after close
             try:
                 isock.close()
             except Exception:
@@ -2556,6 +2586,22 @@ def run_cap_worker(port):
                 state["stop"] = True
                 break
     threading.Thread(target=ctl_reader, daemon=True).start()
+
+    def _unstick_loop():
+        """Periodically free a mouse button left stuck DOWN by UIPI (a press injected just before an
+        elevated window grabbed the foreground, whose release was then blocked -> clicks dead / left
+        reads as right). `_release_stuck` only acts on a button the OS reports down that the viewer
+        isn't holding, so it never injects a spurious up and never cuts a real drag."""
+        unstick_desk = {"name": None, "tag": "unstick"}   # persist so SetThreadDesktop runs only on a change
+        while not state["stop"]:
+            time.sleep(0.5)
+            try:
+                if state.get("follow"):
+                    _follow_input_desktop(unstick_desk, _DESKTOP_ALL)
+                _release_stuck()
+            except Exception:
+                pass
+    threading.Thread(target=_unstick_loop, daemon=True).start()
 
     IDLE_INTERVAL = 0.5          # unwanted monitors: ~2 fps (matches the encode session)
     MAX_SKIP_STATIC = 1.0       # force one frame through at least this often (static screen)
@@ -2921,6 +2967,32 @@ def _compute_window_rects(our_pid):
     return tuple(rects), foreground
 
 
+def _foreground_elevated():
+    """True if the FOREGROUND window belongs to a higher-integrity (elevated) process than us, so our
+    non-elevated SendInput is UIPI-blocked there (and everywhere) — used to hint the viewer with a
+    forbidden cursor. Heuristic: OpenProcess(QUERY_INFORMATION|VM_READ) is denied for a higher-integrity
+    process, so a failure means elevated. Best-effort; any error or our own/nil window -> False."""
+    try:
+        u = ctypes.windll.user32
+        k = ctypes.windll.kernel32
+        u.GetForegroundWindow.restype = ctypes.c_void_p
+        hwnd = u.GetForegroundWindow()
+        if not hwnd:
+            return False
+        pid = wintypes.DWORD()
+        u.GetWindowThreadProcessId(ctypes.c_void_p(hwnd), ctypes.byref(pid))
+        if not pid.value or pid.value == os.getpid():
+            return False
+        k.OpenProcess.restype = ctypes.c_void_p
+        h = k.OpenProcess(0x0410, False, pid.value)   # PROCESS_QUERY_INFORMATION | PROCESS_VM_READ
+        if h:
+            k.CloseHandle(ctypes.c_void_p(h))
+            return False                               # readable -> same/lower integrity -> not blocked
+        return True                                    # access denied -> elevated foreground -> blocked
+    except Exception:
+        return False
+
+
 def _compute_blockrects(client):
     """The agent's own windows, each expressed per-monitor in that monitor's local
     pixel space (the same space the viewer's canvas uses), so the viewer can show a
@@ -2939,12 +3011,14 @@ def _compute_blockrects(client):
 
 
 async def _maybe_send_blockrects(ws, client):
-    """Send the agent's window rects to the viewer, but only when they change."""
+    """Send the agent's window rects to the viewer, plus whether input is currently UIPI-blocked by an
+    elevated foreground window (so the viewer shows a forbidden cursor) — but only when either changes."""
     rects = _compute_blockrects(client)
-    key = json.dumps(rects, sort_keys=True)
+    blocked = (not getattr(client, "_capture_elevated", False)) and _foreground_elevated()
+    key = json.dumps([rects, blocked], sort_keys=True)
     if key != client._last_blockrects:
         client._last_blockrects = key
-        await ws.send(json.dumps({"type": "blockrects", "rects": rects}))
+        await ws.send(json.dumps({"type": "blockrects", "rects": rects, "inputBlocked": blocked}))
 
 
 async def blockrects_loop(ws, client):
@@ -3276,6 +3350,7 @@ class NetClient:
                 continue
             with self._input_lock:
                 old, self._input_wsock = self._input_wsock, conn
+                self._fwd_fail_diag = False      # a fresh worker (e.g. after an elevation swap): log its next drop
             if old:
                 try:
                     old.close()
@@ -3295,7 +3370,13 @@ class NetClient:
             if not getattr(self, "_fwd_fail_diag", False):
                 self._fwd_fail_diag = True
                 _click_log("[cap-worker input link dropped: %r]" % (e,))
-            self._input_wsock = None
+            # Only drop the link if it's STILL the socket we failed on. During an elevation swap the
+            # accept loop may have already installed the NEW worker's socket; nulling it here would
+            # clobber it -> stuck on local injection -> clicks die on elevate and never recover on
+            # de-elevate. Compare-and-clear under the same lock the accept loop uses.
+            with self._input_lock:
+                if self._input_wsock is s:
+                    self._input_wsock = None
 
     def request_stop(self):
         if self.loop and self.stop_event and not self.loop.is_closed():
@@ -4996,8 +5077,10 @@ class ActionDialog(tk.Toplevel):
 
     def __init__(self, parent, message, pos_text, pos_bg, pos_fg,
                  neg_text, neg_bg, neg_fg, on_pos=None, on_neg=None,
-                 title_text=None):
+                 title_text=None, single=False, auto_ms=None):
         super().__init__(parent)
+        self._single = bool(single)      # notice mode: one button, X/Escape dismiss (no negative action)
+        self._auto_after = None
         # Hidden until positioned: setting a position-only geometry before the window is
         # mapped doesn't stick (it maps at 0,0), so build + size it hidden, then center it
         # over the parent with a full geometry and only then show it (also avoids a flash).
@@ -5039,20 +5122,27 @@ class ActionDialog(tk.Toplevel):
         row = tk.Frame(wrap, bg=CARD)
         row.pack()
         bfont = tkfont.Font(family="Segoe UI Semibold", size=12)
-        self.neg_btn = RoundedButton(row, neg_text, neg_bg, neg_fg, font=bfont,
-                                     parent_bg=CARD, command=self._choose_neg,
-                                     border=BORDER)
         self.pos_btn = RoundedButton(row, pos_text, pos_bg, pos_fg, font=bfont,
                                      parent_bg=CARD, command=self._choose_pos,
                                      border=BORDER)
-        w = max(self.neg_btn.req_width, self.pos_btn.req_width, 104)
-        self.neg_btn.set_width(w)
-        self.pos_btn.set_width(w)
-        self.neg_btn.pack(side="left", padx=8)   # negative on the left
-        self.pos_btn.pack(side="left", padx=8)   # positive on the right
-
-        self.protocol("WM_DELETE_WINDOW", self._choose_neg)
-        self.bind("<Escape>", lambda e: self._choose_neg())
+        if self._single:
+            # Notice mode: a single acknowledging button, X/Escape just dismiss it.
+            self.neg_btn = None
+            self.pos_btn.set_width(max(self.pos_btn.req_width, 104))
+            self.pos_btn.pack()
+            self.protocol("WM_DELETE_WINDOW", self._choose_pos)
+            self.bind("<Escape>", lambda e: self._choose_pos())
+        else:
+            self.neg_btn = RoundedButton(row, neg_text, neg_bg, neg_fg, font=bfont,
+                                         parent_bg=CARD, command=self._choose_neg,
+                                         border=BORDER)
+            w = max(self.neg_btn.req_width, self.pos_btn.req_width, 104)
+            self.neg_btn.set_width(w)
+            self.pos_btn.set_width(w)
+            self.neg_btn.pack(side="left", padx=8)   # negative on the left
+            self.pos_btn.pack(side="left", padx=8)   # positive on the right
+            self.protocol("WM_DELETE_WINDOW", self._choose_neg)
+            self.bind("<Escape>", lambda e: self._choose_neg())
         self.update_idletasks()
         self._center(parent)
         self.deiconify()  # now mapped at the centered geometry
@@ -5065,6 +5155,11 @@ class ActionDialog(tk.Toplevel):
             self.bell()
         except Exception:
             pass
+        if auto_ms:
+            try:
+                self._auto_after = self.after(int(auto_ms), self._choose_pos)  # notice auto-dismisses
+            except Exception:
+                pass
 
     def _safe_attr(self, name, val):
         try:
@@ -5106,6 +5201,12 @@ class ActionDialog(tk.Toplevel):
             except Exception:
                 pass
             self._topmost_after = None
+        if self._auto_after is not None:
+            try:
+                self.after_cancel(self._auto_after)
+            except Exception:
+                pass
+            self._auto_after = None
 
     def _choose_pos(self):
         self._finish(self._on_pos)
@@ -5759,6 +5860,37 @@ class App:
             return
         self.set_status(tr("agent.status.connected"), GOOD)
         self.banner.set_text(tr("agent.banner.controlling"))
+
+    def on_capture_mode(self, system):
+        """GUI thread: the live capture mode changed (viewer elevated/de-elevated). Show the remote
+        user the privilege change — a GOOD banner while elevated (secure-desktop access granted), and a
+        prominent WARN banner flash when it is DROPPED back to normal capture."""
+        try:
+            _click_log("[diag app on_capture_mode system=%s connected=%s]" % (bool(system), self._connected))
+        except Exception:
+            pass
+        if not self._connected:
+            return
+        self._capture_elevated = bool(system)
+        if system:
+            self.set_status(tr("agent.status.elevated"), GOOD)
+            self.banner.set_text(tr("agent.banner.elevated"))
+        else:
+            # De-elevated: revert the banner to normal, and show a centered, top-most NOTICE window (like
+            # the Accept/Decline prompt) so the remote user clearly sees the privilege was dropped. It is a
+            # single-OK notice that also auto-dismisses after a few seconds.
+            self.set_status(tr("agent.status.deelevated"), WARN)
+            self.banner.set_text(tr("agent.banner.controlling"))
+            try:
+                ActionDialog(
+                    self.root, tr("agent.deelevate.body"),
+                    tr("ui.ok"), NEUTRAL_BG, NEUTRAL_FG,
+                    "", "", "",
+                    on_pos=None, title_text=tr("agent.deelevate.title"),
+                    single=True, auto_ms=6000,
+                )
+            except Exception:
+                pass
 
     def on_elevation_requested(self):
         """GUI thread: the viewer asked for elevated access. Ask the LOCAL user to authorize; on
