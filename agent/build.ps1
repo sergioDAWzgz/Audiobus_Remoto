@@ -63,11 +63,12 @@ Invoke-OrThrow { & $py -m pip install -r requirements.txt pyinstaller }
 # static analysis misses: PyAV's bundled ffmpeg DLLs (av), and aiortc's media/ICE
 # stack (aioice, and pylibsrtp's libsrtp). cryptography/cffi/numpy are covered by
 # PyInstaller's built-in hooks.
+# NOTE: no --uac-admin. The agent launches NON-elevated (no UAC on open); it relaunches itself
+# elevated on demand when the viewer requests elevated access (see on-demand-elevation feature).
 Invoke-OrThrow { & $py -m PyInstaller `
     --onefile `
     --name audiobus-agent `
     --windowed `
-    --uac-admin `
     --add-binary "openh264.dll;." `
     --icon logo.ico `
     --version-file version_info.txt `

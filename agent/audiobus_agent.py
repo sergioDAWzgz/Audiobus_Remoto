@@ -703,7 +703,7 @@ _GUI_DPI_LOGGED = False   # one-time GUI-thread DPI-awareness + raw-rect diagnos
 _SHOT_SAVED = False       # one-time: save an mss screenshot on the first blocked click
 
 
-_AGENT_BUILD = "2026-11-09-securedesktop4"  # _MEI dialog fix via Popen env; revert broken SYSTEM-worker env block
+_AGENT_BUILD = "2026-11-09-elev4"  # T2: viewer request-elevation -> dialog -> runas UAC -> elevated takeover
 
 
 def _save_debug_shot(x, y):
@@ -2312,6 +2312,39 @@ def _follow_input_desktop(cur, access=_DESKTOP_READ):
     return name
 
 
+def _boost_background_process():
+    """Keep a background (tray, no foreground window) capture/encode process fast: raise to
+    ABOVE_NORMAL and opt OUT of Windows 11 power throttling (EcoQoS). A NORMAL-priority background
+    process gets parked on efficiency cores at reduced clock -> laggy video (input is unaffected, it
+    rides the main's HIGHEST net thread). The elevated SYSTEM cap-worker was exempt via service QoS;
+    the non-elevated user cap-worker is not, which is why non-elevated video lagged."""
+    if sys.platform != "win32":
+        return
+    try:
+        k = ctypes.windll.kernel32
+        k.GetCurrentProcess.restype = wintypes.HANDLE
+        k.GetCurrentProcess.argtypes = []
+        k.SetPriorityClass.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+        k.SetPriorityClass.restype = wintypes.BOOL
+        k.SetPriorityClass(k.GetCurrentProcess(), 0x00008000)  # ABOVE_NORMAL_PRIORITY_CLASS
+    except Exception:
+        pass
+    try:
+        class _PPTS(ctypes.Structure):
+            _fields_ = [("Version", wintypes.DWORD), ("ControlMask", wintypes.DWORD),
+                        ("StateMask", wintypes.DWORD)]
+        k = ctypes.windll.kernel32
+        k.SetProcessInformation.argtypes = [wintypes.HANDLE, ctypes.c_int,
+                                            ctypes.c_void_p, wintypes.DWORD]
+        k.SetProcessInformation.restype = wintypes.BOOL
+        # Version=1, ControlMask=PROCESS_POWER_THROTTLING_EXECUTION_SPEED (0x1), StateMask=0 -> OFF.
+        st = _PPTS(1, 0x1, 0x0)
+        k.SetProcessInformation(k.GetCurrentProcess(), 4,   # ProcessPowerThrottling
+                                ctypes.byref(st), ctypes.sizeof(st))
+    except Exception:
+        pass
+
+
 def run_cap_worker(port):
     """cap-worker entry point (topology b). Connects to the encode child on 127.0.0.1:<port>,
     receives a 'start' ctl (monitors geometry + fps + wanted), then GDI-grabs each monitor rect,
@@ -2323,6 +2356,7 @@ def run_cap_worker(port):
         _set_dpi_awareness()      # physical pixels, matching the encode child / parent
     except Exception:
         pass
+    _boost_background_process()   # ABOVE_NORMAL + no EcoQoS throttling, else capture lags in the tray
     try:
         sock = socket.create_connection(("127.0.0.1", port), timeout=15)
         sock.settimeout(None)
@@ -2545,6 +2579,7 @@ def run_video_child(port, raw=False, system=False):
             _k.SetPriorityClass(_k.GetCurrentProcess(), _ABOVE_NORMAL_PRIORITY_CLASS)
         except Exception:
             pass
+    _boost_background_process()   # also opt out of EcoQoS power throttling (non-elevated/tray)
     try:
         sock = socket.create_connection(("127.0.0.1", port), timeout=15)
         sock.settimeout(None)
@@ -3900,6 +3935,12 @@ class NetClient:
         elif mtype == "viewer-restored":
             # The viewer's link went quiet but it is pinging again: clear the warning.
             self.app.post(self.app.on_viewer_restored)
+        elif mtype == "request-elevation":
+            # The viewer asks us to gain elevated privileges (secure desktop / UAC / elevated input).
+            # Only for an approved, streaming session and when not already elevated; the LOCAL
+            # authorization dialog on the GUI thread is the real gate (the viewer can only ASK).
+            if self.streaming and not _is_elevated():
+                self.app.post(self.app.on_elevation_requested)
         elif mtype == "clip":
             # The viewer's clipboard changed; mirror it onto this machine's clipboard.
             # Only for an approved, streaming session (same gate as injected input).
@@ -5598,6 +5639,54 @@ class App:
         self.set_status(tr("agent.status.connected"), GOOD)
         self.banner.set_text(tr("agent.banner.controlling"))
 
+    def on_elevation_requested(self):
+        """GUI thread: the viewer asked for elevated access. Ask the LOCAL user to authorize; on
+        Allow, relaunch elevated (UAC). Guarded against duplicate prompts."""
+        if _is_elevated() or getattr(self, "_elev_pending", False):
+            return
+        self._elev_pending = True
+
+        def on_yes():
+            self._elev_pending = False
+            self._elevate_self()
+
+        def on_no():
+            self._elev_pending = False
+
+        ActionDialog(
+            self.root, tr("agent.elevate.prompt"),
+            tr("agent.elevate.allow"), GOOD, APPROVE_FG,
+            tr("ui.cancel"), NEUTRAL_BG, NEUTRAL_FG,
+            on_pos=on_yes, on_neg=on_no,
+            title_text=tr("agent.elevate.title"),
+        )
+
+    def _elevate_self(self):
+        """Relaunch elevated via ShellExecute "runas" (shows UAC). On success the elevated copy
+        silently replaces us (--elevated-takeover) and runs the SYSTEM / secure-desktop path, and the
+        viewer auto-reconnects (same stable code + resume token); we then quit so one agent remains.
+        On a dev (non-frozen) run or if the user cancels UAC, we stay non-elevated."""
+        if not getattr(sys, "frozen", False) or sys.platform != "win32":
+            self.set_status(tr("agent.status.elevationUnavailable"), WARN)
+            return
+        try:
+            shell32 = ctypes.windll.shell32
+            shell32.ShellExecuteW.restype = ctypes.c_void_p
+            shell32.ShellExecuteW.argtypes = [wintypes.HWND, wintypes.LPCWSTR, wintypes.LPCWSTR,
+                                              wintypes.LPCWSTR, wintypes.LPCWSTR, ctypes.c_int]
+            rc = shell32.ShellExecuteW(None, "runas", sys.executable,
+                                       "--elevated-takeover", None, 1)  # SW_SHOWNORMAL
+        except Exception:
+            rc = 0
+        if rc is not None and int(rc) > 32:
+            # Elevated copy launched; it will take over. Quit this (non-elevated) one shortly — the
+            # elevated copy also taskkills us if we linger, but a clean quit frees the relay sooner.
+            self.set_status(tr("agent.status.elevating"), MUTED)
+            self.root.after(300, self._quit)
+        else:
+            # <=32 = error (1223 = user cancelled the UAC prompt).
+            self.set_status(tr("agent.status.elevationCancelled"), WARN)
+
     def on_fatal(self, message):
         self.set_status(tr("agent.error.couldNotStart"), BAD)
         messagebox.showerror("Audiobus Remote", message)
@@ -6297,6 +6386,11 @@ def parse_args(argv):
     # SYSTEM) and --raw-system (that worker runs as SYSTEM via a LocalSystem service) stay for testing /
     # explicit selection.
     p.add_argument("--legacy-capture", dest="legacy_capture", action="store_true", help=argparse.SUPPRESS)
+    # On-demand elevation: the agent relaunches itself with this flag via ShellExecute "runas" (UAC)
+    # when the viewer requests elevated access and the local user allows. It then SILENTLY replaces the
+    # running non-elevated copy (the user already authorized) and runs the elevated path. Not for direct use.
+    p.add_argument("--elevated-takeover", dest="elevated_takeover", action="store_true",
+                   help=argparse.SUPPRESS)
     p.add_argument("--raw-capture", dest="raw_capture", action="store_true", help=argparse.SUPPRESS)
     p.add_argument("--raw-system", dest="raw_system", action="store_true", help=argparse.SUPPRESS)
     # Internal: the cap-worker entry point. GDI-grabs every monitor and ships RAW BGRX over loopback to
@@ -7087,6 +7181,33 @@ def _reap_stale_meipass():
         pass
 
 
+def _is_elevated():
+    """True if this process runs with an elevated (admin) token. Non-win32 -> True (no UAC model).
+    Used to pick the capture path: elevated -> SYSTEM cap-worker (secure desktop); not elevated ->
+    the user cap-worker split, until the viewer requests on-demand elevation (relaunches us elevated)."""
+    if sys.platform != "win32":
+        return True
+    try:
+        return bool(ctypes.windll.shell32.IsUserAnAdmin())
+    except Exception:
+        return False
+
+
+def _silent_replace_running_instance():
+    """Kill other agent copies WITHOUT a prompt — used by --elevated-takeover, where the user already
+    authorized the elevation via the agent's dialog. Only terminates when FROZEN, by exact PID, never
+    our own tree (mirrors _replace_running_instance's kill without its askyesno)."""
+    if not getattr(sys, "frozen", False):
+        return
+    try:
+        for pid in _other_agent_pids():
+            subprocess.run(["taskkill", "/F", "/T", "/PID", str(pid)],
+                           creationflags=0x08000000, timeout=10, capture_output=True)
+        time.sleep(0.8)   # let the old copy fully release its mutex / relay socket before we connect
+    except Exception:
+        pass
+
+
 def _acquire_single_instance():
     """Detect/claim single-instance ownership on this machine.
 
@@ -7170,8 +7291,15 @@ def main(argv=None):
         if getattr(args, "legacy_capture", False):
             args.raw_capture = False
             args.raw_system = False
-        elif not (getattr(args, "raw_capture", False) or getattr(args, "raw_system", False)):
-            args.raw_system = True        # default: SYSTEM secure-desktop worker
+        elif getattr(args, "raw_capture", False) or getattr(args, "raw_system", False):
+            pass                          # explicit flag: honor it
+        elif _is_elevated():
+            args.raw_system = True        # elevated: SYSTEM cap-worker (secure desktop + elevated input)
+        else:
+            args.raw_capture = True       # not elevated: USER cap-worker split (same smooth 3-process
+            #                               pipeline, normal desktop only). NOT mss — mss shares capture
+            #                               + encode on one GIL and is laggier. `--legacy-capture` forces
+            #                               mss if the split misbehaves on a machine.
     if getattr(args, "raw_system", False):
         args.raw_capture = True           # --raw-system implies the split pipeline
     if getattr(args, "selfcheck", None):
@@ -7222,8 +7350,13 @@ def main(argv=None):
     # rather than silently leaving the user on the old copy (e.g. after downloading an
     # update) — see _replace_running_instance.
     _instance_guard, _already_running = _acquire_single_instance()
-    if _already_running and not _replace_running_instance():
-        return
+    if _already_running:
+        if getattr(args, "elevated_takeover", False):
+            # We are the elevated relaunch the user just authorized: silently replace the running
+            # non-elevated copy (no "replace?" prompt), then take over as the elevated agent.
+            _silent_replace_running_instance()
+        elif not _replace_running_instance():
+            return
     # Put the agent process at ABOVE_NORMAL so its net thread (which runs at
     # THREAD_PRIORITY_HIGHEST — the input path) sits a notch ABOVE the video-encode child
     # (also ABOVE_NORMAL). Input stays strictly on top of video even when the remote is
@@ -7238,6 +7371,7 @@ def main(argv=None):
             _k.SetPriorityClass(_k.GetCurrentProcess(), 0x00008000)  # ABOVE_NORMAL
         except Exception:
             pass
+    _boost_background_process()   # also opt out of EcoQoS power throttling (non-elevated/tray)
     try:
         App(args).run()
     except Exception as e:

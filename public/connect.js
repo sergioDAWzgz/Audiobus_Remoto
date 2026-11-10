@@ -29,6 +29,7 @@ const fsDisconnectBtn = $("fsDisconnectBtn");
 const fsHint = $("fsHint");
 const sendFileBtn = $("sendFileBtn");
 const fsSendFileBtn = $("fsSendFileBtn");
+const elevateBtn = $("elevateBtn"); // ask the agent for on-demand elevated privileges
 const fileInput = $("fileInput");
 const keysWrap = $("keysWrap"); // special-keys toolbar button + popover menu
 const keysBtn = $("keysBtn");
@@ -1711,6 +1712,7 @@ function startSession(mons) {
   fsBtn.hidden = false;
   disconnectBtn.hidden = false;
   if (keysWrap) keysWrap.hidden = false;
+  if (elevateBtn) elevateBtn.hidden = false; // offer on-demand elevation while in a session
   placeStatusInBar(); // connected: status returns to the top-left bar
 
   buildMonitorPicker();
@@ -1780,6 +1782,7 @@ function endSession(keepStatus) {
   joinEl.hidden = false;
   fsBtn.hidden = true;
   disconnectBtn.hidden = true;
+  if (elevateBtn) elevateBtn.hidden = true;
   if (keysWrap) { keysWrap.hidden = true; if (keysMenu) keysMenu.hidden = true; }
   placeStatusInJoin(); // back on the join screen: status below the center card
   viewControls.hidden = true;
@@ -2276,6 +2279,16 @@ fsDisconnectBtn.addEventListener("click", requestDisconnect);
 if (sendFileBtn) sendFileBtn.addEventListener("click", onSendFileClick);
 if (fsSendFileBtn) fsSendFileBtn.addEventListener("click", onSendFileClick);
 if (fileInput) fileInput.addEventListener("change", onFileInputChange);
+
+function onElevateClick() {
+  // Ask the agent to gain elevated privileges. The REMOTE user must approve a dialog there and
+  // accept a UAC prompt, so this only sends the request; disable briefly to avoid spamming.
+  if (!inSession) return;
+  send({ type: "request-elevation" });
+  elevateBtn.disabled = true;
+  setTimeout(() => { if (elevateBtn) elevateBtn.disabled = false; }, 5000);
+}
+if (elevateBtn) elevateBtn.addEventListener("click", onElevateClick);
 
 // Special keys: send combinations the local browser/OS swallows (Win, Alt+Tab, Alt+F4,
 // Esc, PrtSc) by generating the key events directly, plus Ctrl+Alt+Del as a dedicated SAS

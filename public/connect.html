@@ -67,6 +67,10 @@
       <symbol id="ico-input" viewBox="0 0 16 16">
         <path d="M3.4 2.2 3.4 12.8 6.2 10 8.1 13.9 9.9 13 8 9.2 11.8 9.2Z" />
       </symbol>
+      <symbol id="ico-shield" viewBox="0 0 16 16">
+        <path d="M8 1.6 13 3.4v4.2c0 3.2-2.1 5.6-5 6.8-2.9-1.2-5-3.6-5-6.8V3.4Z" />
+        <path d="M5.8 8.1 7.3 9.6 10.4 6.3" />
+      </symbol>
     </svg>
     <header class="bar">
       <div class="bar-left">
@@ -109,6 +113,12 @@
         <button id="sendFileBtn" class="btn" hidden type="button" data-i18n-attr="title:connect.btn.sendFile">
           <svg class="btn-ico"><use href="#ico-upload" /></svg>
           <span class="btn-label" data-i18n="connect.btn.sendFile">Send file</span>
+        </button>
+        <button id="elevateBtn" class="btn" hidden type="button"
+                data-i18n-attr="title:connect.btn.elevate"
+                title="Request elevated access (UAC, secure desktop)">
+          <svg class="btn-ico"><use href="#ico-shield" /></svg>
+          <span class="btn-label" data-i18n="connect.btn.elevate">Elevate</span>
         </button>
         <input id="fileInput" type="file" multiple hidden />
         <div id="keysWrap" class="keys-wrap" hidden>
