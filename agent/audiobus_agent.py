@@ -703,7 +703,7 @@ _GUI_DPI_LOGGED = False   # one-time GUI-thread DPI-awareness + raw-rect diagnos
 _SHOT_SAVED = False       # one-time: save an mss screenshot on the first blocked click
 
 
-_AGENT_BUILD = "2026-11-09-elev4"  # T2: viewer request-elevation -> dialog -> runas UAC -> elevated takeover
+_AGENT_BUILD = "2026-11-10-elev5"  # elevation in place: swap USER->SYSTEM cap-worker live, no agent restart
 
 
 def _save_debug_shot(x, y):
@@ -1531,6 +1531,13 @@ class VideoChild:
         which re-tunes that monitor's encoder (only when --bitrate is unset)."""
         self._send_ctl({"type": "bitrate", "mi": int(mi), "bps": int(bps)})
 
+    def elevate_capture(self):
+        """On-demand elevation: ask the LIVE encode child to swap its USER cap-worker for a SYSTEM
+        one (secure desktop + elevated input) WITHOUT restarting the agent. The child raises ONE UAC
+        (its short-lived service installer); this process, the relay session and consent all stay up.
+        Idempotent — a no-op in the child once it's already on the SYSTEM worker."""
+        self._send_ctl({"type": "elevate-capture"})
+
     def shutdown(self):
         """Terminate the child for good (agent exit). BLOCKS briefly (run in an executor).
         The child also self-exits when our socket closes, so this is belt-and-suspenders."""
@@ -1961,7 +1968,8 @@ class RawCaptureClient:
                 if not self._svc:
                     self.shutdown()
                     return False
-                ls.settimeout(30)    # SYSTEM spawn via the SCM + CreateProcessAsUser is slower
+                ls.settimeout(60)    # SYSTEM spawn via the SCM + CreateProcessAsUser is slower, and on
+                #                      the on-demand path a human must approve the UAC prompt in between
             else:
                 if getattr(sys, "frozen", False):
                     cmd = [sys.executable, "--cap-worker", "--capport", str(port)]
@@ -1981,12 +1989,14 @@ class RawCaptureClient:
             self._lsock = None
             self._alive = True
             if self.system and self._svc:
-                # The worker is independent and now connected; retire the one-shot service.
-                try:
-                    _sc("stop", self._svc)
-                    _sc("delete", self._svc)
-                except Exception:
-                    pass
+                # The worker is independent and now connected; retire the one-shot service — unless an
+                # elevated helper installed it (ELEV: token): it owns stop/delete, and we're non-admin.
+                if not str(self._svc).startswith("ELEV:"):
+                    try:
+                        _sc("stop", self._svc)
+                        _sc("delete", self._svc)
+                    except Exception:
+                        pass
                 self._svc = None
             threading.Thread(target=self._read_loop, args=(conn,), daemon=True).start()
             return True
@@ -2608,7 +2618,8 @@ def run_video_child(port, raw=False, system=False):
 
     state = {"stop": False, "capturing": False, "cfg": None,
              "wanted": set(), "kf": set(), "gen": 0, "bitrates": {},
-             "raw": False, "capclient": None, "input_port": 0, "system": system}
+             "raw": False, "capclient": None, "input_port": 0, "system": system,
+             "elev_inflight": False}
 
     # Topology (b): spawn the cap-worker that GDI-grabs and ships RAW frames. If it fails to come
     # up, fall back to in-process mss capture so a viewer session still works (just not on the
@@ -2626,6 +2637,35 @@ def run_video_child(port, raw=False, system=False):
                        % (raw, state["raw"], system, _AGENT_BUILD))
         except Exception:
             pass
+
+    def _elevate_swap():
+        """On-demand elevation (runs off the ctl thread so control stays responsive while the SYSTEM
+        worker comes up): spawn a SYSTEM cap-worker, and only when it is up retire the USER one and
+        bump the generation so the running session re-enters bound to it (re-arming input on the SAME
+        port). A cancelled UAC / failed spawn leaves the USER worker capturing — the viewer can retry."""
+        if state.get("elev_inflight") or state.get("system") or not state.get("raw"):
+            return
+        state["elev_inflight"] = True
+        try:
+            newcc = RawCaptureClient(system=True)
+            if newcc.spawn():
+                old = state.get("capclient")
+                state["capclient"] = newcc
+                state["system"] = True
+                state["kf"] = {m["i"] for m in (state.get("cfg") or {}).get("monitors") or []}
+                state["gen"] += 1          # end the current session; it re-enters with the SYSTEM client
+                if old:
+                    try:
+                        old.shutdown()
+                    except Exception:
+                        pass
+                _click_log("[diag elevate-capture OK -> SYSTEM worker (no restart)]")
+            else:
+                _click_log("[diag elevate-capture: SYSTEM spawn failed (UAC cancelled?)]")
+        except Exception as e:
+            _click_log("[diag elevate-capture raised %r]" % (e,))
+        finally:
+            state["elev_inflight"] = False
 
     def ctl_reader():
         while not state["stop"]:
@@ -2662,6 +2702,10 @@ def run_video_child(port, raw=False, system=False):
                 mi, bps = msg.get("mi"), msg.get("bps")
                 if mi is not None and bps:
                     state["bitrates"][mi] = int(bps)     # REMB: adapt this monitor's encoder
+            elif typ == "elevate-capture":
+                # Viewer-requested elevation (authorized locally): swap USER->SYSTEM cap-worker live.
+                if state.get("raw") and state.get("capclient"):
+                    threading.Thread(target=_elevate_swap, daemon=True).start()
             elif typ == "stop":
                 state["stop"] = True
                 break
@@ -5662,30 +5706,28 @@ class App:
         )
 
     def _elevate_self(self):
-        """Relaunch elevated via ShellExecute "runas" (shows UAC). On success the elevated copy
-        silently replaces us (--elevated-takeover) and runs the SYSTEM / secure-desktop path, and the
-        viewer auto-reconnects (same stable code + resume token); we then quit so one agent remains.
-        On a dev (non-frozen) run or if the user cancels UAC, we stay non-elevated."""
+        """Grant the viewer's elevation request WITHOUT restarting the agent: tell the LIVE encode
+        child to swap its USER cap-worker for a SYSTEM one (secure desktop + elevated input). The
+        child raises ONE UAC (its short-lived service installer); this process, the relay session and
+        consent all stay up, and only the video briefly re-arms. No-op on a dev (non-frozen) run."""
         if not getattr(sys, "frozen", False) or sys.platform != "win32":
             self.set_status(tr("agent.status.elevationUnavailable"), WARN)
             return
+        cl = getattr(self, "client", None)
+        vc = getattr(cl, "vchild", None) if cl else None
+        if vc is None:
+            self.set_status(tr("agent.status.elevationUnavailable"), WARN)
+            return
+        self.set_status(tr("agent.status.elevating"), MUTED)
         try:
-            shell32 = ctypes.windll.shell32
-            shell32.ShellExecuteW.restype = ctypes.c_void_p
-            shell32.ShellExecuteW.argtypes = [wintypes.HWND, wintypes.LPCWSTR, wintypes.LPCWSTR,
-                                              wintypes.LPCWSTR, wintypes.LPCWSTR, ctypes.c_int]
-            rc = shell32.ShellExecuteW(None, "runas", sys.executable,
-                                       "--elevated-takeover", None, 1)  # SW_SHOWNORMAL
+            vc.elevate_capture()
         except Exception:
-            rc = 0
-        if rc is not None and int(rc) > 32:
-            # Elevated copy launched; it will take over. Quit this (non-elevated) one shortly — the
-            # elevated copy also taskkills us if we linger, but a clean quit frees the relay sooner.
-            self.set_status(tr("agent.status.elevating"), MUTED)
-            self.root.after(300, self._quit)
-        else:
-            # <=32 = error (1223 = user cancelled the UAC prompt).
             self.set_status(tr("agent.status.elevationCancelled"), WARN)
+            return
+        # Restore the normal controlling status shortly; the swap runs async in the child (one UAC the
+        # local user approves, then the SYSTEM worker comes up). A cancelled UAC just keeps the USER
+        # worker — the viewer can click Elevate again.
+        self.root.after(5000, self.on_viewer_restored)
 
     def on_fatal(self, message):
         self.set_status(tr("agent.error.couldNotStart"), BAD)
@@ -6391,6 +6433,10 @@ def parse_args(argv):
     # running non-elevated copy (the user already authorized) and runs the elevated path. Not for direct use.
     p.add_argument("--elevated-takeover", dest="elevated_takeover", action="store_true",
                    help=argparse.SUPPRESS)
+    # On-demand elevation (current model): a short-lived ELEVATED helper (launched via ShellExecute
+    # "runas" from the non-elevated encode child) that only runs the admin `sc` steps to install the
+    # SYSTEM cap-worker service, so the agent itself never restarts. Not for direct use.
+    p.add_argument("--install-capsvc", dest="install_capsvc", action="store_true", help=argparse.SUPPRESS)
     p.add_argument("--raw-capture", dest="raw_capture", action="store_true", help=argparse.SUPPRESS)
     p.add_argument("--raw-system", dest="raw_system", action="store_true", help=argparse.SUPPRESS)
     # Internal: the cap-worker entry point. GDI-grabs every monitor and ships RAW BGRX over loopback to
@@ -6906,16 +6952,43 @@ def run_secure_test():
 
 
 def _spawn_cap_worker_as_system(capport):
-    """T3: install + start a LocalSystem service that CreateProcessAsUser's `--cap-worker --capport
-    <capport>` into the console session as SYSTEM, so capture+input can reach the secure desktop.
-    The worker connects back to the encode child (loopback, cross-session). Returns the service name
-    (the caller sc-deletes it once the worker has connected) or None. Needs elevated admin (sc create;
-    the agent runs --uac-admin, and the encode child inherits that elevation)."""
+    """Bring up a LocalSystem cap-worker that CreateProcessAsUser's `--cap-worker --capport <capport>`
+    into the console session, so capture+input reach the secure desktop. The worker connects back to
+    the encode child (loopback, cross-session). The `sc create` needs admin: when THIS process is
+    already elevated (manual --raw-system run) we install inline; otherwise — the normal on-demand
+    case — we launch a short-lived ELEVATED helper (ShellExecute "runas" -> ONE UAC) that installs,
+    starts and deletes the one-shot service, so the agent itself stays non-elevated and never restarts.
+    Returns a service-name token the caller retires after the worker connects (an "ELEV:" prefix means
+    the helper owns stop/delete), or None on failure (e.g. the user cancelled the UAC prompt)."""
     log_path = os.path.join(os.path.expanduser("~"), "audiobus-secure.log")
     _set_secure_paths(log_path, None)
     svc_name = "AudiobusCap_%d" % os.getpid()
-    _secure_log("=== cap-worker SYSTEM spawn: svc=%s capport=%s ===" % (svc_name, capport))
+    elevated = _is_elevated()
+    _secure_log("=== cap-worker SYSTEM spawn: svc=%s capport=%s elevated=%s ==="
+                % (svc_name, capport, elevated))
     exe = sys.executable
+    if not elevated:
+        # On-demand path: elevate ONLY the service install via a short-lived helper. UAC appears once.
+        if getattr(sys, "frozen", False):
+            params = ('--install-capsvc --capport %d --secure-svcname "%s" --secure-log "%s"'
+                      % (int(capport), svc_name, log_path))
+        else:
+            params = ('"%s" --install-capsvc --capport %d --secure-svcname "%s" --secure-log "%s"'
+                      % (os.path.abspath(__file__), int(capport), svc_name, log_path))
+        try:
+            shell32 = ctypes.windll.shell32
+            shell32.ShellExecuteW.restype = ctypes.c_void_p
+            shell32.ShellExecuteW.argtypes = [wintypes.HWND, wintypes.LPCWSTR, wintypes.LPCWSTR,
+                                              wintypes.LPCWSTR, wintypes.LPCWSTR, ctypes.c_int]
+            rc = shell32.ShellExecuteW(None, "runas", exe, params, None, 0)  # SW_HIDE (windowless sc work)
+        except Exception as e:
+            _secure_log("cap-worker elevated-install ShellExecute raised %r" % (e,))
+            return None
+        if rc is None or int(rc) <= 32:
+            _secure_log("cap-worker elevated-install rejected rc=%s (UAC cancelled?)" % rc)
+            return None
+        return "ELEV:" + svc_name     # the helper installs/starts/deletes; we just await the worker
+    # Already elevated: install inline (manual --raw-system path).
     svc_args = ('--secure-service --capworker-port %d --secure-svcname "%s" --secure-log "%s"'
                 % (int(capport), svc_name, log_path))
     if getattr(sys, "frozen", False):
@@ -6939,6 +7012,52 @@ def _spawn_cap_worker_as_system(capport):
     except Exception as e:
         _secure_log("cap-worker service spawn raised %r" % (e,))
         return None
+
+
+def _install_capsvc(capport, svc_name, log_path):
+    """Elevated short-lived helper (ShellExecute "runas" target, --install-capsvc). Runs ONLY the
+    admin-needing `sc` steps so the agent can stay non-elevated: install + start a LocalSystem service
+    that CreateProcessAsUser's the cap-worker into the console session, give its ServiceMain a moment
+    to spawn that worker, then delete the service registration and exit. `sc delete` on a running
+    service only MARKS it (it is not killed), and the cap-worker is a SEPARATE CreateProcessAsUser'd
+    process, so it lives on and connects to the encode child independently."""
+    log_path = log_path or os.path.join(os.path.expanduser("~"), "audiobus-secure.log")
+    try:
+        _set_secure_paths(log_path, None)
+    except Exception:
+        pass
+    svc_name = svc_name or ("AudiobusCap_%d" % os.getpid())
+    _secure_log("=== install-capsvc: svc=%s capport=%s ===" % (svc_name, capport))
+    exe = sys.executable
+    svc_args = ('--secure-service --capworker-port %d --secure-svcname "%s" --secure-log "%s"'
+                % (int(capport), svc_name, log_path))
+    if getattr(sys, "frozen", False):
+        bin_path = '"%s" %s' % (exe, svc_args)
+    else:
+        bin_path = '"%s" "%s" %s' % (exe, os.path.abspath(__file__), svc_args)
+    try:
+        _sc("stop", svc_name)        # clear any leftover ghost from a prior run
+        _sc("delete", svc_name)
+        rc, _ = _sc("create", svc_name, "binPath=", bin_path, "type=", "own",
+                    "start=", "demand", "DisplayName=", "Audiobus Live Capture")
+        if rc != 0:
+            _secure_log("install-capsvc create failed rc=%s" % rc)
+            return
+        rc, _ = _sc("start", svc_name)
+        if rc != 0:
+            _secure_log("install-capsvc start failed rc=%s" % rc)
+            _sc("delete", svc_name)
+            return
+        time.sleep(2.0)              # let ServiceMain CreateProcessAsUser the worker before we drop the reg
+        _sc("query", svc_name)
+    except Exception as e:
+        _secure_log("install-capsvc raised %r" % (e,))
+    finally:
+        try:
+            _sc("delete", svc_name)   # worker is independent now; retire the one-shot registration
+        except Exception:
+            pass
+    _secure_log("=== install-capsvc done ===")
 
 
 def run_selfcheck(out_path):
@@ -7286,7 +7405,8 @@ def main(argv=None):
     # stays available for testing. A child mode (--video-child / --cap-worker / --secure-*) carries its
     # own flags from the parent, so don't re-default those.
     _child_mode = any(getattr(args, a, False) for a in
-                      ("video_child", "cap_worker", "secure_service", "secure_helper", "secure_test"))
+                      ("video_child", "cap_worker", "secure_service", "secure_helper", "secure_test",
+                       "install_capsvc"))
     if not _child_mode:
         if getattr(args, "legacy_capture", False):
             args.raw_capture = False
@@ -7341,6 +7461,12 @@ def main(argv=None):
         return
     if getattr(args, "secure_test", False):
         run_secure_test()
+        return
+    # On-demand elevation helper: elevated, short-lived, runs only the admin `sc` install steps so the
+    # non-elevated agent never restarts. Runs before the single-instance guard (it is not the agent).
+    if getattr(args, "install_capsvc", False):
+        _install_capsvc(args.capport, getattr(args, "secure_svcname", None),
+                        getattr(args, "secure_log", None))
         return
     # Remove leftover PyInstaller _MEI* temp dirs from prior runs (we os._exit to dodge the
     # onefile cleanup dialog, so they linger — see __main__ / _reap_stale_meipass).
