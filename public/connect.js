@@ -31,6 +31,17 @@ const sendFileBtn = $("sendFileBtn");
 const fsSendFileBtn = $("fsSendFileBtn");
 const elevateBtn = $("elevateBtn"); // on-demand elevation toggle (elevate <-> de-elevate)
 let agentElevated = false; // agent's live capture mode (true = SYSTEM / secure-desktop), per its reports
+const printerBtn = $("printerBtn"); // "Print to my PC": set up remote->local printer redirection
+const printRemoteWrap = $("printRemoteWrap"); // "Print on remote" button + printer popover (local->remote)
+const printRemoteBtn = $("printRemoteBtn");
+const printRemoteMenu = $("printRemoteMenu");
+const printFileInput = $("printFileInput"); // hidden picker for the local file to print on the remote
+const clipFilesWrap = $("clipFilesWrap"); // toolbar button + popover of the remote's copied files
+const clipFilesBtn = $("clipFilesBtn"); // "Download from remote": files the remote user copied (Ctrl+C)
+const clipFilesMenu = $("clipFilesMenu"); // popover: one draggable/clickable chip per copied file
+let clipFilesManifest = []; // [{name,size}] the agent advertised are on its clipboard, for clip-files-get
+let clipGetFiles = []; // [{name,size,blob,url}] prefetched bytes, so a chip can be dragged OUT or downloaded
+let clipGetState = "idle"; // idle -> loading (prefetch sent) -> ready (all bytes in)
 const fileInput = $("fileInput");
 const keysWrap = $("keysWrap"); // special-keys toolbar button + popover menu
 const keysBtn = $("keysBtn");
@@ -307,6 +318,7 @@ let clipLast = null; // last clipboard TEXT reconciled with the host (sent OR re
 let clipLastImg = null; // hash of the last clipboard IMAGE reconciled (echo guard)
 let clipReadBusy = false; // a clipboard read is in flight (avoid overlap)
 let clipReadAt = 0; // performance.now() of the last read attempt (throttle)
+let clipHasImage = false; // last sample saw a BITMAP (CF_DIB) on the OS clipboard — not a file (CF_HDROP)
 let clipImgSeq = 0; // local counter for outbound clipboard-image ids
 let clipImgRx = null; // in-flight incoming clipboard image: { id, parts, got }
 
@@ -374,6 +386,9 @@ async function syncClipboardUp() {
     if (navigator.clipboard.read) {
       // Chromium/Safari: read() exposes images AND text.
       const items = await navigator.clipboard.read();
+      // Ground truth for file-vs-image: read() exposes image/* for a BITMAP (CF_DIB) but NOT for a file
+      // copied in Explorer (CF_HDROP). onDocPaste uses this to route a paste (bitmap -> image, file -> file).
+      clipHasImage = items.some((it) => (it.types || []).some((t) => t.startsWith("image/")));
       for (const item of items) {
         const imgType = item.types.find((t) => t.startsWith("image/"));
         if (imgType) {
@@ -402,6 +417,7 @@ async function syncClipboardUp() {
       }
     } else if (navigator.clipboard.readText) {
       // Firefox: text only (no read()/image support).
+      clipHasImage = false;
       const text = await navigator.clipboard.readText();
       if (text !== clipLast) {
         clipLast = text;
@@ -501,6 +517,10 @@ const FILE_CHUNK_BYTES = 128 * 1024;
 const FILE_MAX_BYTES = 2 * 1024 * 1024 * 1024;
 const FILE_WINDOW = 8;
 let fileCaps = false; // the agent advertised file-transfer support (caps.file)
+let printerCaps = false; // the agent advertised printer redirection (caps.printer)
+let printerOn = false; // the redirected "Print to my PC" printer is currently installed on the remote (toggle)
+let remotePrinters = []; // the remote's printers (for local->remote printing)
+let printRemoteChosen = null; // the remote printer the user picked, pending a file selection
 let xferSeq = 0; // local counter for unique upload ids
 const uploads = new Map(); // id -> { name, size, sent, n, acked, cancel, wake, done, failed, dir }
 const downloads = new Map(); // id -> { name, size, got, parts, mime, done, failed, dir }
@@ -536,7 +556,7 @@ function renderTransfers() {
   if (!transfersEl) return;
   const items = [];
   uploads.forEach((st, id) => items.push([id, st]));
-  downloads.forEach((st, id) => items.push([id, st]));
+  downloads.forEach((st, id) => { if (!st.clipget) items.push([id, st]); }); // clip-get prefetch is silent
   if (!items.length) {
     transfersEl.hidden = true;
     transfersEl.innerHTML = "";
@@ -575,9 +595,9 @@ function finishTransfer(id, map, failed) {
   }, 4000);
 }
 
-function enqueueUpload(file) {
+function enqueueUpload(file, opts) {
   if (!inSession || !fileCaps || !file) return;
-  uploadQueue.push(file);
+  uploadQueue.push([file, opts || null]);
   pumpUploads();
 }
 
@@ -590,16 +610,24 @@ async function pumpUploads() {
         uploadQueue.length = 0;
         break;
       }
-      await uploadFile(uploadQueue.shift());
+      const [qf, qo] = uploadQueue.shift();
+      await uploadFile(qf, qo);
     }
   } finally {
     uploadRunning = false;
   }
 }
 
-// viewer -> host: stream a dropped/picked File to the agent.
-async function uploadFile(file) {
+// viewer -> host: stream a dropped/picked File to the agent. opts.clip (+opts.gid) = a Ctrl+V file paste:
+// the agent collects the group onto ITS clipboard. opts.drop (+opts.gid) = a drag-drop onto the stage:
+// the agent saves it into the folder the remote has open in Explorer. No opts = the Send-file inbox.
+async function uploadFile(file, opts) {
   if (!inSession || !fileCaps || !file) return;
+  const isClip = !!(opts && opts.clip);
+  const isDrop = !!(opts && opts.drop);
+  const isPrintJob = !!(opts && opts.printJob);
+  const printer = (opts && opts.printer) || undefined;
+  const gid = (opts && opts.gid) || undefined;
   const id = "v" + ++xferSeq + "-" + Math.random().toString(36).slice(2);
   const st = {
     name: file.name || "file",
@@ -625,6 +653,11 @@ async function uploadFile(file) {
     name: st.name,
     size: file.size,
     mime: file.type || "",
+    clip: isClip ? true : undefined,  // Ctrl+V paste: the agent routes these to its clipboard, not Downloads
+    drop: isDrop ? true : undefined,  // drag-drop: the agent saves into the remote's open Explorer folder
+    printjob: isPrintJob ? true : undefined, // local->remote print: the agent prints it to `printer`
+    printer: printer,
+    gid: gid,
   });
   try {
     let offset = 0;
@@ -663,6 +696,53 @@ async function uploadFile(file) {
   }
 }
 
+// Local -> remote clipboard: when you copy files in Explorer and press Ctrl+V on the viewer, the browser's
+// paste event exposes them as clipboardData.files. Stream them to the agent as a group; it puts them on ITS
+// clipboard so the remote user can Ctrl+V into Explorer. Text/image pastes have no .files, so leave those
+// to the existing clipboard sync.
+async function onDocPaste(e) {
+  if (!inSession || !fileCaps) return;
+  const cd = e.clipboardData;
+  const allFiles = cd && cd.files ? Array.from(cd.files) : [];
+  const types = cd ? Array.from(cd.types) : [];
+  try {
+    console.log("[clip-paste diag] clipHasImage=" + clipHasImage
+      + " types=" + JSON.stringify(types)
+      + " files=" + JSON.stringify(allFiles.map((f) => ({ name: f.name, type: f.type, size: f.size })))
+      + " items=" + JSON.stringify(cd ? Array.from(cd.items).map((i) => i.kind + ":" + i.type) : []));
+  } catch {}
+  // Differentiate a copied BITMAP from a copied FILE by the OS clipboard FORMAT, read by the image sampler:
+  // navigator.clipboard.read() exposes image/* for a bitmap (CF_DIB) but NOT for a file copied in Explorer
+  // (CF_HDROP). So clipHasImage === true => a real bitmap: sync it as an IMAGE (Paint) and just forward V (the
+  // sampler already put it on the remote clipboard); it must NOT be shipped as a file.
+  if (clipHasImage) {
+    if (pastePending) { pastePending = false; forwardPasteV(); }
+    return;
+  }
+  // No bitmap: it's files (or text). Drop any stray synthesized bitmap File (name "image.<ext>") the sampler
+  // may have missed, so we never ship a pasted image AS a file.
+  const files = allFiles.filter(
+    (f) => !((f.type || "").toLowerCase().startsWith("image/") && /^image\.\w+$/i.test(f.name || "")));
+  if (!files.length) {
+    // The clipboard holds Explorer files (CF_HDROP) the browser won't hand us (none exposed but types says
+    // "Files") -> tell the user to drag-drop / Send file. Otherwise it's a text paste -> forward V.
+    if (!allFiles.length && types.includes("Files")) {
+      setStatus(t("connect.status.clipFilesNoAccess"), "warn");
+      return;
+    }
+    if (pastePending) { pastePending = false; forwardPasteV(); }
+    return;
+  }
+  pastePending = false; // file paste: no V forward — the agent auto-pastes once the transfer completes
+  e.preventDefault();
+  const gid = "cp" + ++xferSeq + "-" + Math.random().toString(36).slice(2);
+  setStatus(t("connect.status.clipPasteSending"), "warn");
+  for (const f of files) await uploadFile(f, { clip: true, gid }); // agent sets its clipboard + auto-pastes
+  send({ type: "clip-paste-end", gid });
+  setStatus(t("connect.status.clipPasteDone"), "good");
+}
+document.addEventListener("paste", onDocPaste);
+
 // host -> viewer: accept an incoming file and save it when complete.
 function onFileBegin(msg) {
   if (!inSession || typeof msg.id !== "string" || downloads.has(msg.id)) return;
@@ -680,6 +760,11 @@ function onFileBegin(msg) {
     done: false,
     failed: false,
     dir: "down",
+    // clip-get = a background prefetch of the files the remote copied, so a chip can be dragged OUT to the
+    // local Explorer/desktop (or clicked to download). Kept out of the transfers UI.
+    clipget: msg.purpose === "clipget",
+    // print = a redirected print job from the remote: open the browser print dialog instead of downloading.
+    print: msg.purpose === "print",
   });
   renderTransfers();
 }
@@ -706,16 +791,63 @@ function onFileEnd(msg) {
   if (!dl) return;
   const blob = new Blob(dl.parts, dl.mime ? { type: dl.mime } : undefined);
   dl.parts = []; // release the chunk buffers; the Blob owns the data now
+  if (dl.clipget) {
+    // A prefetched remote-clipboard file: keep the blob (and its URL) so a chip can be dragged OUT to the
+    // local Explorer/desktop (DownloadURL) or clicked to download. The URL is revoked in clearClipGet().
+    const url = URL.createObjectURL(blob);
+    clipGetFiles.push({ name: dl.name || "file", size: dl.size, blob, url });
+    downloads.delete(msg.id);
+    if (clipGetFiles.length >= clipFilesManifest.length) clipGetState = "ready";
+    renderClipMenu();
+    return;
+  }
+  if (dl.print) {
+    // A redirected print job from the remote (blob is application/pdf): open it automatically in a NEW TAB
+    // (its own thread, so the viewer never freezes) and pop its print dialog, focusing that tab.
+    openPrint(blob, dl.name);
+    downloads.delete(msg.id);
+    return;
+  }
   const url = URL.createObjectURL(blob);
+  saveBlobUrl(url, dl.name);
+  setTimeout(() => URL.revokeObjectURL(url), 15000);
+  finishTransfer(msg.id, downloads, false);
+}
+
+// Open a redirected print job automatically in a new tab and pop its print dialog (prints to any LOCAL
+// printer; default pre-selected). The new tab runs on its own thread so the viewer never freezes. window.open
+// without a user gesture CAN be popup-blocked — then we download the PDF and ask the user to allow pop-ups so
+// it auto-opens next time.
+function openPrint(blob, name) {
+  let url;
+  try {
+    const pdf = blob.type === "application/pdf" ? blob : new Blob([blob], { type: "application/pdf" });
+    url = URL.createObjectURL(pdf);
+  } catch {
+    return;
+  }
+  let w = null;
+  try { w = window.open(url, "_blank"); } catch {}
+  if (w) {
+    try { w.focus(); } catch {}
+    setTimeout(() => { try { w.focus(); w.print(); } catch {} }, 1200); // let the PDF render, then print
+    setStatus(t("connect.status.printReceived"), "good");
+  } else {
+    saveBlobUrl(url, name); // popup blocked -> download, and tell the user how to get auto-print
+    setStatus(t("connect.status.printPopupBlocked"), "warn");
+  }
+  setTimeout(() => { try { URL.revokeObjectURL(url); } catch {} }, 120000);
+}
+
+// Trigger a browser download of an existing object URL (used both by a finished download and by a chip click).
+function saveBlobUrl(url, name) {
   const a = document.createElement("a");
   a.href = url;
-  a.download = dl.name || "file";
+  a.download = name || "file";
   // In fullscreen only the #stage subtree renders, so anchor the click there.
   (document.fullscreenElement || document.body).appendChild(a);
   a.click();
   a.remove();
-  setTimeout(() => URL.revokeObjectURL(url), 15000);
-  finishTransfer(msg.id, downloads, false);
 }
 
 function onFileCancel(msg) {
@@ -780,14 +912,32 @@ function onStageDragLeave() {
   dragDepth = Math.max(0, dragDepth - 1);
   if (dragDepth === 0 && dropHint) dropHint.hidden = true;
 }
-function onStageDrop(e) {
+// Map a drop point to the remote monitor + pixel coords under it (so the agent can place a desktop drop
+// where it landed), using the same per-monitor mapping as mouse input. Null if the point hit no screen.
+function dropPoint(e) {
+  for (const [, s] of screens) {
+    const r = s.el.getBoundingClientRect();
+    if (e.clientX >= r.left && e.clientX <= r.right && e.clientY >= r.top && e.clientY <= r.bottom) {
+      const p = mediaXY(s.el, s.mon, e);
+      return { m: s.mon.i, x: p.x, y: p.y };
+    }
+  }
+  return null;
+}
+async function onStageDrop(e) {
   dragDepth = 0;
   if (dropHint) dropHint.hidden = true;
   if (!inSession || !fileCaps || modalOpen) return;
   if (!e.dataTransfer) return;
   e.preventDefault();
   const files = Array.from(e.dataTransfer.files || []);
-  for (const f of files) enqueueUpload(f);
+  if (!files.length) return;
+  const pos = dropPoint(e); // where on the remote it was dropped — read NOW (before awaits)
+  // One gid per drop: the agent resolves the remote's open folder/desktop once and places the batch there.
+  // Await inline (not via the shared queue) so drop-end is sent only after every file has transferred.
+  const gid = "dp" + ++xferSeq + "-" + Math.random().toString(36).slice(2);
+  for (const f of files) await uploadFile(f, { drop: true, gid });
+  send({ type: "drop-end", gid, pos });
 }
 function onSendFileClick() {
   if (fileInput) fileInput.click();
@@ -1146,15 +1296,35 @@ async function onMessage(ev) {
       applyGlobalCursor();
       break;
     case "caps":
-      // The agent advertised its optional capabilities (clipboard / file transfer).
+      // The agent advertised its optional capabilities (clipboard / file transfer / printer redirection).
       clipCaps = !!msg.clip;
       fileCaps = !!msg.file;
+      printerCaps = !!msg.printer;
       updateTransferUI();
+      updateClipFilesBtn();
+      updatePrinterBtn();
+      if (printerCaps) send({ type: "list-printers" }); // fetch the remote's printers for local->remote
+      break;
+    case "printer-status":
+      // Result of a setup/remove-printer request on the remote.
+      onPrinterStatus(msg);
+      break;
+    case "printers":
+      // The remote's printers (local->remote printing).
+      remotePrinters = Array.isArray(msg.printers) ? msg.printers.filter((x) => typeof x === "string") : [];
+      updatePrintRemoteBtn();
       break;
     case "capture-mode":
       // The agent reported its live capture mode (elevated = SYSTEM / secure desktop). Settle the
       // Elevate toggle on the truth — confirming or correcting the optimistic flip from the click.
       settleElevateBtn(msg.elevated);
+      break;
+    case "clip-files":
+      // The remote user copied files in Explorer (CF_HDROP). Reset any prior prefetch, then offer the popover
+      // (drag out / download); the bytes are fetched when the popover is opened.
+      clearClipGet();
+      clipFilesManifest = Array.isArray(msg.files) ? msg.files : [];
+      updateClipFilesBtn();
       break;
     case "clip":
       // The host clipboard changed; mirror it into ours (best-effort).
@@ -1717,6 +1887,8 @@ function startSession(mons) {
   clipLastImg = null;
   clipImgRx = null;
   fileCaps = false; // re-advertised by the agent's "caps" message right after "monitors"
+  printerCaps = false; printerOn = false; updatePrinterBtn();
+  remotePrinters = []; printRemoteChosen = null; updatePrintRemoteBtn();
   cancelAllTransfers();
   updateTransferUI();
 
@@ -1736,6 +1908,7 @@ function startSession(mons) {
     elevateBtn.hidden = false; // offer the on-demand elevation toggle while in a session
     settleElevateBtn(false);   // assume not elevated until the agent reports its mode (it does on start)
   }
+  clearClipGet(); clipFilesManifest = []; updateClipFilesBtn(); // no remote clipboard files yet this session
   placeStatusInBar(); // connected: status returns to the top-left bar
 
   buildMonitorPicker();
@@ -1766,6 +1939,8 @@ function endSession(keepStatus) {
   clipLastImg = null;
   clipImgRx = null;
   fileCaps = false;
+  printerCaps = false; printerOn = false; if (printerBtn) printerBtn.hidden = true;
+  remotePrinters = []; printRemoteChosen = null; if (printRemoteWrap) printRemoteWrap.hidden = true;
   cancelAllTransfers();
   updateTransferUI();
   stopHeartbeat();
@@ -1807,6 +1982,7 @@ function endSession(keepStatus) {
   fsBtn.hidden = true;
   disconnectBtn.hidden = true;
   if (elevateBtn) { elevateBtn.hidden = true; settleElevateBtn(false); }
+  clearClipGet(); clipFilesManifest = []; if (clipFilesWrap) clipFilesWrap.hidden = true;
   if (keysWrap) { keysWrap.hidden = true; if (keysMenu) keysMenu.hidden = true; }
   placeStatusInJoin(); // back on the join screen: status below the center card
   viewControls.hidden = true;
@@ -2165,13 +2341,32 @@ function onWindowMouseUp(e) {
   send({ t: "mu", m: mon.i, x: p.x, y: p.y, b: e.button });
 }
 
+// Ctrl/Cmd+V: do NOT forward the V here and do NOT preventDefault. Forwarding it would paste the remote's
+// STALE clipboard before a file paste's real bytes arrive (the bug); preventDefault would suppress the
+// browser `paste` event, the only way to read files you copied in Explorer. Ctrl itself IS forwarded, so
+// the paste handler completes a text/image paste by sending just V (Ctrl held). A file paste sends no V —
+// the agent re-injects Ctrl+V after the files land. Fallback: if no paste event fires, forward V anyway.
+function isPasteV(e) {
+  return fileCaps && (e.ctrlKey || e.metaKey) && !e.altKey && (e.key === "v" || e.key === "V");
+}
+let pastePending = false;
+function forwardPasteV() {
+  send({ t: "kd", key: "v", code: "KeyV" });
+  send({ t: "ku", key: "v", code: "KeyV" });
+}
 function onKeyDown(e) {
   if (modalOpen || !inSession || !kbToggle.checked) return;
+  if (isPasteV(e)) {
+    pastePending = true; // let the paste event decide (text -> forward V; files -> transfer + auto-paste)
+    setTimeout(() => { if (pastePending) { pastePending = false; forwardPasteV(); } }, 80);
+    return;
+  }
   e.preventDefault();
   send({ t: "kd", key: e.key, code: e.code });
 }
 function onKeyUp(e) {
   if (modalOpen || !inSession || !kbToggle.checked) return;
+  if (isPasteV(e)) return; // paired with the suppressed keydown
   e.preventDefault();
   send({ t: "ku", key: e.key, code: e.code });
 }
@@ -2339,6 +2534,207 @@ function onElevateClick() {
   }, 15000); // safety net only; the capture-mode reply normally clears this far sooner
 }
 if (elevateBtn) elevateBtn.addEventListener("click", onElevateClick);
+
+// The remote user copied files (CF_HDROP). The toolbar button (with a count) opens a popover listing each
+// file as a chip you can DRAG OUT to your local Explorer/desktop (Chromium DownloadURL) or click to download.
+// Opening the popover prefetches the bytes (clip-files-get) so the drag carries the real file.
+function updateClipFilesBtn() {
+  if (!clipFilesWrap) return;
+  const n = clipFilesManifest.length;
+  const show = inSession && fileCaps && n > 0;
+  clipFilesWrap.hidden = !show;
+  if (show) {
+    const lbl = clipFilesBtn && clipFilesBtn.querySelector(".btn-label");
+    if (lbl) lbl.textContent = t("connect.btn.clipFiles") + " (" + n + ")";
+    if (clipFilesBtn) clipFilesBtn.disabled = false;
+  } else {
+    closeClipMenu();
+  }
+}
+
+function closeClipMenu() {
+  if (clipFilesMenu) clipFilesMenu.hidden = true;
+  if (clipFilesBtn) clipFilesBtn.setAttribute("aria-expanded", "false");
+}
+
+// Drop the prefetched blobs (revoke their URLs) and reset — on a new remote copy or when the session ends.
+function clearClipGet() {
+  for (const f of clipGetFiles) { try { URL.revokeObjectURL(f.url); } catch { /* ignore */ } }
+  clipGetFiles = [];
+  clipGetState = "idle";
+  if (clipFilesMenu) clipFilesMenu.textContent = "";
+  closeClipMenu();
+}
+
+function startClipPrefetch() {
+  if (!inSession || !clipFilesManifest.length) return;
+  clipGetState = "loading";
+  for (const f of clipGetFiles) { try { URL.revokeObjectURL(f.url); } catch { /* ignore */ } }
+  clipGetFiles = [];
+  send({ type: "clip-files-get" }); // the agent streams each (tagged clipget); onFileEnd fills clipGetFiles
+}
+
+function renderClipMenu() {
+  if (!clipFilesMenu) return;
+  clipFilesMenu.textContent = "";
+  const hint = document.createElement("div");
+  hint.className = "clip-hint";
+  hint.textContent = t("connect.clip.dragHint");
+  clipFilesMenu.appendChild(hint);
+  // One row per advertised file: a draggable chip once its bytes are in, a dim placeholder until then.
+  // textContent only (remote-supplied filenames are untrusted — never innerHTML).
+  clipFilesManifest.forEach((m, i) => {
+    const f = clipGetFiles[i];
+    const ready = !!(f && f.url);
+    const row = document.createElement(ready ? "button" : "span");
+    row.className = "keys-item clip-file" + (ready ? "" : " pending");
+    const nm = (m && m.name) || (f && f.name) || "file";
+    row.textContent = ready ? nm : nm + " — " + t("connect.clip.preparing");
+    if (ready) {
+      row.type = "button";
+      row.draggable = true;
+      row.dataset.idx = String(i);
+    } else {
+      row.setAttribute("aria-disabled", "true");
+    }
+    clipFilesMenu.appendChild(row);
+  });
+}
+
+function onClipFilesClick(e) {
+  if (e) e.stopPropagation();
+  if (!inSession || !clipFilesManifest.length || !clipFilesMenu) return;
+  const opening = clipFilesMenu.hidden;
+  clipFilesMenu.hidden = !opening;
+  if (clipFilesBtn) clipFilesBtn.setAttribute("aria-expanded", opening ? "true" : "false");
+  if (opening) {
+    if (clipGetState === "idle") startClipPrefetch();
+    renderClipMenu();
+  }
+}
+if (clipFilesBtn) clipFilesBtn.addEventListener("click", onClipFilesClick);
+if (clipFilesMenu) {
+  // Drag a ready chip OUT of the page: Chromium's DownloadURL (MIME:filename:url) makes the OS create the
+  // file at the drop point (local Explorer folder or desktop). One file per drag is a Chromium limit.
+  clipFilesMenu.addEventListener("dragstart", (e) => {
+    const item = e.target.closest(".clip-file");
+    if (!item || item.dataset.idx === undefined) return;
+    const f = clipGetFiles[Number(item.dataset.idx)];
+    if (!f || !f.url) { e.preventDefault(); return; }
+    const type = (f.blob && f.blob.type) || "application/octet-stream";
+    const abs = new URL(f.url, location.href).href;
+    try { e.dataTransfer.setData("DownloadURL", type + ":" + f.name + ":" + abs); } catch { /* ignore */ }
+    e.dataTransfer.effectAllowed = "copy";
+  });
+  // Click a chip: download that one file.
+  clipFilesMenu.addEventListener("click", (e) => {
+    const item = e.target.closest(".clip-file");
+    if (!item || item.dataset.idx === undefined) return;
+    const f = clipGetFiles[Number(item.dataset.idx)];
+    if (f && f.url) saveBlobUrl(f.url, f.name);
+  });
+  document.addEventListener("click", (e) => {
+    if (!clipFilesMenu.hidden && clipFilesWrap && !clipFilesWrap.contains(e.target)) closeClipMenu();
+  });
+}
+
+// Printer redirection (remote -> local): one click sets up a "Print to your PC" printer on the remote (one
+// UAC there); afterwards, anything the remote prints to it arrives here as a PDF (auto-downloaded) to print
+// locally. A captured print PDF rides the normal host->viewer file path, so no special receive handling.
+// "Print to my PC" is a TOGGLE: ON installs the redirected printer on the remote (one UAC there), OFF removes
+// it (no UAC). Filled (.on) when enabled, mirroring the Elevate toggle.
+function updatePrinterBtn() {
+  if (!printerBtn) return;
+  printerBtn.hidden = !(inSession && printerCaps);
+  printerBtn.classList.toggle("on", !!printerOn);
+  printerBtn.setAttribute("aria-pressed", printerOn ? "true" : "false");
+}
+function onPrinterClick() {
+  if (!inSession || !printerCaps) return;
+  const target = !printerOn;
+  send({ type: target ? "setup-printer" : "remove-printer" });
+  printerOn = target;         // optimistic; the agent's printer-status confirms or corrects
+  updatePrinterBtn();
+  setStatus(t(target ? "connect.status.printerSetup" : "connect.status.printerRemoved"), "warn");
+  printerBtn.disabled = true;
+  setTimeout(() => { if (printerBtn) printerBtn.disabled = false; }, 25000); // UAC + install poll (~20s)
+}
+function onPrinterStatus(msg) {
+  if (printerBtn) printerBtn.disabled = false;
+  printerOn = !!(msg && msg.installed);
+  updatePrinterBtn();
+  if (msg && msg.installed) {
+    setStatus(t("connect.status.printerReady"), "good");
+  } else if (msg && msg.action === "remove") {
+    setStatus(t("connect.status.printerRemoved"), "good");
+  } else if (msg && msg.launched) {
+    setStatus(t("connect.status.printerFailed"), "warn"); // helper ran but the printer isn't there
+  } else {
+    setStatus(t("connect.status.printerCancelled"), "warn"); // UAC declined / not launched
+  }
+}
+if (printerBtn) printerBtn.addEventListener("click", onPrinterClick);
+
+// Local -> remote printing: a popover lists the remote's printers; pick one, then pick a local file, and the
+// agent prints that file to the chosen printer (shell "printto"). Reuses the keys-menu popover styling.
+function updatePrintRemoteBtn() {
+  if (!printRemoteWrap) return;
+  const show = inSession && printerCaps && remotePrinters.length > 0;
+  printRemoteWrap.hidden = !show;
+  if (!show) closePrintRemoteMenu();
+}
+function closePrintRemoteMenu() {
+  if (printRemoteMenu) printRemoteMenu.hidden = true;
+  if (printRemoteBtn) printRemoteBtn.setAttribute("aria-expanded", "false");
+}
+function renderPrintRemoteMenu() {
+  if (!printRemoteMenu) return;
+  printRemoteMenu.textContent = "";
+  const hint = document.createElement("div");
+  hint.className = "clip-hint";
+  hint.textContent = t("connect.print.remoteHint");
+  printRemoteMenu.appendChild(hint);
+  remotePrinters.forEach((name) => {
+    const row = document.createElement("button");
+    row.type = "button";
+    row.className = "keys-item clip-file";
+    row.textContent = name; // textContent: printer names are remote-supplied (untrusted)
+    row.dataset.printer = name;
+    printRemoteMenu.appendChild(row);
+  });
+}
+function onPrintRemoteClick(e) {
+  if (e) e.stopPropagation();
+  if (!inSession || !printerCaps || !remotePrinters.length || !printRemoteMenu) return;
+  const opening = printRemoteMenu.hidden;
+  if (opening) renderPrintRemoteMenu();
+  printRemoteMenu.hidden = !opening;
+  if (printRemoteBtn) printRemoteBtn.setAttribute("aria-expanded", opening ? "true" : "false");
+}
+if (printRemoteBtn) printRemoteBtn.addEventListener("click", onPrintRemoteClick);
+if (printRemoteMenu) {
+  printRemoteMenu.addEventListener("click", (e) => {
+    const item = e.target.closest(".clip-file");
+    if (!item || !item.dataset.printer) return;
+    printRemoteChosen = item.dataset.printer;
+    closePrintRemoteMenu();
+    if (printFileInput) { printFileInput.value = ""; printFileInput.click(); } // now pick the local file
+  });
+  document.addEventListener("click", (e) => {
+    if (!printRemoteMenu.hidden && printRemoteWrap && !printRemoteWrap.contains(e.target)) closePrintRemoteMenu();
+  });
+}
+if (printFileInput) {
+  printFileInput.addEventListener("change", () => {
+    const f = printFileInput.files && printFileInput.files[0];
+    printFileInput.value = "";
+    if (f && printRemoteChosen) {
+      enqueueUpload(f, { printJob: true, printer: printRemoteChosen });
+      setStatus(t("connect.status.printSent"), "warn");
+    }
+    printRemoteChosen = null;
+  });
+}
 
 // Special keys: send combinations the local browser/OS swallows (Win, Alt+Tab, Alt+F4,
 // Esc, PrtSc) by generating the key events directly, plus Ctrl+Alt+Del as a dedicated SAS

@@ -166,6 +166,7 @@ CLIP_IMG_MAX_BYTES = 16 * 1024 * 1024  # cap on a synced clipboard image (PNG); 
 FILE_CHUNK_BYTES = 128 * 1024  # raw bytes per file-chunk (base64 inflates ~33% on the wire)
 FILE_MAX_BYTES = 2 * 1024 * 1024 * 1024  # hard cap per received/sent file (2 GiB)
 FILE_WINDOW = 8                # unacked file-chunks allowed in flight (sender flow control)
+CLIP_FILES_MAX = 50            # most files advertised/transferred from one clipboard file-copy
 
 # Auto-accept PIN. When the owner turns on auto-accept, a short numeric PIN is generated
 # and shown in the agent; a fresh viewer must present it to be admitted silently. This
@@ -703,7 +704,7 @@ _GUI_DPI_LOGGED = False   # one-time GUI-thread DPI-awareness + raw-rect diagnos
 _SHOT_SAVED = False       # one-time: save an mss screenshot on the first blocked click
 
 
-_AGENT_BUILD = "2026-11-11-elev12"  # gated unstick (no spurious right-click) + exit cleanup; viewer forbidden-cursor when input UIPI-blocked
+_AGENT_BUILD = "2026-11-16-printer7"  # printer T2 (local->remote): SumatraPDF print + list only PHYSICAL printers (virtual PDF/XPS/OneNote targets produce corrupt output, so they are hidden)
 
 
 def _save_debug_shot(x, y):
@@ -2443,7 +2444,7 @@ def run_cap_worker(port):
         return
 
     state = {"stop": False, "capturing": False, "monitors": [], "fps": 20, "wanted": set(),
-             "input_sock": None, "follow": False, "pressed": set()}
+             "input_sock": None, "follow": False, "pressed": set(), "releasing": {}}
     send_lock = threading.Lock()
     who = "?"
     try:
@@ -2477,6 +2478,9 @@ def run_cap_worker(port):
 
     # (viewer button index, pynput button, GetAsyncKeyState VK) — index matches BUTTONS/the web.
     _UNSTICK_BTNS = ((0, Button.left, 0x01), (2, Button.right, 0x02), (1, Button.middle, 0x04))
+    _VK_FOR_BTN = {idx: vk for idx, _b, vk in _UNSTICK_BTNS}    # viewer button index -> GetAsyncKeyState VK
+    _BTN_FOR_IDX = {idx: btn for idx, btn, _v in _UNSTICK_BTNS}  # viewer button index -> pynput Button
+    RELEASE_RETRY_S = 5.0        # how long to keep retrying a UIPI-blocked release before giving up
 
     def _btn_down(vk):
         try:
@@ -2484,15 +2488,29 @@ def run_cap_worker(port):
         except Exception:
             return False
 
+    def _note_blocked_release(b):
+        """Call right after we inject a button-up. If the OS STILL reports that button down, our release
+        was UIPI-blocked (an elevated window grabbed the foreground) and the button is stuck — mark it so
+        the unstick loop retries the release. If the OS reports it up, the release took: mark NOTHING, so
+        we never touch a button the local user presses physically afterwards."""
+        vk = _VK_FOR_BTN.get(b)
+        if vk is not None and _btn_down(vk):
+            state["releasing"][b] = time.monotonic() + RELEASE_RETRY_S
+
     def _release_stuck():
-        """Release any mouse button the OS reports DOWN that the viewer is NOT holding — i.e. one whose
-        injected release was UIPI-blocked and left stuck (clicks then act as drags / left reads as right).
-        Gating on GetAsyncKeyState means we never inject a LONE button-up (a spurious right-up can fire a
-        context menu); skipping buttons the viewer holds (`idx in pressed`) means we never cut a real drag."""
-        for idx, btn, vk in _UNSTICK_BTNS:
+        """Retry ONLY the releases we already tried that stayed stuck DOWN (UIPI-blocked), never a button
+        merely reported down by GetAsyncKeyState — that also reflects the LOCAL user's physical press, so
+        a blanket release would cut their drag / click-hold. Pop the instant the button reads up, the
+        viewer re-presses it, or the retry window lapses, so when nothing is pending this is a no-op and
+        the physical mouse is left completely alone."""
+        now = time.monotonic()
+        rel = state["releasing"]
+        for idx in list(rel):
             try:
-                if idx not in state["pressed"] and _btn_down(vk):
-                    mouse.release(btn)
+                if idx in state["pressed"] or now > rel[idx] or not _btn_down(_VK_FOR_BTN[idx]):
+                    rel.pop(idx, None)       # re-held / timed out / confirmed up -> stop retrying
+                    continue
+                mouse.release(_BTN_FOR_IDX[idx])   # still stuck -> retry the release
             except Exception:
                 pass
 
@@ -2525,6 +2543,8 @@ def run_cap_worker(port):
                     _follow_input_desktop(inp_desktop, _DESKTOP_ALL)
                 try:
                     apply_event(ev, state["monitors"], None, None, pressed, False, wheel, None)
+                    if ev.get("t") == "mu":
+                        _note_blocked_release(ev.get("b", 0))   # retry only if our release was UIPI-blocked
                 except Exception as e:
                     et = ev.get("t")
                     if et not in fail_logged:
@@ -2534,10 +2554,11 @@ def run_cap_worker(port):
             for b in list(pressed):
                 try:
                     mouse.release(BUTTONS.get(b, Button.left))
+                    _note_blocked_release(b)   # link ended mid-press: retry iff that release was blocked
                 except Exception:
                     pass
             pressed.clear()
-            _release_stuck()   # the link ended: free any button left stuck DOWN so it can't persist after close
+            _release_stuck()   # the link ended: retry any release that stayed stuck (won't touch the physical mouse)
             try:
                 isock.close()
             except Exception:
@@ -3201,9 +3222,241 @@ def _set_clipboard_image(img):
         u.CloseClipboard()
 
 
+def _set_clipboard_files(paths):
+    """Put a list of FILE paths on the Windows clipboard as CF_HDROP (so the user can Ctrl+V them into
+    Explorer), no pywin32. CF_HDROP = a DROPFILES header + a double-NUL-terminated WIDE path list. Mirrors
+    _set_clipboard_image's alloc/SetClipboardData ownership handling."""
+    paths = [p for p in (paths or []) if isinstance(p, str) and p]
+    if not paths:
+        return False
+    files_b = ("".join(p + "\0" for p in paths) + "\0").encode("utf-16-le")
+    # DROPFILES: pFiles(DWORD)=header size (offset to the list), pt(LONG,LONG)=0,0, fNC(BOOL)=0, fWide=1.
+    header = struct.pack("<IiiII", 20, 0, 0, 0, 1)
+    blob = header + files_b
+    k = ctypes.windll.kernel32
+    u = ctypes.windll.user32
+    k.GlobalAlloc.restype = ctypes.c_void_p
+    k.GlobalAlloc.argtypes = [wintypes.UINT, ctypes.c_size_t]
+    k.GlobalLock.restype = ctypes.c_void_p
+    k.GlobalLock.argtypes = [ctypes.c_void_p]
+    k.GlobalUnlock.argtypes = [ctypes.c_void_p]
+    k.GlobalFree.argtypes = [ctypes.c_void_p]
+    u.SetClipboardData.restype = ctypes.c_void_p
+    u.SetClipboardData.argtypes = [wintypes.UINT, ctypes.c_void_p]
+    u.OpenClipboard.argtypes = [ctypes.c_void_p]
+    GMEM_MOVEABLE = 0x0002
+    CF_HDROP = 15
+    h = k.GlobalAlloc(GMEM_MOVEABLE, len(blob))
+    if not h:
+        return False
+    p = k.GlobalLock(h)
+    if not p:
+        k.GlobalFree(h)
+        return False
+    ctypes.memmove(p, blob, len(blob))
+    k.GlobalUnlock(h)
+    if not u.OpenClipboard(None):
+        k.GlobalFree(h)
+        return False
+    try:
+        u.EmptyClipboard()
+        if not u.SetClipboardData(CF_HDROP, h):
+            k.GlobalFree(h)  # ownership stays with us on failure
+            return False
+        return True          # on success the system owns the handle
+    finally:
+        u.CloseClipboard()
+
+
 def received_files_dir():
     """Where incoming files land: ~/Downloads/AudiobusRemote (created on demand)."""
     base = os.path.join(os.path.expanduser("~"), "Downloads", "AudiobusRemote")
+    os.makedirs(base, exist_ok=True)
+    return base
+
+
+def _desktop_dir():
+    """The user's Desktop folder, honoring a redirected (e.g. OneDrive) Desktop via the registry; falls back
+    to ~/Desktop. None if neither exists."""
+    try:
+        import winreg
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER,
+                            r"Software\Microsoft\Windows\CurrentVersion\Explorer\Shell Folders") as k:
+            p = winreg.QueryValueEx(k, "Desktop")[0]
+        if p and os.path.isdir(p):
+            return p
+    except Exception:
+        pass
+    p = os.path.join(os.path.expanduser("~"), "Desktop")
+    return p if os.path.isdir(p) else None
+
+
+def foreground_drop_target():
+    """Where a file dropped on the viewer should go on THIS machine, as (kind, path):
+       ("desktop", desktop_path)  the desktop is foreground — paste it there so the icon lands at the
+                                  last-press point, exactly like Ctrl+V (the caller stages + injects a paste);
+       ("folder",  folder_path)   an Explorer folder is foreground — write straight into it;
+       (None, None)               otherwise — the caller falls back to the Downloads inbox.
+    The desktop is matched by window class first because Shell.Application.Windows() does NOT enumerate it; an
+    open folder is then matched via Shell.Application COM through a short PowerShell query (no pywin32/comtypes
+    in the build). Paths are validated as real directories. The main agent runs non-elevated, so this sees the
+    user's Explorer windows (an elevated process could not)."""
+    if sys.platform != "win32":
+        return (None, None)
+    try:
+        user32 = ctypes.windll.user32
+        user32.GetForegroundWindow.restype = ctypes.c_void_p
+        fg = user32.GetForegroundWindow()
+        if not fg:
+            return (None, None)
+        # Desktop focused (icons or empty desktop) -> the Desktop. Progman/WorkerW host the desktop;
+        # Shell.Application.Windows() never lists it, so match the class before the folder-window query.
+        cls = ctypes.create_unicode_buffer(256)
+        user32.GetClassNameW(ctypes.c_void_p(fg), cls, 256)
+        if cls.value in ("Progman", "WorkerW"):
+            d = _desktop_dir()
+            if d:
+                return ("desktop", d)
+        ps = (
+            "$fg=[int64]%d;"
+            "$sh=New-Object -ComObject Shell.Application;"
+            "foreach($w in $sh.Windows()){try{"
+            "if([int64]$w.HWND -eq $fg){$p=$w.Document.Folder.Self.Path;"
+            "if($p){[Console]::Out.Write($p);break}}}catch{}}"
+        ) % int(fg)
+        out = subprocess.run(
+            ["powershell", "-NoProfile", "-NonInteractive", "-Sta", "-Command", ps],
+            capture_output=True, text=True, timeout=6,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        ).stdout.strip()
+        if out and os.path.isdir(out):
+            return ("folder", out)
+    except Exception:
+        pass
+    return (None, None)
+
+
+def _desktop_listview():
+    """HWND of the desktop's icon list (SysListView32), or None. It lives under Progman →
+    SHELLDLL_DefView, or under a WorkerW when a wallpaper host is present."""
+    u = ctypes.windll.user32
+    u.FindWindowW.restype = wintypes.HWND
+    u.FindWindowW.argtypes = [wintypes.LPCWSTR, wintypes.LPCWSTR]
+    u.FindWindowExW.restype = wintypes.HWND
+    u.FindWindowExW.argtypes = [wintypes.HWND, wintypes.HWND, wintypes.LPCWSTR, wintypes.LPCWSTR]
+    progman = u.FindWindowW("Progman", None)
+    defview = u.FindWindowExW(progman, None, "SHELLDLL_DefView", None) if progman else None
+    if not defview:
+        worker = None
+        while True:
+            worker = u.FindWindowExW(None, worker, "WorkerW", None)
+            if not worker:
+                break
+            dv = u.FindWindowExW(worker, None, "SHELLDLL_DefView", None)
+            if dv:
+                defview = dv
+                break
+    if not defview:
+        return None
+    return u.FindWindowExW(defview, None, "SysListView32", None) or None
+
+
+class _LVFINDINFOW(ctypes.Structure):
+    _fields_ = [("flags", wintypes.UINT), ("psz", ctypes.c_void_p),
+                ("lParam", ctypes.c_void_p), ("pt", wintypes.POINT), ("vkDirection", wintypes.UINT)]
+
+
+def set_desktop_icon_pos(name, abs_x, abs_y, retries=25, delay=0.08):
+    """Move the desktop icon for file `name` to ABSOLUTE screen point (abs_x, abs_y). Finds the item in the
+    desktop SysListView32 by name and sends LVM_SETITEMPOSITION. Cross-process: the search string + LVFINDINFOW
+    live in explorer's address space (VirtualAllocEx/WriteProcessMemory). Retries because the shell adds the
+    icon asynchronously after the file is written. No-op (returns False) if auto-arrange ignores the position
+    or anything fails — the file still landed. Pure ctypes (no pywin32)."""
+    if sys.platform != "win32":
+        return False
+    LVM_FIRST = 0x1000
+    LVM_SETITEMPOSITION = LVM_FIRST + 15
+    LVM_FINDITEMW = LVM_FIRST + 83
+    LVFI_STRING = 0x0002
+    try:
+        u = ctypes.windll.user32
+        k = ctypes.windll.kernel32
+        lv = _desktop_listview()
+        if not lv:
+            return False
+        rect = wintypes.RECT()
+        u.GetWindowRect.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.RECT)]
+        u.GetWindowRect(lv, ctypes.byref(rect))
+        cx = max(-32768, min(32767, int(abs_x) - rect.left))   # listview CLIENT coords (16-bit packed below)
+        cy = max(-32768, min(32767, int(abs_y) - rect.top))
+        pid = wintypes.DWORD()
+        u.GetWindowThreadProcessId.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
+        u.GetWindowThreadProcessId(lv, ctypes.byref(pid))
+        k.OpenProcess.restype = wintypes.HANDLE
+        k.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+        h = k.OpenProcess(0x0008 | 0x0010 | 0x0020, False, pid)  # VM_OPERATION|VM_READ|VM_WRITE
+        if not h:
+            return False
+        k.VirtualAllocEx.restype = ctypes.c_void_p
+        k.VirtualAllocEx.argtypes = [wintypes.HANDLE, ctypes.c_void_p, ctypes.c_size_t,
+                                     wintypes.DWORD, wintypes.DWORD]
+        k.VirtualFreeEx.argtypes = [wintypes.HANDLE, ctypes.c_void_p, ctypes.c_size_t, wintypes.DWORD]
+        k.WriteProcessMemory.argtypes = [wintypes.HANDLE, ctypes.c_void_p, ctypes.c_void_p,
+                                         ctypes.c_size_t, ctypes.POINTER(ctypes.c_size_t)]
+        # SendMessageTimeoutW (not SendMessageW): a plain cross-process SendMessage has NO timeout — if the
+        # desktop/explorer is busy it blocks the caller forever. ABORTIFHUNG + an 800ms cap guarantees each
+        # call returns, so this can never wedge its (daemon) thread.
+        SMTO_ABORTIFHUNG = 0x0002
+        u.SendMessageTimeoutW.restype = ctypes.c_ssize_t
+        u.SendMessageTimeoutW.argtypes = [wintypes.HWND, wintypes.UINT, ctypes.c_ssize_t, ctypes.c_ssize_t,
+                                          wintypes.UINT, wintypes.UINT, ctypes.POINTER(ctypes.c_size_t)]
+
+        def _send(msg, wp, lp):
+            res = ctypes.c_size_t(0)
+            ok = u.SendMessageTimeoutW(lv, msg, wp, lp, SMTO_ABORTIFHUNG, 800, ctypes.byref(res))
+            return ctypes.c_ssize_t(res.value).value if ok else None
+
+        wname = ctypes.create_unicode_buffer(str(name))
+        r_str = r_fi = None
+        try:
+            r_str = k.VirtualAllocEx(h, None, ctypes.sizeof(wname), 0x3000, 0x04)
+            if not r_str:
+                return False
+            k.WriteProcessMemory(h, r_str, ctypes.addressof(wname), ctypes.sizeof(wname), None)
+            fi = _LVFINDINFOW()
+            fi.flags = LVFI_STRING
+            fi.psz = r_str
+            r_fi = k.VirtualAllocEx(h, None, ctypes.sizeof(fi), 0x3000, 0x04)
+            if not r_fi:
+                return False
+            k.WriteProcessMemory(h, r_fi, ctypes.addressof(fi), ctypes.sizeof(fi), None)
+            idx = -1
+            for _ in range(max(1, int(retries))):
+                r = _send(LVM_FINDITEMW, -1, r_fi)
+                if r is not None and r != -1:
+                    idx = r
+                    break
+                time.sleep(delay)
+            if idx == -1:
+                return False
+            lparam = ((cy & 0xFFFF) << 16) | (cx & 0xFFFF)
+            _send(LVM_SETITEMPOSITION, idx, lparam)
+            return True
+        finally:
+            if r_str:
+                k.VirtualFreeEx(h, r_str, 0, 0x8000)
+            if r_fi:
+                k.VirtualFreeEx(h, r_fi, 0, 0x8000)
+            k.CloseHandle(h)
+    except Exception:
+        return False
+
+
+def clip_files_dir(gid):
+    """Temp dir holding files the viewer pasted (Ctrl+V) to put on OUR clipboard. Lives under %TEMP% so
+    it isn't mixed into Downloads; the paths must persist until the local user pastes them into Explorer."""
+    import tempfile
+    base = os.path.join(tempfile.gettempdir(), "AudiobusRemoteClip", safe_filename(gid) or "clip")
     os.makedirs(base, exist_ok=True)
     return base
 
@@ -3293,6 +3546,12 @@ class NetClient:
         self._send_files = {}
         self._clip_img_rx = None  # in-flight incoming clipboard image: {"id","buf"}
         self._clip_img_lock = None  # serializes outgoing clipboard-image sends (net loop)
+        self._clip_files = []       # local clipboard's current FILE paths (Explorer Ctrl+C), for clip-files-get
+        self._last_clip_files_key = None  # dedup the clip-files manifest we advertise
+        self._clip_paste = {}       # gid -> [received temp paths] for a viewer Ctrl+V (clip-paste group)
+        self._drop_paste = {}       # gid -> [staged temp paths] for a drag-drop batch (placed on drop-end)
+        self._print_watch_started = False  # the redirected-printer spool watcher (remote->local printing)
+        self._printer_on = False           # redirected printer currently installed (toggle state)
         # Auto-accept PIN gating (see _challenge_pin). A challenge runs inside _serve_viewer
         # while it holds the viewer lock, so a single queue/event/counter set is enough.
         self._pin_queue = None       # asyncio.Queue of a viewer's PIN answers during a
@@ -3466,6 +3725,34 @@ class NetClient:
             except Exception:
                 pass
 
+    def set_clip_files(self, paths):
+        """GUI thread: the local clipboard now holds these FILE paths (Explorer Ctrl+C), or [] when it
+        holds something else. Remember them and advertise a manifest (names+sizes) to the viewer — which
+        offers a download and fetches the bytes on demand via clip-files-get. Deduped; nothing pre-existing
+        is leaked (the poll baseline doesn't reconcile), only files copied DURING the session."""
+        paths = [p for p in (paths or []) if isinstance(p, str) and os.path.isfile(p)][:CLIP_FILES_MAX]
+        manifest = []
+        for p in paths:
+            try:
+                manifest.append({"name": os.path.basename(p), "size": os.path.getsize(p)})
+            except Exception:
+                pass
+        key = json.dumps(manifest)
+        if key == getattr(self, "_last_clip_files_key", None):
+            return
+        self._last_clip_files_key = key
+        self._clip_files = paths
+        try:
+            _click_log("[diag clip-files advertise n=%d streaming=%s]" % (len(manifest), self.streaming))
+        except Exception:
+            pass
+        if self.loop and not self.loop.is_closed():
+            try:
+                self.loop.call_soon_threadsafe(lambda: asyncio.create_task(self._send_json(
+                    {"type": "clip-files", "files": manifest, "count": len(manifest)})))
+            except Exception:
+                pass
+
     # ---- File transfer (both directions ride the JSON relay as base64 chunks) ----
 
     async def _send_json(self, obj):
@@ -3475,8 +3762,159 @@ class NetClient:
             except Exception:
                 pass
 
+    async def _finalize_drop(self, paths, pos=None):
+        """Place a finished drag-drop batch by MOVING the staged temp files into the destination: the foreground
+        Explorer FOLDER if one is open, the DESKTOP if the desktop is foreground, else the AudiobusRemote inbox
+        (a drop over a third-party app is findable there, not hidden on the desktop behind that app). A plain
+        file move — reliable, no CF_HDROP/inject/focus dependency, so the file always lands. The slow foreground
+        query runs in an executor AFTER the transfer (never in _on_file_begin, which _recv_loop awaits). For a
+        DESKTOP drop with a drop point, each icon is then nudged to that point in a DEDICATED daemon thread (so
+        SendMessageTimeout can never tie up an executor thread that file I/O — and thus _recv_loop — depends on;
+        that was dropping the input link)."""
+        try:
+            kind, dest = await self.loop.run_in_executor(None, foreground_drop_target)
+        except Exception:
+            kind, dest = (None, None)
+        folder = dest or received_files_dir()   # desktop/folder -> dest; anything else -> the inbox
+        try:
+            _click_log("[diag drop-finalize kind=%s n=%d folder=%r pos=%s]" % (kind, len(paths), folder, pos))
+        except Exception:
+            pass
+        placed = await self.loop.run_in_executor(None, self._move_dropped, paths, folder)
+        # Desktop drop with a drop point: nudge each icon to where it was dropped (absolute screen coords), in a
+        # daemon thread off the asyncio executor so it can never stall the loop / file I/O / input.
+        abs_xy = self._drop_abs_xy(pos) if placed else None
+        desk = _desktop_dir()
+        if abs_xy and desk and os.path.normcase(folder) == os.path.normcase(desk):
+            ax, ay = abs_xy
+            names = list(placed)
+            threading.Thread(
+                target=lambda: [set_desktop_icon_pos(n, ax + i * 8, ay + i * 8)
+                                for i, n in enumerate(names)],
+                daemon=True).start()
+
+    def _drop_abs_xy(self, pos):
+        """Absolute screen coords of a viewer drop point {m, x, y} (monitor pixel space), or None."""
+        if not pos:
+            return None
+        try:
+            mons = self.monitors or []
+            m = mons[int(pos.get("m", 0))] if mons else None
+            if not m:
+                return None
+            return (int(m["left"]) + int(pos.get("x", 0)), int(m["top"]) + int(pos.get("y", 0)))
+        except Exception:
+            return None
+
+    def _move_dropped(self, paths, folder):
+        """Move each staged temp file into `folder` (deduping the name), notify the UI, and return the list of
+        placed basenames (used to position desktop icons)."""
+        import shutil
+        placed = []
+        for p in paths:
+            try:
+                target = dedupe_path(folder, os.path.basename(p))
+                shutil.move(p, target)
+                base = os.path.basename(target)
+                placed.append(base)
+                self.app.post(lambda n=base, t=target: self.app.on_file_done(n, t, False, True))
+            except Exception:
+                pass
+        return placed
+
+    # ---- Printer redirection (remote -> local): watch the redirected printer's spool file ----
+    def _start_print_watcher(self):
+        """Start the daemon that watches the redirected printer's Local Port file. Idempotent; cheap when no
+        printer is installed (the file never appears)."""
+        if self._print_watch_started:
+            return
+        self._print_watch_started = True
+        threading.Thread(target=self._print_watch_loop, daemon=True).start()
+
+    def _print_watch_loop(self):
+        port = printer_port_path()
+        spool = printer_spool_dir()
+        while True:
+            time.sleep(0.7)
+            try:
+                if not os.path.exists(port) or os.path.getsize(port) <= 0:
+                    continue
+                # An atomic rename succeeds ONLY once the spooler has closed the file (job complete); while it
+                # is still being written the file is locked and os.replace raises — so this never grabs a
+                # half-written PDF.
+                uniq = os.path.join(spool, "print-%s.pdf" % os.urandom(4).hex())
+                try:
+                    os.replace(port, uniq)
+                except OSError:
+                    continue
+                if self.streaming and self.loop and not self.loop.is_closed():
+                    try:
+                        _click_log("[diag print captured -> viewer %r]" % os.path.basename(uniq))
+                    except Exception:
+                        pass
+                    self.loop.call_soon_threadsafe(
+                        lambda p=uniq: asyncio.create_task(self._send_print(p)))
+                else:
+                    try:
+                        os.remove(uniq)   # no viewer connected — discard, don't queue a stale print
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+
+    async def _send_print(self, path):
+        """Send a captured print PDF to the viewer (it downloads it), then delete the temp copy."""
+        try:
+            await self._send_file(path, purpose="print")
+        except Exception:
+            pass
+        finally:
+            try:
+                await self.loop.run_in_executor(None, os.remove, path)
+            except Exception:
+                pass
+
+    async def _handle_setup_printer(self):
+        launched = await self.loop.run_in_executor(None, _spawn_printer_install, False)
+        installed = False
+        if launched:
+            # ShellExecute "runas" returns once the UAC is accepted and the helper is LAUNCHED, not when it
+            # finishes Add-Printer — so poll for the printer instead of a fixed wait (a 3s wait reported a
+            # false "not installed" before the helper's Add-Printer completed).
+            for _ in range(20):   # up to ~20s
+                await asyncio.sleep(1.0)
+                installed = await self.loop.run_in_executor(None, _printer_installed, PRINTER_NAME)
+                if installed:
+                    break
+            if installed:
+                self._printer_on = True
+                self._start_print_watcher()
+                if not getattr(self, "_printer_atexit", False):
+                    self._printer_atexit = True
+                    import atexit
+                    atexit.register(_remove_printer_now, PRINTER_NAME, printer_port_path())  # best-effort on exit
+        try:
+            _click_log("[diag setup-printer launched=%s installed=%s]" % (launched, installed))
+        except Exception:
+            pass
+        await self._send_json({"type": "printer-status", "action": "setup", "installed": installed,
+                               "launched": launched, "name": PRINTER_NAME})
+
+    async def _handle_remove_printer(self):
+        # Removal needs NO admin (verified) -> run it directly, no UAC.
+        await self.loop.run_in_executor(None, _remove_printer_now, PRINTER_NAME, printer_port_path())
+        self._printer_on = False
+        installed = await self.loop.run_in_executor(None, _printer_installed, PRINTER_NAME)
+        try:
+            _click_log("[diag remove-printer installed=%s]" % installed)
+        except Exception:
+            pass
+        await self._send_json({"type": "printer-status", "action": "remove", "installed": installed,
+                               "name": PRINTER_NAME})
+
     async def _on_file_begin(self, msg):
-        """Viewer->host: open a destination file and start accepting chunks."""
+        """Viewer->host: open a destination file and start accepting chunks. A clip-paste file (the viewer
+        pressed Ctrl+V with files) lands in a temp dir and is collected by gid to set OUR clipboard."""
         fid = msg.get("id")
         if not isinstance(fid, str) or fid in self._recv_files:
             return
@@ -3488,16 +3926,34 @@ class NetClient:
         if size < 0 or size > FILE_MAX_BYTES:
             await self._send_json({"type": "file-cancel", "id": fid, "reason": "too-large"})
             return
+        clip = bool(msg.get("clip"))
+        drop = bool(msg.get("drop"))
+        printjob = bool(msg.get("printjob"))
+        printer = msg.get("printer") if printjob else None
+        gid = msg.get("gid") if (clip or drop) else None
         try:
-            directory = await self.loop.run_in_executor(None, received_files_dir)
+            # clip-paste AND drag-drop stage into a temp dir FAST (no foreground query here — that is slow and
+            # would drop the chunks arriving before the file is open). drop-end resolves + places the batch.
+            if clip or drop:
+                directory = await self.loop.run_in_executor(None, clip_files_dir, str(gid or ""))
+            elif printjob:
+                directory = await self.loop.run_in_executor(None, print_in_dir)   # local->remote print job
+            else:
+                directory = await self.loop.run_in_executor(None, received_files_dir)
             path = await self.loop.run_in_executor(None, dedupe_path, directory, name)
             f = await self.loop.run_in_executor(None, lambda: open(path, "wb"))
         except Exception:
             await self._send_json({"type": "file-cancel", "id": fid, "reason": "open-failed"})
             return
         base = os.path.basename(path)
-        self._recv_files[fid] = {"f": f, "path": path, "name": base, "size": size, "got": 0}
-        self.app.post(lambda: self.app.on_file_progress(base, 0, size, False))
+        # clip-paste and drops are SILENT + collected (placed/pasted at clip-paste-end / drop-end); a plain
+        # viewer->host file (Send file) is a normal received file with progress UI.
+        silent = clip or drop
+        self._recv_files[fid] = {"f": f, "path": path, "name": base, "size": size, "got": 0,
+                                 "clip": clip, "drop": drop, "gid": gid,
+                                 "printjob": printjob, "printer": printer}
+        if not silent:
+            self.app.post(lambda: self.app.on_file_progress(base, 0, size, False))
 
     async def _on_file_chunk(self, msg):
         fid = msg.get("id")
@@ -3525,8 +3981,9 @@ class NetClient:
             return
         st["got"] += len(raw)
         await self._send_json({"type": "file-ack", "id": fid, "n": msg.get("n")})
-        self.app.post(
-            lambda s=st: self.app.on_file_progress(s["name"], s["got"], s["size"], False))
+        if not (st.get("clip") or st.get("drop")):
+            self.app.post(
+                lambda s=st: self.app.on_file_progress(s["name"], s["got"], s["size"], False))
 
     async def _on_file_end(self, msg):
         fid = msg.get("id")
@@ -3537,6 +3994,33 @@ class NetClient:
             await self.loop.run_in_executor(None, st["f"].close)
         except Exception:
             pass
+        if st.get("printjob"):
+            # local->remote printing: print the uploaded file to the chosen remote printer, then (after the
+            # handler has had time to read it) delete the temp copy. Off the net loop in a daemon thread.
+            path = st["path"]
+            printer = st.get("printer") or ""
+            name = st.get("name")
+
+            def _do(p=path, pr=printer):
+                _print_file_to(p, pr)
+                time.sleep(60)   # keep the file while the handler spools it
+                try:
+                    os.remove(p)
+                except Exception:
+                    pass
+            threading.Thread(target=_do, daemon=True).start()
+            self.app.post(lambda n=name, pr=printer: self.app.on_file_done("%s → %s" % (n, pr),
+                                                                           path, False, True))
+            return
+        if st.get("drop"):
+            # A drag-drop file: collect by group; drop-end resolves the destination (desktop -> paste at the
+            # last-press point; folder/inbox -> move there) off the transfer hot path.
+            self._drop_paste.setdefault(st.get("gid"), []).append(st["path"])
+            return
+        if st.get("clip"):
+            # Part of a viewer Ctrl+V: collect by group; clip-paste-end sets the clipboard once all arrive.
+            self._clip_paste.setdefault(st.get("gid"), []).append(st["path"])
+            return
         self.app.post(lambda s=st: self.app.on_file_done(s["name"], s["path"], False, True))
 
     def _cancel_recv(self, fid, notify=True):
@@ -3566,24 +4050,34 @@ class NetClient:
             except Exception:
                 pass
 
-    async def _send_file(self, path):
+    async def _send_file(self, path, purpose=None):
+        """Stream a file host->viewer. purpose="clipget" is a background prefetch of the files the remote
+        copied (so the viewer can drag them OUT to the local Explorer/desktop via Chromium's DownloadURL):
+        it is tagged in file-begin and kept SILENT on the agent UI (it happens automatically on every remote
+        Ctrl+C, so a "sending file" toast each time would be noise)."""
         if not self.ws or not self.streaming:
             return
+        silent = (purpose == "clipget")
         name = os.path.basename(path)
         try:
             size = os.path.getsize(path)
         except Exception:
-            self.app.post(lambda: self.app.on_file_done(name, path, True, False))
+            if not silent:
+                self.app.post(lambda: self.app.on_file_done(name, path, True, False))
             return
         if size > FILE_MAX_BYTES:
-            self.app.post(lambda: self.app.on_file_done(name, path, True, False))
+            if not silent:
+                self.app.post(lambda: self.app.on_file_done(name, path, True, False))
             return
         fid = "h" + os.urandom(8).hex()
         st = {"acked": -1, "event": asyncio.Event(), "cancel": False}
         self._send_files[fid] = st
         try:
-            await self._send_json({"type": "file-begin", "id": fid, "name": name,
-                                   "size": size, "mime": ""})
+            mime = "application/pdf" if purpose == "print" else ""   # so the viewer renders a print job as a PDF
+            begin = {"type": "file-begin", "id": fid, "name": name, "size": size, "mime": mime}
+            if purpose:
+                begin["purpose"] = purpose
+            await self._send_json(begin)
             f = await self.loop.run_in_executor(None, lambda: open(path, "rb"))
             n = sent = 0
             try:
@@ -3608,18 +4102,21 @@ class NetClient:
                     await self._send_json({"type": "file-chunk", "id": fid,
                                            "n": n, "data": b64})
                     sent += len(chunk)
-                    n += 1
-                    self.app.post(
-                        lambda s=sent: self.app.on_file_progress(name, s, size, True))
+                    if not silent:
+                        self.app.post(
+                            lambda s=sent: self.app.on_file_progress(name, s, size, True))
             finally:
                 await self.loop.run_in_executor(None, f.close)
             if st["cancel"]:
-                self.app.post(lambda: self.app.on_file_done(name, path, True, False))
+                if not silent:
+                    self.app.post(lambda: self.app.on_file_done(name, path, True, False))
             else:
                 await self._send_json({"type": "file-end", "id": fid})
-                self.app.post(lambda: self.app.on_file_done(name, path, True, True))
+                if not silent:
+                    self.app.post(lambda: self.app.on_file_done(name, path, True, True))
         except Exception:
-            self.app.post(lambda: self.app.on_file_done(name, path, True, False))
+            if not silent:
+                self.app.post(lambda: self.app.on_file_done(name, path, True, False))
         finally:
             self._send_files.pop(fid, None)
 
@@ -4081,6 +4578,34 @@ class NetClient:
             sink=sink,
         )
 
+    def inject_paste_after(self, delay=0.25):
+        """After the viewer's Ctrl+V put files on OUR clipboard, inject Ctrl+V on the remote so they paste
+        into the focused window — making the viewer's single Ctrl+V complete the paste. Delayed a beat so
+        the clipboard is settled. Goes through _apply_input, so it respects the capture mode + window filter."""
+        if not self.loop or self.loop.is_closed():
+            return
+        try:
+            self.loop.call_soon_threadsafe(lambda: self.loop.call_later(delay, self._inject_ctrl_v))
+        except Exception:
+            pass
+
+    def _inject_ctrl_v(self):
+        fg = getattr(self.app, "_agent_foreground", None)
+        try:
+            _click_log("[diag inject-ctrl-v streaming=%s agent_fg=%s wsock=%s raw=%s]"
+                       % (self.streaming, fg, self._input_wsock is not None,
+                          getattr(self.args, "raw_capture", False)))
+        except Exception:
+            pass
+        for ev in ({"t": "kd", "key": "Control", "code": "ControlLeft"},
+                   {"t": "kd", "key": "v", "code": "KeyV"},
+                   {"t": "ku", "key": "v", "code": "KeyV"},
+                   {"t": "ku", "key": "Control", "code": "ControlLeft"}):
+            try:
+                self._apply_input(ev)
+            except Exception:
+                pass
+
     async def _handle_msg(self, ws, msg):
         """Dispatch one decoded viewer/server message. Called inside _recv_loop's guard."""
         if "t" in msg:
@@ -4176,6 +4701,61 @@ class NetClient:
                 png = bytes(rx["buf"])
                 if png:
                     self.app.post(lambda p=png: self.app.set_remote_clipboard_image(p))
+        elif mtype == "clip-files-get":
+            # The viewer asked to download the files currently on OUR clipboard (remote Ctrl+C).
+            try:
+                _click_log("[diag clip-files-get streaming=%s n=%d]" % (self.streaming, len(self._clip_files)))
+            except Exception:
+                pass
+            if self.streaming and self._clip_files:
+                paths = list(self._clip_files)
+
+                async def _send_all():
+                    for p in paths:
+                        if not self.streaming:
+                            break
+                        # Tagged clipget: the viewer keeps the bytes as blobs so it can drag them OUT to the
+                        # local Explorer/desktop (DownloadURL), and saves from those blobs when you download.
+                        await self._send_file(p, purpose="clipget")
+                asyncio.create_task(_send_all())
+        elif mtype == "clip-paste-end":
+            # The viewer pressed Ctrl+V with files; all of this group's files have arrived — put them on
+            # OUR clipboard so the local user can Ctrl+V them into Explorer.
+            gid = msg.get("gid")
+            paths = self._clip_paste.pop(gid, [])
+            try:
+                _click_log("[diag clip-paste-end gid=%s n=%d streaming=%s]" % (gid, len(paths), self.streaming))
+            except Exception:
+                pass
+            if self.streaming and paths:
+                self.app.post(lambda ps=paths: self.app.set_clipboard_files(ps))
+        elif mtype == "drop-end":
+            # A drag-drop batch finished (all files staged in temp). Resolve the destination + place them OFF
+            # the transfer hot path: desktop -> paste at the last-press point; folder/inbox -> move there.
+            gid = msg.get("gid")
+            paths = self._drop_paste.pop(gid, [])
+            pos = msg.get("pos") if isinstance(msg.get("pos"), dict) else None
+            try:
+                _click_log("[diag drop-end gid=%s n=%d streaming=%s]" % (gid, len(paths), self.streaming))
+            except Exception:
+                pass
+            if self.streaming and paths:
+                asyncio.create_task(self._finalize_drop(paths, pos))
+        elif mtype == "setup-printer":
+            # Remote->local printing: install the redirected "Microsoft Print to PDF" printer (ONE UAC), then
+            # confirm it exists and start the spool watcher. Reply with the result so the viewer can guide the user.
+            if self.streaming:
+                asyncio.create_task(self._handle_setup_printer())
+        elif mtype == "remove-printer":
+            if self.streaming:
+                asyncio.create_task(self._handle_remove_printer())
+        elif mtype == "list-printers":
+            # local->remote printing: send the remote's printers so the viewer can pick one.
+            if self.streaming:
+                async def _send_printers():
+                    names = await self.loop.run_in_executor(None, list_printers)
+                    await self._send_json({"type": "printers", "printers": names})
+                asyncio.create_task(_send_printers())
         elif mtype == "file-begin":
             # Viewer is sending us a file. Same gate as input: approved + streaming.
             if self.streaming:
@@ -4218,6 +4798,12 @@ class NetClient:
         if self._left_reported:
             return
         self._left_reported = True
+        # The connection closed: tear down the redirected printer so it never lingers on the remote (removal
+        # needs no admin, so no UAC). A daemon thread keeps the spooler query off this path.
+        if getattr(self, "_printer_on", False):
+            self._printer_on = False
+            threading.Thread(target=lambda: _remove_printer_now(PRINTER_NAME, printer_port_path()),
+                             daemon=True).start()
         self.app.post(lambda: self.app.on_peer_left(local))
 
     async def _prespawn_video_child(self):
@@ -4377,10 +4963,11 @@ class NetClient:
         self.streaming = True
         self._reneg_attempts = 0           # fresh session: full media self-heal budget
         self._wheel_accum["x"] = self._wheel_accum["y"] = 0.0  # no carried scroll fraction
+        self._start_print_watcher()        # catch redirected-printer jobs (remote->local printing)
         # Advertise optional capabilities so a newer viewer enables its clipboard/file UI
         # only against an agent that supports them (older agents just ignore these types).
         try:
-            await ws.send(json.dumps({"type": "caps", "clip": True, "file": True}))
+            await ws.send(json.dumps({"type": "caps", "clip": True, "file": True, "printer": True}))
         except Exception:
             pass
         # Start the video SOURCE, then open the WebRTC connection. Preferred: the child
@@ -6135,6 +6722,29 @@ class App:
             pass
         self._clip_seq = _clipboard_seq()
 
+    def set_clipboard_files(self, paths):
+        """Apply FILE paths the viewer pasted (Ctrl+V) to this machine's clipboard as CF_HDROP, so the
+        local user can Ctrl+V them into Explorer. Record the new sequence number so the poll doesn't echo
+        our own write back to the viewer as a 'remote has files' offer."""
+        ok = False
+        try:
+            ok = _set_clipboard_files(paths)
+        except Exception as e:
+            try:
+                _click_log("[diag set_clipboard_files raised %r]" % (e,))
+            except Exception:
+                pass
+        try:
+            _click_log("[diag set_clipboard_files n=%d ok=%s]" % (len(paths or []), ok))
+        except Exception:
+            pass
+        self._clip_seq = _clipboard_seq()
+        if ok and self.client:   # make the viewer's single Ctrl+V actually paste on the remote
+            try:
+                self.client.inject_paste_after()
+            except Exception:
+                pass
+
     def _clip_tick(self):
         """Watch the OS clipboard on the GUI thread and push local changes to the viewer.
         We gate on the clipboard sequence number (cheap) and only inspect the contents when
@@ -6157,27 +6767,36 @@ class App:
         self._clip_after = self.root.after(CLIP_POLL_MS, self._clip_tick)
 
     def _reconcile_clipboard(self):
-        """The clipboard changed locally — send its text, or else its image, to the viewer."""
-        text = None
+        """The clipboard changed locally — send its FILE list (Explorer Ctrl+C), image, or text to the
+        viewer. Check grabclipboard() FIRST so a file copy is detected even if a text form is also present;
+        set_clip_files([]) clears a stale file offer for the text/image cases."""
         try:
-            text = self.root.clipboard_get()  # TclError if empty or non-text (e.g. an image)
+            grab = ImageGrab.grabclipboard()  # PIL image, a list of file paths, or None
         except Exception:
-            text = None
-        if isinstance(text, str) and text != "":
-            if len(text.encode("utf-8")) <= CLIP_MAX_BYTES:
-                self.client.send_clip(text)
+            grab = None
+        if isinstance(grab, list) and grab:
+            self.client.set_clip_files(grab)   # Explorer file copy (CF_HDROP) -> offer them to the viewer
             return
-        try:
-            img = ImageGrab.grabclipboard()  # PIL image, a list of file paths, or None
-        except Exception:
-            img = None
-        if isinstance(img, Image.Image):
+        if isinstance(grab, Image.Image):
+            self.client.set_clip_files([])
             try:
-                png = _encode_png(img)
+                png = _encode_png(grab)
             except Exception:
                 png = None
             if png and len(png) <= CLIP_IMG_MAX_BYTES:
                 self.client.send_clip_image(png)
+            return
+        text = None
+        try:
+            text = self.root.clipboard_get()  # TclError if empty or non-text
+        except Exception:
+            text = None
+        if isinstance(text, str) and text != "":
+            self.client.set_clip_files([])
+            if len(text.encode("utf-8")) <= CLIP_MAX_BYTES:
+                self.client.send_clip(text)
+            return
+        self.client.set_clip_files([])
 
     def send_file_click(self):
         """Host->viewer: pick a local file and stream it to the connected viewer."""
@@ -6646,6 +7265,10 @@ def parse_args(argv):
     # "runas" from the non-elevated encode child) that only runs the admin `sc` steps to install the
     # SYSTEM cap-worker service, so the agent itself never restarts. Not for direct use.
     p.add_argument("--install-capsvc", dest="install_capsvc", action="store_true", help=argparse.SUPPRESS)
+    p.add_argument("--install-printer", dest="install_printer", action="store_true", help=argparse.SUPPRESS)
+    p.add_argument("--printer-remove", dest="printer_remove", action="store_true", help=argparse.SUPPRESS)
+    p.add_argument("--printer-port", dest="printer_port", default=None, help=argparse.SUPPRESS)
+    p.add_argument("--printer-name", dest="printer_name", default=None, help=argparse.SUPPRESS)
     p.add_argument("--raw-capture", dest="raw_capture", action="store_true", help=argparse.SUPPRESS)
     p.add_argument("--raw-system", dest="raw_system", action="store_true", help=argparse.SUPPRESS)
     # Internal: the cap-worker entry point. GDI-grabs every monitor and ships RAW BGRX over loopback to
@@ -7284,6 +7907,203 @@ def _install_capsvc(capport, svc_name, log_path):
     _secure_log("=== install-capsvc done ===")
 
 
+# --------------------------------------------------------------------------- #
+# Printer redirection (remote -> local): a "Microsoft Print to PDF" printer on the remote, bound to a Local
+# Port = a file the agent watches. Remote apps print to it -> a PDF is written to that file with NO save
+# prompt (verified); the agent captures it and streams it to the viewer, which downloads it to print locally.
+# --------------------------------------------------------------------------- #
+PRINTER_NAME = "Audiobus Remote (to your PC)"
+
+
+def printer_spool_dir():
+    import tempfile
+    d = os.path.join(tempfile.gettempdir(), "AudiobusRemotePrint")
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
+def printer_port_path():
+    """The Local Port file the redirected printer writes each PDF to (overwritten per job; the watcher grabs
+    it the instant the spooler releases the lock)."""
+    return os.path.join(printer_spool_dir(), "spool.pdf")
+
+
+def _printer_log(msg):
+    try:
+        with open(os.path.join(os.path.expanduser("~"), "audiobus-print.log"), "a", encoding="utf-8") as f:
+            f.write("%s %s\n" % (time.strftime("%H:%M:%S"), msg))
+    except Exception:
+        pass
+
+
+def _printer_installed(name):
+    """True if a printer named `name` exists (non-elevated Get-Printer check)."""
+    if sys.platform != "win32":
+        return False
+    try:
+        ps = "if (Get-Printer -Name '%s' -ErrorAction SilentlyContinue) { 'yes' }" % name.replace("'", "''")
+        out = subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", ps],
+                             capture_output=True, text=True, timeout=12,
+                             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0)).stdout.strip()
+        return out.strip().lower() == "yes"
+    except Exception:
+        return False
+
+
+def _install_printer(port_path, name, remove=False):
+    """Elevated short-lived helper (ShellExecute "runas" target, --install-printer). Adds (or removes) a
+    'Microsoft Print to PDF' printer bound to a Local Port = port_path (a file). Runs the admin-needing
+    Add-PrinterPort/Add-Printer so the agent stays non-elevated. ONE UAC."""
+    name = name or PRINTER_NAME
+    port_path = port_path or printer_port_path()
+    pn = name.replace("'", "''")
+    pp = port_path.replace("'", "''")
+    if remove:
+        ps = ("Remove-Printer -Name '%s' -ErrorAction SilentlyContinue; "
+              "Remove-PrinterPort -Name '%s' -ErrorAction SilentlyContinue" % (pn, pp))
+    else:
+        # Recreate idempotently. The Local Port named as a file path makes MS Print to PDF write there
+        # silently (no save dialog) — verified on this platform.
+        ps = ("Remove-Printer -Name '%s' -ErrorAction SilentlyContinue; "
+              "Remove-PrinterPort -Name '%s' -ErrorAction SilentlyContinue; "
+              "Add-PrinterPort -Name '%s'; "
+              "Add-Printer -Name '%s' -DriverName 'Microsoft Print to PDF' -PortName '%s'"
+              % (pn, pp, pp, pn, pp))
+    _printer_log("=== install-printer remove=%s name=%s port=%s ===" % (remove, name, port_path))
+    try:
+        rc = subprocess.call(["powershell", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+                              "-Command", ps], creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        _printer_log("install-printer rc=%s" % rc)
+    except Exception as e:
+        _printer_log("install-printer raised %r" % (e,))
+
+
+def _spawn_printer_install(remove=False):
+    """Non-elevated: launch the elevated --install-printer helper via ShellExecute "runas" (ONE UAC).
+    Returns True if the helper was launched (UAC accepted), else False."""
+    if sys.platform != "win32":
+        return False
+    port = printer_port_path()
+    name = PRINTER_NAME
+    exe = sys.executable
+    flag = "--install-printer" + (" --printer-remove" if remove else "")
+    if getattr(sys, "frozen", False):
+        params = '%s --printer-port "%s" --printer-name "%s"' % (flag, port, name)
+    else:
+        params = '"%s" %s --printer-port "%s" --printer-name "%s"' % (os.path.abspath(__file__), flag, port, name)
+    try:
+        shell32 = ctypes.windll.shell32
+        shell32.ShellExecuteW.restype = ctypes.c_void_p
+        shell32.ShellExecuteW.argtypes = [wintypes.HWND, wintypes.LPCWSTR, wintypes.LPCWSTR,
+                                          wintypes.LPCWSTR, wintypes.LPCWSTR, ctypes.c_int]
+        rc = shell32.ShellExecuteW(None, "runas", exe, params, None, 0)  # SW_HIDE
+        return rc is not None and int(rc) > 32
+    except Exception as e:
+        _printer_log("spawn-printer-install raised %r" % (e,))
+        return False
+
+
+def _remove_printer_now(name=None, port=None):
+    """Remove the redirected printer + its port. Works NON-elevated (verified), so it runs with NO UAC on
+    toggle-off, on viewer departure, and at exit — the printer never lingers after a session."""
+    if sys.platform != "win32":
+        return
+    name = (name or PRINTER_NAME).replace("'", "''")
+    port = (port or printer_port_path()).replace("'", "''")
+    ps = ("Remove-Printer -Name '%s' -ErrorAction SilentlyContinue; "
+          "Remove-PrinterPort -Name '%s' -ErrorAction SilentlyContinue" % (name, port))
+    try:
+        subprocess.call(["powershell", "-NoProfile", "-NonInteractive", "-Command", ps],
+                        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        _printer_log("remove-printer-now name=%s" % name)
+    except Exception as e:
+        _printer_log("remove-printer-now raised %r" % (e,))
+
+
+def print_in_dir():
+    """Temp dir for files the viewer sends to print on a REMOTE printer (local->remote)."""
+    import tempfile
+    d = os.path.join(tempfile.gettempdir(), "AudiobusRemotePrintIn")
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
+def list_printers():
+    """Names of the remote's PHYSICAL printers, so the viewer can pick one (local->remote printing). Drops
+    the redirected 'to your PC' printer AND every virtual/software printer: printing a file THROUGH a
+    virtual PDF/XPS printer (Microsoft Print to PDF, PDF24, XPS, OneNote) produces a corrupt output file,
+    because SumatraPDF -silent + those file-writing drivers do not hand off a clean file. The feature is
+    for the remote's real printers, so those targets are filtered out. Virtual printers are identified by
+    their ports (PORTPROMPT:, SHRFAX:, pipe/nul) and by known names; physical printers use IP/WSD/LPT/USB
+    ports and pass through."""
+    if sys.platform != "win32":
+        return []
+    try:
+        ps = ("Get-Printer | Where-Object { "
+              "$_.Name -ne '%s' -and $_.Name -ne 'Fax' -and "
+              "$_.PortName -ne 'PORTPROMPT:' -and $_.PortName -ne 'SHRFAX:' -and "
+              "$_.PortName -notlike '*pipe*' -and $_.PortName -notlike '*nul*' -and "
+              "$_.Name -notlike '*Print to PDF*' -and $_.Name -notlike '*XPS Document Writer*' -and "
+              "$_.Name -notlike '*OneNote*' -and $_.Name -notlike '*PDF24*' "
+              "} | Select-Object -ExpandProperty Name" % PRINTER_NAME.replace("'", "''"))
+        out = subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", ps],
+                             capture_output=True, text=True, timeout=12,
+                             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0)).stdout
+        return [ln.strip() for ln in out.splitlines() if ln.strip()]
+    except Exception:
+        return []
+
+
+# File types the bundled SumatraPDF can render + print silently (-print-to). Covers the viewer's
+# stated scope (PDF + images). Anything else falls back to the shell "printto" verb.
+_SUMATRA_EXTS = {".pdf", ".xps", ".oxps", ".cbz", ".cbr", ".cb7", ".cbt",
+                 ".png", ".jpg", ".jpeg", ".gif", ".tif", ".tiff", ".bmp", ".webp", ".tga", ".jxr"}
+
+
+def _sumatra_path():
+    """Bundled SumatraPDF.exe (in _MEIPASS when frozen, else next to this script)."""
+    base = getattr(sys, "_MEIPASS", None) or os.path.dirname(os.path.abspath(__file__))
+    return os.path.join(base, "SumatraPDF.exe")
+
+
+def _print_file_to(path, printer):
+    """Silently print `path` to the named printer. PDFs and images go through the BUNDLED SumatraPDF
+    (`-print-to <printer> -silent`), which renders them itself — it does NOT rely on a shell
+    "print"/"printto" verb, which the default Win11 PDF handler (MSEdgePDF) does not register (that is
+    why the old printto path returned rc=31 SE_ERR_NOASSOC and nothing printed). Other file types fall
+    back to the shell "printto" verb as a last resort. Non-elevated, user session. Returns True on
+    apparent success."""
+    if sys.platform != "win32":
+        return False
+    ext = os.path.splitext(path)[1].lower()
+    smp = _sumatra_path()
+    if ext in _SUMATRA_EXTS and os.path.exists(smp):
+        try:
+            # subprocess builds the command line, so the printer name (which may contain spaces) is
+            # passed as a single argv element — no manual quoting. CREATE_NO_WINDOW: no console flash.
+            rc = subprocess.run([smp, "-print-to", printer, "-silent", "-exit-when-done", path],
+                                timeout=180,
+                                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0)).returncode
+            _printer_log("sumatra print rc=%s printer=%s file=%s" % (rc, printer, os.path.basename(path)))
+            if rc == 0:
+                return True
+            # non-zero: fall through to the shell verb as a last resort
+        except Exception as e:
+            _printer_log("sumatra print raised %r" % (e,))
+            # fall through to the shell verb as a last resort
+    try:
+        shell32 = ctypes.windll.shell32
+        shell32.ShellExecuteW.restype = ctypes.c_void_p
+        shell32.ShellExecuteW.argtypes = [wintypes.HWND, wintypes.LPCWSTR, wintypes.LPCWSTR,
+                                          wintypes.LPCWSTR, wintypes.LPCWSTR, ctypes.c_int]
+        rc = shell32.ShellExecuteW(None, "printto", path, '"%s"' % printer, None, 0)  # SW_HIDE
+        _printer_log("printto(fallback) rc=%s printer=%s file=%s" % (rc, printer, os.path.basename(path)))
+        return rc is not None and int(rc) > 32
+    except Exception as e:
+        _printer_log("printto raised %r" % (e,))
+        return False
+
+
 def run_selfcheck(out_path):
     """Headless check that this build can grab the screen and run the full
     capture -> VP8 encode -> decode path over a loopback peer connection (no GUI).
@@ -7691,6 +8511,11 @@ def main(argv=None):
     if getattr(args, "install_capsvc", False):
         _install_capsvc(args.capport, getattr(args, "secure_svcname", None),
                         getattr(args, "secure_log", None))
+        return
+    # On-demand printer-redirection helper: elevated, short-lived, adds/removes the redirected PDF printer.
+    if getattr(args, "install_printer", False):
+        _install_printer(getattr(args, "printer_port", None), getattr(args, "printer_name", None),
+                         remove=getattr(args, "printer_remove", False))
         return
     # Remove leftover PyInstaller _MEI* temp dirs from prior runs (we os._exit to dodge the
     # onefile cleanup dialog, so they linger — see __main__ / _reap_stale_meipass).

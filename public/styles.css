@@ -226,6 +226,10 @@ pre code { background: none; padding: 0; }
    granted), so its state is obvious at a glance; outline when not. Click toggles elevate/de-elevate. */
 .btn.on { background: var(--brand); border-color: var(--brand); color: var(--brand-ink); }
 .btn.on:hover { opacity: 0.92; border-color: var(--brand); }
+/* Elevate toggle mid-swap (clicked, waiting for the agent to confirm the new mode): dim + pulse so the
+   delay — mostly the remote UAC prompt on elevate — reads as "working", not "stuck". */
+.btn.pending { opacity: 0.55; animation: btn-pulse 1s ease-in-out infinite; }
+@keyframes btn-pulse { 50% { opacity: 0.85; } }
 .btn.big { padding: 14px 22px; font-size: 16px; }
 
 /* Button icons: a crisp inline SVG attached to the label (and shown alone in the
@@ -957,3 +961,21 @@ body.app {
   font: inherit; white-space: nowrap;
 }
 .keys-item:hover, .keys-item:focus-visible { background: var(--bg-accent); outline: none; }
+
+/* Remote-clipboard file popover: a hint line + one chip per copied file (draggable OUT to the local OS). */
+.clip-hint { padding: 4px 12px 8px; color: var(--muted); font-size: 12px; white-space: normal; max-width: 260px; }
+.keys-menu .clip-file { max-width: 260px; overflow: hidden; text-overflow: ellipsis; }
+.keys-menu .clip-file[draggable="true"] { cursor: grab; }
+.keys-menu .clip-file[draggable="true"]:active { cursor: grabbing; }
+.keys-menu .clip-file.pending { color: var(--muted); cursor: default; }
+.keys-menu .clip-file.pending:hover { background: transparent; }
+
+/* Remote-printer picker: a machine can have many printers, so give it a fixed width
+   and cap the height, scrolling the overflow instead of growing off-screen. */
+#printRemoteMenu { width: 248px; max-height: min(320px, 60vh); overflow-y: auto; }
+/* Printer names can be long: let them WRAP to full width instead of being clipped with
+   an ellipsis (overriding the single-line .keys-item/.clip-file rules for this menu). */
+#printRemoteMenu .clip-file {
+  white-space: normal; overflow: visible; text-overflow: clip;
+  max-width: none; overflow-wrap: anywhere;
+}

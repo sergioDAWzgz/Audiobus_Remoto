@@ -70,6 +70,7 @@ Invoke-OrThrow { & $py -m PyInstaller `
     --name audiobus-agent `
     --windowed `
     --add-binary "openh264.dll;." `
+    --add-binary "SumatraPDF.exe;." `
     --icon logo.ico `
     --version-file version_info.txt `
     --collect-all av `
@@ -83,20 +84,14 @@ $exe = Join-Path $PSScriptRoot "dist/audiobus-agent.exe"
 if (Test-Path $exe) {
     Write-Host ""
     Write-Host "Built: $exe"
-    # The WebRTC exe is ~60MB (PyAV/ffmpeg), over the 25 MiB Workers static-asset
-    # limit, so it is served from R2 instead of /public. Upload it to the bucket
-    # (one-time: enable R2, then `wrangler r2 bucket create audiobus-remote-downloads`).
-    # --remote is REQUIRED: wrangler's r2 object commands default to a LOCAL
-    # simulation, so without it the exe lands in .wrangler/state and the deployed
-    # Worker (which reads the real bucket) serves a 404.
-    Write-Host "Uploading to R2 bucket 'audiobus-remote-downloads' (remote)..."
-    npx wrangler r2 object put audiobus-remote-downloads/audiobus-agent.exe --file $exe --remote
-    if ($LASTEXITCODE -eq 0) {
-        Write-Host "Uploaded. Served at /downloads/audiobus-agent.exe (DOWNLOADS binding)."
-    } else {
-        Write-Warning "R2 upload failed (is R2 enabled and the bucket created?). Run manually:"
-        Write-Host "  npx wrangler r2 object put audiobus-remote-downloads/audiobus-agent.exe --file `"$exe`" --remote"
-    }
+    # The agent exe is distributed via GitHub Releases (no longer R2). The /share download
+    # link points at:
+    #   https://github.com/sergioDAWzgz/Audiobus_Remoto/releases/download/<tag>/audiobus-agent.exe
+    # Attach this build to the matching release (pin the href to the same <tag> when you cut a
+    # new one, since the repo also ships -jpeg releases and GitHub's "latest" is repo-wide):
+    Write-Host ""
+    Write-Host "Next: attach this build to the GitHub release the /share link points at:"
+    Write-Host "  gh release upload <tag>-webrtc `"$exe`" --clobber"
 } else {
     Write-Error "Build failed: $exe not found."
 }

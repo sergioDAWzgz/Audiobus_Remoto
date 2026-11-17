@@ -1,0 +1,19 @@
+SumatraPDF.exe bundled with this agent
+======================================
+
+File:     SumatraPDF.exe
+Product:  SumatraPDF 3.5.2 (64-bit portable), unmodified
+Author:   Krzysztof Kowalczyk and contributors
+License:  GPLv3 (with additional permissions for some bundled components)
+Source:   https://github.com/sumatrapdfreader/sumatrapdf
+Homepage: https://www.sumatrapdfreader.org
+
+This agent ships the unmodified SumatraPDF portable binary and invokes it as a
+separate process (CreateProcess / subprocess) to silently render and print PDF
+and image files to a chosen printer:
+
+    SumatraPDF.exe -print-to "<printer>" -silent -exit-when-done <file>
+
+The agent does not link against SumatraPDF; it is mere aggregation. Per GPLv3,
+the SumatraPDF source is available at the URL above. Keep this notice with any
+distribution of the agent that includes SumatraPDF.exe.
