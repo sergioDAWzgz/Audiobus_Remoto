@@ -704,7 +704,7 @@ _GUI_DPI_LOGGED = False   # one-time GUI-thread DPI-awareness + raw-rect diagnos
 _SHOT_SAVED = False       # one-time: save an mss screenshot on the first blocked click
 
 
-_AGENT_BUILD = "2026-11-16-printer7"  # printer T2 (local->remote): SumatraPDF print + list only PHYSICAL printers (virtual PDF/XPS/OneNote targets produce corrupt output, so they are hidden)
+_AGENT_BUILD = "2026-11-20-unattelev15"  # de-elevated + elevated window regains foreground = globally input-trapped (UIPI, can't minimize from non-elevated) -> honest whole-screen forbidden cursor; re-elevate to recover
 
 
 def _save_debug_shot(x, y):
@@ -968,6 +968,23 @@ def apply_event(ev, monitors=None, window_rects=None, blocked=None,
                 sink(ev)      # the worker (SYSTEM in T3) can SendSAS; main often can't
                 return
             _send_sas()   # Ctrl+Alt+Del (sent as a dedicated event; SendInput can't do it)
+        elif t == "minimize-fg":
+            # De-elevate helper: minimize the elevated FOREGROUND window. Forwarded to the SYSTEM worker
+            # (sink) so it runs ELEVATED and on the input-desktop-attached input thread — the reliable
+            # path where GetForegroundWindow sees the user's foreground (the capport ctl path did not
+            # deliver). On the non-elevated main (sink=None here) it would be a UIPI no-op.
+            if sink is not None:
+                sink(ev)
+                return
+            try:
+                u = ctypes.windll.user32
+                u.GetForegroundWindow.restype = ctypes.c_void_p
+                hwnd = u.GetForegroundWindow()
+                if hwnd:
+                    u.ShowWindow(ctypes.c_void_p(hwnd), 11)   # SW_FORCEMINIMIZE
+                _worker_log("[diag input-path minimize-fg hwnd=%s]" % hwnd)
+            except Exception:
+                pass
     except Exception:
         pass  # never let a bad event kill the stream
 
@@ -1448,6 +1465,15 @@ class VideoChild:
         notify the LOCAL agent UI so the remote user sees the privilege change (esp. when it DROPS)."""
         # When elevated (SYSTEM worker) input reaches elevated windows, so don't flag input as blocked.
         self.client._capture_elevated = bool(system)
+        # T3: remember which client owns this elevation (its stable vtok + socket vid) so a DIFFERENT
+        # client admitted later does not inherit it, while the owner's own churn (stall/reconnect) keeps
+        # it. Cleared when capture de-elevates.
+        if system:
+            self.client._elev_owner_vtok = getattr(self.client, "_approved_vtok", None)
+            self.client._elev_owner_vid = getattr(self.client, "_approved_vid", None)
+        else:
+            self.client._elev_owner_vtok = None
+            self.client._elev_owner_vid = None
         try:
             asyncio.ensure_future(self.client._send_json({"type": "capture-mode", "elevated": bool(system)}))
         except Exception:
@@ -1559,18 +1585,20 @@ class VideoChild:
         which re-tunes that monitor's encoder (only when --bitrate is unset)."""
         self._send_ctl({"type": "bitrate", "mi": int(mi), "bps": int(bps)})
 
-    def elevate_capture(self):
+    def elevate_capture(self, silent=False):
         """On-demand elevation: ask the LIVE encode child to swap its USER cap-worker for a SYSTEM
-        one (secure desktop + elevated input) WITHOUT restarting the agent. The child raises ONE UAC
-        (its short-lived service installer); this process, the relay session and consent all stay up.
-        Idempotent — a no-op in the child once it's already on the SYSTEM worker."""
-        self._send_ctl({"type": "elevate-capture"})
+        one (secure desktop + elevated input) WITHOUT restarting the agent. Normally the child raises
+        ONE UAC (its short-lived service installer); with silent=True (an unattended PIN session whose
+        persistent cap service is armed) it elevates via that service with NO UAC and NO dialog. This
+        process, the relay session and consent all stay up. Idempotent once already on the SYSTEM worker."""
+        self._send_ctl({"type": "elevate-capture", "silent": bool(silent)})
 
-    def deelevate_capture(self):
+    def deelevate_capture(self, minimize_fg=False):
         """Drop on-demand elevation: ask the LIVE encode child to swap its SYSTEM cap-worker back to a
         USER one (normal desktop, no secure desktop). Dropping privilege is safe, so this needs NO local
-        dialog and NO UAC. Idempotent — a no-op once already on the USER worker."""
-        self._send_ctl({"type": "deelevate-capture"})
+        dialog and NO UAC. With minimize_fg (an elevated window is in the foreground), the SYSTEM worker
+        minimizes it FIRST so the incoming non-elevated worker is not UIPI-trapped. Idempotent."""
+        self._send_ctl({"type": "deelevate-capture", "minimize_fg": bool(minimize_fg)})
 
     def shutdown(self):
         """Terminate the child for good (agent exit). BLOCKS briefly (run in an executor).
@@ -1977,10 +2005,11 @@ class RawCaptureClient:
     The worker is kept across viewer sessions (like the pre-spawned encode child), so __exit__
     is a no-op; shutdown() ends it for good."""
 
-    def __init__(self, system=False):
+    def __init__(self, system=False, silent=False):
         self.sock = None
         self.proc = None             # the worker process (normal mode); None when SYSTEM-spawned
         self.system = system         # T3: spawn the worker as SYSTEM via the service (secure desktop)
+        self.silent = silent         # unattended PIN session: elevate via the persistent svc (no UAC)
         self._svc = None             # the one-shot service name used to spawn a SYSTEM worker
         self._lsock = None
         self._latest = {}            # mi -> _RawShot (most recent grab the worker shipped)
@@ -1998,7 +2027,7 @@ class RawCaptureClient:
             self._lsock = ls
             port = ls.getsockname()[1]
             if self.system:
-                self._svc = _spawn_cap_worker_as_system(port)
+                self._svc = _spawn_cap_worker_as_system(port, self.silent)
                 if not self._svc:
                     self.shutdown()
                     return False
@@ -2067,6 +2096,11 @@ class RawCaptureClient:
 
     def stop_capture(self):
         self._send({"type": "stop-capture"})
+
+    def minimize_foreground(self):
+        """Ask the worker (SYSTEM) to minimize the elevated foreground window — used right before a
+        de-elevate so the incoming non-elevated worker isn't UIPI-trapped."""
+        self._send({"type": "minimize-fg"})
 
     def _send(self, msg):
         s = self.sock
@@ -2564,17 +2598,56 @@ def run_cap_worker(port):
             except Exception:
                 pass
             state["input_sock"] = None
+            # SELF-HEAL: the input link dropped but this worker is still alive (not being retired) -> the
+            # main will have fallen back to LOCAL (non-elevated) injection, which can't drive the secure
+            # desktop ("click doesn't work in UAC"). Reconnect so input keeps reaching THIS worker. The
+            # 0.5s wait lets a genuine retire (the parent's stop ctl / closed capport) set state["stop"]
+            # first, so a worker being swapped OUT never steals the input link back from its replacement.
+            if not state["stop"]:
+                time.sleep(0.5)
+                if not state["stop"] and state["input_sock"] is None:
+                    _worker_log("[diag cap-worker input link self-heal reconnect pid=%s]" % os.getpid())
+                    _connect_input(state.get("input_port_saved"))
 
     def _connect_input(ip):
-        if not ip or state["input_sock"] is not None:
+        if state["input_sock"] is not None or state.get("input_connecting"):
             return
-        try:
-            isock = socket.create_connection(("127.0.0.1", int(ip)), timeout=10)
-            isock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-            state["input_sock"] = isock
-            threading.Thread(target=_input_reader, args=(isock,), daemon=True).start()
-        except Exception:
-            pass
+        if not ip:
+            _worker_log("[diag cap-worker input NO PORT in start ctl pid=%s]" % os.getpid())
+            return
+        state["input_connecting"] = True
+        state["input_port_saved"] = ip     # remembered so _input_reader can self-heal the link on a drop
+        def _do():
+            # RETRY (threaded, so ctl_reader isn't blocked): the loopback connect to the main's input
+            # listener can transiently fail while the main re-arms across an elevation swap. The old
+            # one-shot attempt gave up FOREVER on any miss -> a re-elevated worker never got its input
+            # link -> the main forwarded to the dead old socket -> fell back to LOCAL (non-elevated)
+            # injection -> "elevation input bugged after a couple of elevate/de-elevate cycles".
+            last = None
+            try:
+                for _i in range(20):
+                    if state["stop"] or state["input_sock"] is not None:
+                        return
+                    try:
+                        isock = socket.create_connection(("127.0.0.1", int(ip)), timeout=3)
+                        isock.settimeout(4.0)    # recv timeout. The main heartbeats this link ~every 1s, so a
+                        #                          recv that sees NOTHING for 4s means the link is truly DEAD
+                        #                          (half-open / aborted — which a main-side close() can't
+                        #                          signal) -> the reader breaks -> self-heal reconnect. The
+                        #                          heartbeat is why an idle user does NOT false-trip this.
+                        isock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+                        state["input_sock"] = isock
+                        threading.Thread(target=_input_reader, args=(isock,), daemon=True).start()
+                        _worker_log("[diag cap-worker input connected port=%s pid=%s]" % (ip, os.getpid()))
+                        return
+                    except Exception as e:
+                        last = e
+                        time.sleep(0.5)
+                _worker_log("[diag cap-worker input CONNECT FAILED port=%s pid=%s err=%r]"
+                            % (ip, os.getpid(), last))
+            finally:
+                state["input_connecting"] = False
+        threading.Thread(target=_do, daemon=True).start()
 
     def ctl_reader():
         while not state["stop"]:
@@ -2603,6 +2676,26 @@ def run_cap_worker(port):
                 state["wanted"] = set(msg.get("set") or [m["i"] for m in state["monitors"]])
             elif typ == "stop-capture":
                 state["capturing"] = False
+            elif typ == "minimize-fg":
+                # De-elevate is about to drop us to a non-elevated worker: minimize the elevated FOREGROUND
+                # window NOW (while we're still SYSTEM and can affect it), so the incoming USER worker is
+                # not UIPI-trapped (a higher-integrity foreground window blocks ALL non-elevated input).
+                try:
+                    u = ctypes.windll.user32
+                    u.GetForegroundWindow.restype = ctypes.c_void_p
+                    # Attach THIS thread to the live input desktop first — GetForegroundWindow is
+                    # desktop-relative, and this ctl thread is NOT on the user's desktop, so without this
+                    # it returns NULL and nothing gets minimized.
+                    try:
+                        _follow_input_desktop({"name": None, "tag": "minimize"}, _DESKTOP_ALL)
+                    except Exception:
+                        pass
+                    hwnd = u.GetForegroundWindow()
+                    _worker_log("[diag cap-worker minimize-fg hwnd=%s pid=%s]" % (hwnd, os.getpid()))
+                    if hwnd:
+                        u.ShowWindow(ctypes.c_void_p(hwnd), 6)   # SW_MINIMIZE
+                except Exception as e:
+                    _worker_log("[diag cap-worker minimize-fg raised %r]" % (e,))
             elif typ == "stop":
                 state["stop"] = True
                 break
@@ -2766,7 +2859,7 @@ def run_video_child(port, raw=False, system=False):
         except Exception:
             pass
 
-    def _swap_capture(target_system):
+    def _swap_capture(target_system, silent=False, minimize_fg=False):
         """On-demand elevation TOGGLE (runs off the ctl thread so control stays responsive). Swap the
         live cap-worker to/from SYSTEM: elevate (target_system True) raises ONE UAC via the install
         helper and reaches the secure desktop; de-elevate (False) spawns a plain USER worker (no UAC).
@@ -2777,7 +2870,20 @@ def run_video_child(port, raw=False, system=False):
             return
         state["elev_inflight"] = True
         try:
-            newcc = RawCaptureClient(system=target_system)
+            if not target_system:
+                _click_log("[diag deelevate minimize_fg=%s system=%s]" % (minimize_fg, state.get("system")))
+            if (not target_system) and minimize_fg and state.get("system") and state.get("capclient"):
+                # De-elevate with an elevated window in front: minimize it via the CURRENT (still-SYSTEM)
+                # worker, then wait a beat, so the incoming USER worker lands with a non-elevated window in
+                # front and is not UIPI-trapped (non-elevated input is blocked while a higher-IL window is
+                # foreground). Best-effort.
+                _click_log("[diag deelevate: minimizing elevated foreground before swap]")
+                try:
+                    state["capclient"].minimize_foreground()
+                    time.sleep(0.4)
+                except Exception:
+                    pass
+            newcc = RawCaptureClient(system=target_system, silent=silent)
             if newcc.spawn():
                 old = state.get("capclient")
                 state["capclient"] = newcc
@@ -2836,12 +2942,16 @@ def run_video_child(port, raw=False, system=False):
                     state["bitrates"][mi] = int(bps)     # REMB: adapt this monitor's encoder
             elif typ == "elevate-capture":
                 # Viewer-requested elevation (authorized locally): swap USER->SYSTEM cap-worker live.
+                # `silent` (unattended PIN session) elevates via the persistent service with no UAC.
                 if state.get("raw") and state.get("capclient"):
-                    threading.Thread(target=lambda: _swap_capture(True), daemon=True).start()
+                    sil = bool(msg.get("silent"))
+                    threading.Thread(target=lambda s=sil: _swap_capture(True, s), daemon=True).start()
             elif typ == "deelevate-capture":
-                # Viewer dropped elevation: swap SYSTEM->USER cap-worker live (no UAC).
+                # Viewer dropped elevation: swap SYSTEM->USER cap-worker live (no UAC). minimize_fg -> the
+                # still-SYSTEM worker minimizes the elevated foreground window first (avoid the UIPI trap).
                 if state.get("raw") and state.get("capclient"):
-                    threading.Thread(target=lambda: _swap_capture(False), daemon=True).start()
+                    mf = bool(msg.get("minimize_fg"))
+                    threading.Thread(target=lambda m=mf: _swap_capture(False, minimize_fg=m), daemon=True).start()
             elif typ == "stop":
                 state["stop"] = True
                 break
@@ -2988,30 +3098,34 @@ def _compute_window_rects(our_pid):
     return tuple(rects), foreground
 
 
-def _foreground_elevated():
-    """True if the FOREGROUND window belongs to a higher-integrity (elevated) process than us, so our
-    non-elevated SendInput is UIPI-blocked there (and everywhere) — used to hint the viewer with a
-    forbidden cursor. Heuristic: OpenProcess(QUERY_INFORMATION|VM_READ) is denied for a higher-integrity
-    process, so a failure means elevated. Best-effort; any error or our own/nil window -> False."""
+def _elevated_foreground_rect():
+    """If the FOREGROUND window belongs to a higher-integrity (elevated) process than us — so our
+    non-elevated SendInput can't drive it — return its screen rect (left, top, right, bottom in physical
+    px) so the viewer can show a forbidden cursor over JUST that window (not the whole screen). Else None.
+    Heuristic: OpenProcess(QUERY_INFORMATION|VM_READ) is denied for a higher-integrity process, so a
+    failure means elevated. Best-effort; any error or our own/nil window -> None."""
     try:
         u = ctypes.windll.user32
         k = ctypes.windll.kernel32
         u.GetForegroundWindow.restype = ctypes.c_void_p
         hwnd = u.GetForegroundWindow()
         if not hwnd:
-            return False
+            return None
         pid = wintypes.DWORD()
         u.GetWindowThreadProcessId(ctypes.c_void_p(hwnd), ctypes.byref(pid))
         if not pid.value or pid.value == os.getpid():
-            return False
+            return None
         k.OpenProcess.restype = ctypes.c_void_p
         h = k.OpenProcess(0x0410, False, pid.value)   # PROCESS_QUERY_INFORMATION | PROCESS_VM_READ
         if h:
             k.CloseHandle(ctypes.c_void_p(h))
-            return False                               # readable -> same/lower integrity -> not blocked
-        return True                                    # access denied -> elevated foreground -> blocked
+            return None                                # readable -> same/lower integrity -> not blocked
+        r = wintypes.RECT()                            # access denied -> elevated foreground window
+        if not u.GetWindowRect(ctypes.c_void_p(hwnd), ctypes.byref(r)):
+            return None
+        return (r.left, r.top, r.right, r.bottom)
     except Exception:
-        return False
+        return None
 
 
 def _compute_blockrects(client):
@@ -3032,10 +3146,16 @@ def _compute_blockrects(client):
 
 
 async def _maybe_send_blockrects(ws, client):
-    """Send the agent's window rects to the viewer, plus whether input is currently UIPI-blocked by an
-    elevated foreground window (so the viewer shows a forbidden cursor) — but only when either changes."""
+    """Send the agent's window rects to the viewer (forbidden-cursor hint) — and, when NOT elevated and
+    an elevated window is in the foreground, that window's rect too, so ONLY it shows the forbidden
+    cursor (our non-elevated SendInput can't drive it) while clicks everywhere else stay allowed. Sent
+    only when the set changes. (Previously this set a GLOBAL inputBlocked flag, which forbade the WHOLE
+    screen whenever any elevated window was foreground -> after de-elevate you couldn't click anything.)"""
     rects = _compute_blockrects(client)
-    blocked = (not getattr(client, "_capture_elevated", False)) and _foreground_elevated()
+    # While NOT capture-elevated and an elevated (higher-IL) window holds the foreground, Windows UIPI
+    # drops ALL our injected input (not just over that window), and a non-elevated agent cannot minimize
+    # it. So show a whole-screen forbidden cursor (honest) — the viewer re-elevates to regain control.
+    blocked = (not getattr(client, "_capture_elevated", False)) and (_elevated_foreground_rect() is not None)
     key = json.dumps([rects, blocked], sort_keys=True)
     if key != client._last_blockrects:
         client._last_blockrects = key
@@ -3592,12 +3712,27 @@ class NetClient:
         try:
             ls = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             ls.bind(("127.0.0.1", 0))
-            ls.listen(1)
+            ls.listen(16)   # backlog > 1: rapid elevate/de-elevate cycles can queue worker connects
             self._input_lsock = ls
             self._input_port = ls.getsockname()[1]
             threading.Thread(target=self._input_accept_loop, daemon=True).start()
+            threading.Thread(target=self._input_heartbeat_loop, daemon=True).start()
         except Exception:
             self._input_port = 0
+
+    def _input_heartbeat_loop(self):
+        """Send a tiny no-op 'ping' over the worker input link ~every 1s. The worker's recv has a 4s
+        timeout, so this keeps a LIVE link from false-tripping it on user idle, while a DEAD link
+        (half-open / aborted, which a main-side close() can't signal) stops the heartbeat -> the worker
+        times out and self-heals. A failed ping also drops+closes the link here (same path as a real
+        event). 'ping' is an unknown event type the worker's apply_event ignores (no injection)."""
+        while True:
+            time.sleep(1.0)
+            if self._input_wsock is not None:
+                try:
+                    self._send_to_input_worker({"t": "ping"})
+                except Exception:
+                    pass
 
     def _input_accept_loop(self):
         while True:
@@ -3610,6 +3745,7 @@ class NetClient:
             with self._input_lock:
                 old, self._input_wsock = self._input_wsock, conn
                 self._fwd_fail_diag = False      # a fresh worker (e.g. after an elevation swap): log its next drop
+            _click_log("[diag input worker link accepted (swap re-armed input)]")
             if old:
                 try:
                     old.close()
@@ -3636,6 +3772,14 @@ class NetClient:
             with self._input_lock:
                 if self._input_wsock is s:
                     self._input_wsock = None
+            # CLOSE our end so the WORKER's blocked recv unblocks (RST/EOF) and its _input_reader
+            # self-heals + reconnects. Without this, a main-side send abort (e.g. 10053) half-drops the
+            # link: the main falls back to LOCAL injection but the worker never notices, so input stays
+            # DEAD forever (secure desktop uninjectable) instead of recovering on the next reconnect.
+            try:
+                s.close()
+            except Exception:
+                pass
 
     def request_stop(self):
         if self.loop and self.stop_event and not self.loop.is_closed():
@@ -4656,18 +4800,37 @@ class NetClient:
             self.app.post(self.app.on_viewer_restored)
         elif mtype == "request-elevation":
             # The viewer asks us to gain elevated privileges (secure desktop / UAC / elevated input).
-            # Only for an approved, streaming session and when not already elevated; the LOCAL
-            # authorization dialog on the GUI thread is the real gate (the viewer can only ASK).
+            # Only for an approved, streaming session and when not already elevated. For a MANUAL
+            # session the LOCAL authorization dialog is the gate (the viewer can only ASK). For an
+            # unattended PIN session with the persistent cap service armed, elevate SILENTLY — no local
+            # dialog, no UAC (the owner already consented once by enabling unattended mode); the viewer
+            # still initiated it via its Elevate button.
             if self.streaming and not _is_elevated():
-                self.app.post(self.app.on_elevation_requested)
+                if getattr(self, "_pin_session", False) and self.vchild and _elevsvc_installed():
+                    try:
+                        self.vchild.elevate_capture(silent=True)
+                    except Exception:
+                        self.app.post(self.app.on_elevation_requested)
+                else:
+                    self.app.post(self.app.on_elevation_requested)
         elif mtype == "request-deelevation":
             # The viewer asks us to DROP elevated capture (back to the USER worker). This reduces access,
             # so it needs no local dialog and no UAC — apply it directly. Only for a streaming session.
             if self.streaming and self.vchild:
                 try:
+                    # If an elevated window is foreground, minimize it FIRST — over the reliable input
+                    # link (the SYSTEM worker's input thread is desktop-attached) so the incoming
+                    # non-elevated worker isn't UIPI-trapped (can't inject while a higher-IL window is in
+                    # front). The capport ctl path did not deliver; the input link does. Then drop.
+                    er = _elevated_foreground_rect()
+                    _click_log("[diag deelevate-req elevated_fg=%s wsock=%s]"
+                               % (er is not None, self._input_wsock is not None))
+                    if er is not None:
+                        self._send_to_input_worker({"t": "minimize-fg"})
+                        await asyncio.sleep(0.6)
                     self.vchild.deelevate_capture()
-                except Exception:
-                    pass
+                except Exception as e:
+                    _click_log("[diag deelevate-req raised %r]" % (e,))
         elif mtype == "clip":
             # The viewer's clipboard changed; mirror it onto this machine's clipboard.
             # Only for an approved, streaming session (same gate as injected input).
@@ -4804,6 +4967,10 @@ class NetClient:
             self._printer_on = False
             threading.Thread(target=lambda: _remove_printer_now(PRINTER_NAME, printer_port_path()),
                              daemon=True).start()
+        # NOTE: do NOT de-elevate here. peer-left also fires from _on_capture_stalled during the
+        # secure-desktop/UAC transition (capture briefly stalls), and dropping the SYSTEM worker there
+        # made the UAC unclickable. Client-scoping de-elevation is handled at admit time (T3), gated on
+        # a positively different elevation-owner vtok, so the owner's own churn never drops elevation.
         self.app.post(lambda: self.app.on_peer_left(local))
 
     async def _prespawn_video_child(self):
@@ -4946,6 +5113,23 @@ class NetClient:
                 self.app.post(self.app.on_denied)
             return
         self._viewer_approved = True  # admitted: re-serve silently across our reconnect
+        if not is_resume:
+            # "Automated" detection (S1): a fresh viewer admitted via the PIN challenge is an
+            # unattended session -> eligible for SILENT elevation; a manually-approved viewer is not.
+            # A resume keeps the original session's flag (the same viewer coming back).
+            self._pin_session = bool(auto and pin)
+        # T3 (client-scoped elevation, S1): if capture is elevated and THIS viewer is a DIFFERENT browser
+        # than the one that elevated (a positively different stable vtok), drop to the USER worker so the
+        # elevation is NOT inherited. ONLY a positive different-identity de-elevates: the owner's own
+        # reconnect/stall churn (same vtok, or an unknown/None vtok) keeps elevation, so this never
+        # breaks a live secure-desktop session (the regression it replaces). De-elevation is silent.
+        if (getattr(self, "_capture_elevated", False) and self.vchild
+                and vtok is not None and getattr(self, "_elev_owner_vtok", None) is not None
+                and vtok != self._elev_owner_vtok):
+            try:
+                self.vchild.deelevate_capture()
+            except Exception:
+                pass
         self._approved_vid = vid      # ...this exact viewer socket (our own reconnect), ...
         if vtok is not None:
             self._approved_vtok = vtok  # ...and this viewer's stable token (its reconnect)
@@ -6912,6 +7096,11 @@ class App:
             self.client._pin_backoff = 0
             self.client._pin_lock_until = 0.0
         self._refresh_pin_label()
+        # Rotating the PIN invalidates the CURRENT session too: throw the connected viewer out so it
+        # must re-enter the NEW PIN to reconnect (_end_session sets _ended, which blocks a silent vtok
+        # resume, so the reconnect is re-challenged against the fresh PIN).
+        if self.client is not None and getattr(self.client, "streaming", False):
+            self._do_end_session()
 
     def _toggle_auto(self):
         # Order the two writes so the net thread (which reads auto_accept then pin in
@@ -6942,6 +7131,18 @@ class App:
             self.client._pin_backoff = 0
             self.client._pin_lock_until = 0.0
         self._refresh_pin_label()
+        # Arm/disarm SILENT unattended elevation (S3): enabling unattended (auto-accept + PIN) installs
+        # the persistent cap service via ONE UAC so later PIN sessions elevate with no UAC/dialog;
+        # disabling removes it (drops the standing no-UAC SYSTEM path). Off the GUI thread so a slow or
+        # cancelled UAC never freezes the toggle; best-effort — cancelling leaves auto-accept working,
+        # just without silent elevation (PIN sessions then fall back to the one-UAC elevation path).
+        if sys.platform == "win32":
+            def _arm(enable=on):
+                if enable:
+                    _spawn_persistent_elevsvc_install(remove=False)
+                elif _elevsvc_installed():
+                    _spawn_persistent_elevsvc_install(remove=True)
+            threading.Thread(target=_arm, daemon=True).start()
 
     def end_session_click(self):
         # "Stop session": confirm first in a separate window; only end the session
@@ -7265,6 +7466,10 @@ def parse_args(argv):
     # "runas" from the non-elevated encode child) that only runs the admin `sc` steps to install the
     # SYSTEM cap-worker service, so the agent itself never restarts. Not for direct use.
     p.add_argument("--install-capsvc", dest="install_capsvc", action="store_true", help=argparse.SUPPRESS)
+    # Unattended silent elevation: elevated short-lived helpers that install/remove the PERSISTENT cap
+    # service (with a user-start SDDL) so later PIN sessions elevate with no UAC. Not for direct use.
+    p.add_argument("--install-elevsvc", dest="install_elevsvc", action="store_true", help=argparse.SUPPRESS)
+    p.add_argument("--remove-elevsvc", dest="remove_elevsvc", action="store_true", help=argparse.SUPPRESS)
     p.add_argument("--install-printer", dest="install_printer", action="store_true", help=argparse.SUPPRESS)
     p.add_argument("--printer-remove", dest="printer_remove", action="store_true", help=argparse.SUPPRESS)
     p.add_argument("--printer-port", dest="printer_port", default=None, help=argparse.SUPPRESS)
@@ -7416,6 +7621,14 @@ def _enable_privilege(name):
 # for the secure desktop) using the service's OWN token re-sessioned to that session (NOT
 # another process's token) + CreateProcessAsUser. No winlogon token theft.
 _SVC_NAME = "AudiobusSecure"
+# Persistent cap service for SILENT (no-UAC) elevation on unattended PIN sessions. Installed once
+# (ONE UAC) when the owner enables unattended mode; `sc sdset` grants Interactive Users SERVICE_START/
+# STOP so a later non-elevated `sc start <svc> <port>` needs no UAC (the port rides ServiceMain argv).
+# SECURITY: while installed, any interactive user (and local malware as that user) can start it to get
+# SYSTEM with no UAC — inherent to "no UAC ever again"; disabling unattended mode removes it.
+_ELEV_SVC = "AudiobusCapSvc"
+_ELEV_SDDL = ("D:(A;;CCLCSWRPWPDTLOCRRC;;;SY)(A;;CCDCLCSWRPWPDTLOCRSDRCWDWO;;;BA)"
+              "(A;;CCLCSWRPWPLORC;;;IU)(A;;CCLCSWRPWPLORC;;;SU)")
 _svc_status_handle = None
 _svc_main_cb = None      # keep ctypes callbacks alive for the dispatcher's whole lifetime
 _svc_ctrl_cb = None
@@ -7546,6 +7759,16 @@ def run_secure_service():
             _svc_status_handle = adv.RegisterServiceCtrlHandlerExW(_SVC_NAME, _svc_ctrl_cb, None)
             _secure_log("ServiceMain entered status_handle=%s" % _svc_status_handle)
             _svc_set_status(0x04)   # RUNNING
+            # Persistent-service path: the capport is NOT baked into binPath; it arrives as a start
+            # argument (`sc start <svc> <port>`) -> ServiceMain argv[1]. Pick it up so the console-
+            # session worker spawn targets the right encode-child listener. (Per-PID services still
+            # pass it via --capworker-port in binPath, so this is a harmless no-op there.)
+            try:
+                if argc and int(argc) > 1 and argv and argv[1]:
+                    _set_capworker_port(int(argv[1]))
+                    _secure_log("ServiceMain argv capport=%s" % argv[1])
+            except Exception as e:
+                _secure_log("ServiceMain argv parse raised %r" % (e,))
             _secure_service_work()
         except Exception as e:
             _secure_log("ServiceMain raised %r" % (e,))
@@ -7798,7 +8021,7 @@ def run_secure_test():
     _secure_log("=== secure-test done ===")
 
 
-def _spawn_cap_worker_as_system(capport):
+def _spawn_cap_worker_as_system(capport, silent=False):
     """Bring up a LocalSystem cap-worker that CreateProcessAsUser's `--cap-worker --capport <capport>`
     into the console session, so capture+input reach the secure desktop. The worker connects back to
     the encode child (loopback, cross-session). The `sc create` needs admin: when THIS process is
@@ -7811,9 +8034,19 @@ def _spawn_cap_worker_as_system(capport):
     _set_secure_paths(log_path, None)
     svc_name = "AudiobusCap_%d" % os.getpid()
     elevated = _is_elevated()
-    _secure_log("=== cap-worker SYSTEM spawn: svc=%s capport=%s elevated=%s ==="
-                % (svc_name, capport, elevated))
+    _secure_log("=== cap-worker SYSTEM spawn: svc=%s capport=%s elevated=%s silent=%s ==="
+                % (svc_name, capport, elevated, silent))
     exe = sys.executable
+    if silent and not elevated and _elevsvc_installed():
+        # Unattended PIN session: start the PERSISTENT service NON-elevated (its SDDL grants us
+        # SERVICE_START) with the port as a start arg -> ServiceMain CreateProcessAsUser's the worker.
+        # No UAC, no dialog. On any failure, fall through to the normal one-UAC helper path.
+        _secure_log("silent elevate via persistent svc %s port=%s" % (_ELEV_SVC, capport))
+        _sc("stop", _ELEV_SVC)                      # clear a prior STOPPED/leftover state (ignore rc)
+        rc, _ = _sc("start", _ELEV_SVC, str(int(capport)))
+        if rc == 0:
+            return "ELEV:" + _ELEV_SVC              # persistent: the caller must NOT delete it
+        _secure_log("silent elevate sc start failed rc=%s -> UAC helper fallback" % rc)
     if not elevated:
         # On-demand path: elevate ONLY the service install via a short-lived helper. UAC appears once.
         if getattr(sys, "frozen", False):
@@ -7905,6 +8138,74 @@ def _install_capsvc(capport, svc_name, log_path):
         except Exception:
             pass
     _secure_log("=== install-capsvc done ===")
+
+
+def _elevsvc_installed():
+    """True if the persistent silent-elevation service exists AND its binPath is THIS exe. A service left
+    installed by a DIFFERENT build points at a stale exe, so its SYSTEM worker would run old code (this
+    bit us: the worker ran an old build with no minimize-fg / input fixes). When stale we return False so
+    silent elevation falls back to the one-UAC helper, which launches the CURRENT exe. Non-elevated-safe."""
+    if sys.platform != "win32":
+        return False
+    try:
+        rc, out = _sc("qc", _ELEV_SVC)   # qc -> config incl. BINARY_PATH_NAME
+        if rc != 0:
+            return False
+        cur = (sys.executable or "").lower()
+        if cur and cur not in (out or "").lower():
+            _secure_log("elevsvc stale binPath (not this exe) -> treating as not armed; re-enable auto-accept")
+            return False
+        return True
+    except Exception:
+        return False
+
+
+def _install_elevsvc(log_path):
+    """Elevated helper (--install-elevsvc): install the PERSISTENT LocalSystem cap service used for
+    SILENT (no-UAC) elevation on unattended PIN sessions. `sc create` (demand; NO port baked in — it
+    arrives via `sc start <svc> <port>` -> ServiceMain argv) + `sc sdset` granting Interactive Users
+    SERVICE_START/STOP so a later non-elevated `sc start` needs no UAC. ONE UAC pays for this once."""
+    log_path = log_path or os.path.join(os.path.expanduser("~"), "audiobus-secure.log")
+    try:
+        _set_secure_paths(log_path, None)
+    except Exception:
+        pass
+    _secure_log("=== install-elevsvc: svc=%s ===" % _ELEV_SVC)
+    exe = sys.executable
+    svc_args = '--secure-service --secure-svcname "%s" --secure-log "%s"' % (_ELEV_SVC, log_path)
+    if getattr(sys, "frozen", False):
+        bin_path = '"%s" %s' % (exe, svc_args)
+    else:
+        bin_path = '"%s" "%s" %s' % (exe, os.path.abspath(__file__), svc_args)
+    try:
+        _sc("stop", _ELEV_SVC)        # clear any leftover from a prior install
+        _sc("delete", _ELEV_SVC)
+        rc, _ = _sc("create", _ELEV_SVC, "binPath=", bin_path, "type=", "own",
+                    "start=", "demand", "DisplayName=", "Audiobus Live Capture")
+        if rc != 0:
+            _secure_log("install-elevsvc create failed rc=%s" % rc)
+            return
+        rc, _ = _sc("sdset", _ELEV_SVC, _ELEV_SDDL)
+        if rc != 0:
+            _secure_log("install-elevsvc sdset failed rc=%s (installed but not user-startable)" % rc)
+    except Exception as e:
+        _secure_log("install-elevsvc raised %r" % (e,))
+    _secure_log("=== install-elevsvc done ===")
+
+
+def _remove_elevsvc():
+    """Elevated helper (--remove-elevsvc): remove the persistent cap service. Disabling unattended mode
+    removes the standing no-UAC SYSTEM path."""
+    try:
+        _set_secure_paths(os.path.join(os.path.expanduser("~"), "audiobus-secure.log"), None)
+    except Exception:
+        pass
+    _secure_log("=== remove-elevsvc: svc=%s ===" % _ELEV_SVC)
+    try:
+        _sc("stop", _ELEV_SVC)
+        _sc("delete", _ELEV_SVC)
+    except Exception as e:
+        _secure_log("remove-elevsvc raised %r" % (e,))
 
 
 # --------------------------------------------------------------------------- #
@@ -8000,6 +8301,31 @@ def _spawn_printer_install(remove=False):
         return rc is not None and int(rc) > 32
     except Exception as e:
         _printer_log("spawn-printer-install raised %r" % (e,))
+        return False
+
+
+def _spawn_persistent_elevsvc_install(remove=False):
+    """Non-elevated: launch the elevated --install-elevsvc / --remove-elevsvc helper via ShellExecute
+    "runas" (ONE UAC). Returns True if the helper launched (UAC accepted). Mirrors
+    _spawn_printer_install; used by the unattended-mode toggle to arm/disarm silent elevation."""
+    if sys.platform != "win32":
+        return False
+    exe = sys.executable
+    log_path = os.path.join(os.path.expanduser("~"), "audiobus-secure.log")
+    flag = "--remove-elevsvc" if remove else "--install-elevsvc"
+    if getattr(sys, "frozen", False):
+        params = '%s --secure-log "%s"' % (flag, log_path)
+    else:
+        params = '"%s" %s --secure-log "%s"' % (os.path.abspath(__file__), flag, log_path)
+    try:
+        shell32 = ctypes.windll.shell32
+        shell32.ShellExecuteW.restype = ctypes.c_void_p
+        shell32.ShellExecuteW.argtypes = [wintypes.HWND, wintypes.LPCWSTR, wintypes.LPCWSTR,
+                                          wintypes.LPCWSTR, wintypes.LPCWSTR, ctypes.c_int]
+        rc = shell32.ShellExecuteW(None, "runas", exe, params, None, 0)  # SW_HIDE
+        return rc is not None and int(rc) > 32
+    except Exception as e:
+        _secure_log("spawn-elevsvc-install raised %r" % (e,))
         return False
 
 
@@ -8511,6 +8837,13 @@ def main(argv=None):
     if getattr(args, "install_capsvc", False):
         _install_capsvc(args.capport, getattr(args, "secure_svcname", None),
                         getattr(args, "secure_log", None))
+        return
+    # Unattended silent-elevation arming: install/remove the persistent cap service (elevated, one UAC).
+    if getattr(args, "install_elevsvc", False):
+        _install_elevsvc(getattr(args, "secure_log", None))
+        return
+    if getattr(args, "remove_elevsvc", False):
+        _remove_elevsvc()
         return
     # On-demand printer-redirection helper: elevated, short-lived, adds/removes the redirected PDF printer.
     if getattr(args, "install_printer", False):
