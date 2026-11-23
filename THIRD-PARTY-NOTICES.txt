@@ -1,0 +1,12 @@
+Third-party components bundled with Audiobus Remote
+===================================================
+
+The project's own code is MIT-licensed (see LICENSE). It bundles these
+third-party components, each under its own license:
+
+- SumatraPDF (GPLv3) — invoked as a separate executable (mere aggregation),
+  not linked. Source and license: https://github.com/sumatrapdfreader/sumatrapdf
+  See also agent/SumatraPDF-LICENSE.txt.
+
+- Cisco OpenH264 (BSD-2-Clause) — bundled as openh264.dll.
+  https://github.com/cisco/openh264
