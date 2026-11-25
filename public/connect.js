@@ -31,6 +31,7 @@ const sendFileBtn = $("sendFileBtn");
 const fsSendFileBtn = $("fsSendFileBtn");
 const elevateBtn = $("elevateBtn"); // on-demand elevation toggle (elevate <-> de-elevate)
 let agentElevated = false; // agent's live capture mode (true = SYSTEM / secure-desktop), per its reports
+let elevWaiting = false; // showing the "waiting for approval on the remote" status during a no-PIN elevate
 const printerBtn = $("printerBtn"); // "Print to my PC": set up remote->local printer redirection
 const printRemoteWrap = $("printRemoteWrap"); // "Print on remote" button + printer popover (local->remote)
 const printRemoteBtn = $("printRemoteBtn");
@@ -1314,9 +1315,20 @@ async function onMessage(ev) {
       remotePrinters = Array.isArray(msg.printers) ? msg.printers.filter((x) => typeof x === "string") : [];
       updatePrintRemoteBtn();
       break;
+    case "elevation-waiting":
+      // No-PIN elevate: a person at the remote must approve the local authorization dialog (and the
+      // UAC prompt, if UAC is enabled). The viewer can drive neither, so show WHY input is paused
+      // instead of a silent freeze. Cleared by the resolving capture-mode report (or a local decline).
+      elevWaiting = true;
+      setStatus(t("connect.status.elevating"), "warn");
+      break;
     case "capture-mode":
       // The agent reported its live capture mode (elevated = SYSTEM / secure desktop). Settle the
       // Elevate toggle on the truth — confirming or correcting the optimistic flip from the click.
+      if (elevWaiting) {
+        elevWaiting = false;
+        setStatus(t("connect.status.connected"));
+      }
       settleElevateBtn(msg.elevated);
       break;
     case "clip-files":
@@ -1982,6 +1994,7 @@ function endSession(keepStatus) {
   fsBtn.hidden = true;
   disconnectBtn.hidden = true;
   if (elevateBtn) { elevateBtn.hidden = true; settleElevateBtn(false); }
+  elevWaiting = false;
   clearClipGet(); clipFilesManifest = []; if (clipFilesWrap) clipFilesWrap.hidden = true;
   if (keysWrap) { keysWrap.hidden = true; if (keysMenu) keysMenu.hidden = true; }
   placeStatusInJoin(); // back on the join screen: status below the center card

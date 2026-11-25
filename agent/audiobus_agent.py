@@ -620,10 +620,16 @@ def resolve_key(ev):
     code = ev.get("code")
     if key in SPECIAL_KEYS:
         return SPECIAL_KEYS[key]
+    # Prefer the CLIENT's already-resolved character (`key`, produced by THEIR keyboard
+    # layout) over the PHYSICAL `code`. CODE_CHARS maps codes to US-layout positions, so
+    # using it first forced every session to US — an ES client's "ñ"/"@" came out as
+    # ";"/"2". Letters are lowercased so the separately-held Shift decides case (the proven
+    # path); any other single char (symbols, accented, AltGr) injects verbatim. `code` is
+    # only the fallback when `key` isn't one usable character (dead keys, IME, unlabeled).
+    if key and len(key) == 1:
+        return KeyCode.from_char(key.lower() if key.isalpha() else key)
     if code in CODE_CHARS:
         return KeyCode.from_char(CODE_CHARS[code])
-    if key and len(key) == 1:
-        return KeyCode.from_char(key.lower())
     return None
 
 
@@ -704,7 +710,7 @@ _GUI_DPI_LOGGED = False   # one-time GUI-thread DPI-awareness + raw-rect diagnos
 _SHOT_SAVED = False       # one-time: save an mss screenshot on the first blocked click
 
 
-_AGENT_BUILD = "2026-11-20-unattelev15"  # de-elevated + elevated window regains foreground = globally input-trapped (UIPI, can't minimize from non-elevated) -> honest whole-screen forbidden cursor; re-elevate to recover
+_AGENT_BUILD = "2026-11-25-elevwait1"  # viewer status during a no-PIN elevate: tell the viewer "waiting for approval on the remote" (local auth dialog + UAC can't be driven remotely) instead of a silent input freeze; cleared on the capture-mode report or a local decline. Carries kbdfix1: client-layout key, release held keys/modifiers on drop+end, per-monitor encode diag
 
 
 def _save_debug_shot(x, y):
@@ -857,7 +863,8 @@ def _send_sas():
 
 
 def apply_event(ev, monitors=None, window_rects=None, blocked=None,
-                pressed=None, agent_foreground=False, wheel_accum=None, sink=None):
+                pressed=None, agent_foreground=False, wheel_accum=None, sink=None,
+                keys=None):
     """Apply one remote input event, while protecting the agent's OWN windows so a
     remote user can't close it or drive its controls:
 
@@ -954,6 +961,8 @@ def apply_event(ev, monitors=None, window_rects=None, blocked=None,
             k = resolve_key(ev)
             if k is not None:
                 keyboard.press(k)
+                if keys is not None:
+                    keys.add(k)   # track held keys so a dropped link can release them
         elif t == "ku":
             if agent_foreground:
                 return
@@ -963,6 +972,8 @@ def apply_event(ev, monitors=None, window_rects=None, blocked=None,
             k = resolve_key(ev)
             if k is not None:
                 keyboard.release(k)
+                if keys is not None:
+                    keys.discard(k)
         elif t == "sas":
             if sink is not None:
                 sink(ev)      # the worker (SYSTEM in T3) can SendSAS; main often can't
@@ -2177,6 +2188,10 @@ def _vc_capture_session(sock, state):
     full_interval = 1.0 / fps
     encoders = {}               # mi -> (cc, w, h, bitrate)
     starts = {}                 # mi -> monotonic start (elapsed-time PTS per monitor)
+    enc_fail_logged = set()     # monitors whose encoder-create failure was logged (diag)
+    first_out_logged = set()    # monitors whose first encoded packet was logged (diag: a
+    #                             vertical/portrait monitor that never reaches this is the
+    #                             one not rendering — pinpoints encode vs transport/viewer)
     last = {m["i"]: 0.0 for m in monitors}
     last_raw = {}               # mi -> raw bytes of the last ENCODED grab (change detect)
     last_sent = {}              # mi -> monotonic time we last encoded+sent a frame
@@ -2252,12 +2267,31 @@ def _vc_capture_session(sock, state):
                 desired = (max(_VC_MIN_BITRATE, min(int(remb), bitrate))
                            if remb is not None else bitrate)
                 enc = encoders.get(mi)
-                if (enc is None or enc[1] != w or enc[2] != h
-                        or abs(desired - enc[3]) / enc[3] > 0.1):
-                    cc, pix = _vc_make_encoder(w, h, desired, encoder_name)
+                dims_changed = enc is None or enc[1] != w or enc[2] != h
+                if dims_changed or abs(desired - enc[3]) / enc[3] > 0.1:
+                    try:
+                        cc, pix = _vc_make_encoder(w, h, desired, encoder_name)
+                    except Exception as e:
+                        # One monitor's encoder failing (e.g. a resolution a given encoder
+                        # rejects) must skip ONLY that monitor, not crash the whole session
+                        # and take every other monitor down with it.
+                        if mi not in enc_fail_logged:
+                            enc_fail_logged.add(mi)
+                            try:
+                                _click_log("[diag enc create FAILED mi=%d %dx%d name=%s %r]"
+                                           % (mi, w, h, encoder_name, e))
+                            except Exception:
+                                pass
+                        continue
                     enc = (cc, w, h, desired, pix)
                     encoders[mi] = enc
                     starts.setdefault(mi, time.monotonic())
+                    if dims_changed:
+                        try:
+                            _click_log("[diag enc create mi=%d %dx%d name=%s]"
+                                       % (mi, w, h, encoder_name))
+                        except Exception:
+                            pass
                 cc = enc[0]
                 frame = av.VideoFrame.from_ndarray(arr, format="rgb24").reformat(
                     format=enc[4])
@@ -2288,6 +2322,12 @@ def _vc_capture_session(sock, state):
                             sent_any = True
                     if sent_any:
                         last_enc_ok = time.monotonic()
+                        if mi not in first_out_logged:
+                            first_out_logged.add(mi)
+                            try:
+                                _click_log("[diag enc first-out mi=%d %dx%d]" % (mi, w, h))
+                            except Exception:
+                                pass
                 except (OSError, ConnectionError, BrokenPipeError):
                     state["stop"] = True
                     break
@@ -2478,7 +2518,8 @@ def run_cap_worker(port):
         return
 
     state = {"stop": False, "capturing": False, "monitors": [], "fps": 20, "wanted": set(),
-             "input_sock": None, "follow": False, "pressed": set(), "releasing": {}}
+             "input_sock": None, "follow": False, "pressed": set(), "releasing": {},
+             "keys": set()}
     send_lock = threading.Lock()
     who = "?"
     try:
@@ -2553,6 +2594,7 @@ def run_cap_worker(port):
         current input desktop, via the same apply_event path. Own wheel-accum + pressed set so a
         dropped link releases nothing-stuck. Reaches the secure desktop once this runs as SYSTEM."""
         pressed = state["pressed"]       # shared with the unstick loop (frees a UIPI-stuck button)
+        keys = state["keys"]             # keyboard keys held down (released if the link drops)
         wheel = {"x": 0.0, "y": 0.0}
         fail_logged = set()           # event types whose inject failure was already logged
         inp_desktop = {"name": None, "tag": "input"}   # this (input) thread's current input desktop
@@ -2576,7 +2618,8 @@ def run_cap_worker(port):
                 if state["follow"]:
                     _follow_input_desktop(inp_desktop, _DESKTOP_ALL)
                 try:
-                    apply_event(ev, state["monitors"], None, None, pressed, False, wheel, None)
+                    apply_event(ev, state["monitors"], None, None, pressed, False, wheel,
+                                None, keys)
                     if ev.get("t") == "mu":
                         _note_blocked_release(ev.get("b", 0))   # retry only if our release was UIPI-blocked
                 except Exception as e:
@@ -2592,6 +2635,16 @@ def run_cap_worker(port):
                 except Exception:
                     pass
             pressed.clear()
+            # Release any keyboard key the viewer was still holding when the link dropped.
+            # Without this a modifier (Ctrl/Alt/Shift) held across a swap-cycle abort stays
+            # DOWN on this desktop, so every later letter becomes Ctrl/Alt+<letter> — i.e.
+            # letters "turn into actions" (save/select-all/...) until the key is cleared.
+            for kk in list(keys):
+                try:
+                    keyboard.release(kk)
+                except Exception:
+                    pass
+            keys.clear()
             _release_stuck()   # the link ended: retry any release that stayed stuck (won't touch the physical mouse)
             try:
                 isock.close()
@@ -3655,6 +3708,7 @@ class NetClient:
         self._viewer_gen = 0
         self._blocked_btns = set()  # buttons whose press was suppressed over our window
         self._pressed_btns = set()  # buttons we actually injected a press for (to release)
+        self._pressed_keys = set()  # keyboard keys injected-down (local path) to release on end/drop
         self._last_blockrects = None  # last blockrects JSON sent to the viewer (dedup)
         # True between "we ended the session locally" and the resulting peer-left,
         # so the status reads "you closed the connection" rather than blaming the
@@ -3903,6 +3957,19 @@ class NetClient:
         if self.ws:
             try:
                 await self.ws.send(json.dumps(obj))
+            except Exception:
+                pass
+
+    def notify_elevation_settled(self, elevated):
+        """GUI thread -> viewer: clear the 'waiting for approval' status when an elevation request
+        resolves WITHOUT a capture-mode report (e.g. the local user declined the authorization
+        dialog, so no USER<->SYSTEM swap runs). Hops to the net-thread loop to send."""
+        if self.loop and not self.loop.is_closed():
+            try:
+                self.loop.call_soon_threadsafe(
+                    lambda: asyncio.create_task(
+                        self._send_json({"type": "capture-mode", "elevated": bool(elevated)}))
+                )
             except Exception:
                 pass
 
@@ -4720,6 +4787,7 @@ class NetClient:
             getattr(self.app, "_agent_foreground", False),
             self._wheel_accum,
             sink=sink,
+            keys=self._pressed_keys,
         )
 
     def inject_paste_after(self, delay=0.25):
@@ -4810,8 +4878,14 @@ class NetClient:
                     try:
                         self.vchild.elevate_capture(silent=True)
                     except Exception:
+                        await self._send_json({"type": "elevation-waiting"})
                         self.app.post(self.app.on_elevation_requested)
                 else:
+                    # No PIN / service not armed: a person at the remote must approve the local
+                    # authorization dialog (and the UAC prompt, if UAC is enabled). The viewer can
+                    # drive neither, so tell it WHY input is paused instead of a silent freeze. The
+                    # resolving capture-mode report — or a local decline — clears the waiting status.
+                    await self._send_json({"type": "elevation-waiting"})
                     self.app.post(self.app.on_elevation_requested)
         elif mtype == "request-deelevation":
             # The viewer asks us to DROP elevated capture (back to the USER worker). This reduces access,
@@ -5583,6 +5657,14 @@ class NetClient:
                 pass
         self._pressed_btns.clear()
         self._blocked_btns.clear()
+        # Same for keyboard keys injected on the LOCAL path (non-elevated, no worker): a
+        # modifier left held would make subsequent letters act as shortcuts.
+        for k in list(self._pressed_keys):
+            try:
+                keyboard.release(k)
+            except Exception:
+                pass
+        self._pressed_keys.clear()
 
 
 # --------------------------------------------------------------------------- #
@@ -6676,6 +6758,14 @@ class App:
 
         def on_no():
             self._elev_pending = False
+            # Clear the viewer's "waiting for approval" status: no swap runs on a decline, so no
+            # capture-mode report would otherwise reach the viewer.
+            cl = getattr(self, "client", None)
+            if cl is not None:
+                try:
+                    cl.notify_elevation_settled(False)
+                except Exception:
+                    pass
 
         ActionDialog(
             self.root, tr("agent.elevate.prompt"),
