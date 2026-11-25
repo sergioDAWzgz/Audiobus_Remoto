@@ -81,17 +81,55 @@ Invoke-OrThrow { & $py -m PyInstaller `
     audiobus_agent.py }
 
 $exe = Join-Path $PSScriptRoot "dist/audiobus-agent.exe"
-if (Test-Path $exe) {
-    Write-Host ""
-    Write-Host "Built: $exe"
-    # The agent exe is distributed via GitHub Releases (no longer R2). The /share download
-    # link points at:
-    #   https://github.com/sergioDAWzgz/Audiobus_Remoto/releases/download/<tag>/audiobus-agent.exe
-    # Attach this build to the matching release (pin the href to the same <tag> when you cut a
-    # new one, since the repo also ships -jpeg releases and GitHub's "latest" is repo-wide):
-    Write-Host ""
-    Write-Host "Next: attach this build to the GitHub release the /share link points at:"
-    Write-Host "  gh release upload <tag>-webrtc `"$exe`" --clobber"
-} else {
+if (-not (Test-Path $exe)) {
     Write-Error "Build failed: $exe not found."
 }
+Write-Host ""
+Write-Host "Built: $exe"
+
+# --- Optional Authenticode code signing ------------------------------------
+# Signs the exe ONLY when a certificate is configured, so plain local builds still
+# work unsigned. A CA-issued cert (OV/EV) gives a STABLE trusted identity that
+# survives every rebuild and sharply cuts AV/SmartScreen false positives; a
+# SELF-SIGNED cert does NOT help and should not be used here.
+#
+# Configure exactly one cert source as an environment variable before building:
+#   $env:SIGN_PFX = "C:\path\to\cert.pfx"; $env:SIGN_PW = "<pfx password>"   # file cert (OV)
+#   $env:SIGN_THUMBPRINT = "<sha1 thumbprint>"                               # token/HSM/cert store (EV)
+# Optional timestamp server (RFC3161); defaults below so the signature stays
+# valid after the cert expires:
+#   $env:SIGN_TS_URL = "http://timestamp.sectigo.com"
+$tsUrl = if ($env:SIGN_TS_URL) { $env:SIGN_TS_URL } else { "http://timestamp.sectigo.com" }
+if ($env:SIGN_PFX -or $env:SIGN_THUMBPRINT) {
+    # signtool ships with the Windows SDK and is usually NOT on PATH; find it.
+    $signtool = (Get-Command signtool.exe -ErrorAction SilentlyContinue).Source
+    if (-not $signtool) {
+        $signtool = (Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\x64\signtool.exe" `
+                        -ErrorAction SilentlyContinue |
+                     Sort-Object FullName -Descending | Select-Object -First 1).FullName
+    }
+    if (-not $signtool) {
+        Write-Error "SIGN_* is set but signtool.exe was not found. Install the Windows 10/11 SDK (Signing Tools) or add signtool to PATH."
+    }
+    Write-Host "Signing with: $signtool"
+    if ($env:SIGN_PFX) {
+        if (-not $env:SIGN_PW) { Write-Error "SIGN_PFX is set but SIGN_PW (the .pfx password) is not." }
+        Invoke-OrThrow { & $signtool sign /fd sha256 /tr $tsUrl /td sha256 /f $env:SIGN_PFX /p $env:SIGN_PW $exe }
+    } else {
+        Invoke-OrThrow { & $signtool sign /fd sha256 /tr $tsUrl /td sha256 /sha1 $env:SIGN_THUMBPRINT $exe }
+    }
+    Invoke-OrThrow { & $signtool verify /pa $exe }
+    Write-Host "Signed + timestamped + verified: $exe"
+} else {
+    Write-Host "NOTE: not code-signed (set SIGN_PFX+SIGN_PW, or SIGN_THUMBPRINT, to sign)."
+    Write-Host "      Unsigned builds get a NEW hash each rebuild and can trip AV heuristics (e.g. Kaspersky blocking the spawned cap-worker copies)."
+}
+
+# The agent exe is distributed via GitHub Releases (no longer R2). The /share download
+# link points at:
+#   https://github.com/sergioDAWzgz/Audiobus_Remoto/releases/download/<tag>/audiobus-agent.exe
+# Attach this build to the matching release (pin the href to the same <tag> when you cut a
+# new one, since the repo also ships -jpeg releases and GitHub's "latest" is repo-wide):
+Write-Host ""
+Write-Host "Next: attach this build to the GitHub release the /share link points at:"
+Write-Host "  gh release upload <tag>-webrtc `"$exe`" --clobber"
