@@ -710,7 +710,7 @@ _GUI_DPI_LOGGED = False   # one-time GUI-thread DPI-awareness + raw-rect diagnos
 _SHOT_SAVED = False       # one-time: save an mss screenshot on the first blocked click
 
 
-_AGENT_BUILD = "2026-11-25-stuckkey2"  # elevated/sink input: _release_held_buttons now FORWARDS a release-all to the cap-worker (the injector while elevated) instead of releasing on the main's pynput, so a modifier held when the VIEWER dropped (worker link still up, so the worker's own drop-release never fires) is cleared — fixes "letters act as functions / can't type" after an elevated reconnect. Carries elevwait1 + kbdfix1
+_AGENT_BUILD = "2026-11-25-elevdiag1"  # elevate-capture no longer no-ops SILENTLY when the raw cap-worker isn't up: it now logs `[diag elevate-capture IGNORED raw=.. capclient=..]` and reports the unchanged mode so the viewer pill/button un-stick instead of hanging on "Waiting for elevation...". Diagnoses the box where elevation never fires (cap-worker spawn fails -> raw=False -> in-process fallback). Carries stuckkey2 + elevwait1 + kbdfix1
 
 
 def _save_debug_shot(x, y):
@@ -3020,6 +3020,19 @@ def run_video_child(port, raw=False, system=False):
                 if state.get("raw") and state.get("capclient"):
                     sil = bool(msg.get("silent"))
                     threading.Thread(target=lambda s=sil: _swap_capture(True, s), daemon=True).start()
+                else:
+                    # Elevation needs the raw cap-worker. If it never came up (RawCaptureClient.spawn()
+                    # failed -> in-process fallback, raw=False), there is nothing to swap to SYSTEM.
+                    # This path used to no-op SILENTLY -> the viewer hung on "Waiting for elevation..."
+                    # and the Elevate button disabled. Log WHY, and report the (unchanged) mode so the
+                    # viewer clears the pill + re-enables the button instead of hanging.
+                    try:
+                        _click_log("[diag elevate-capture IGNORED raw=%s capclient=%s system=%s build=%s]"
+                                   % (state.get("raw"), state.get("capclient") is not None,
+                                      state.get("system"), _AGENT_BUILD))
+                    except Exception:
+                        pass
+                    state["report_mode"] = True
             elif typ == "deelevate-capture":
                 # Viewer dropped elevation: swap SYSTEM->USER cap-worker live (no UAC). minimize_fg -> the
                 # still-SYSTEM worker minimizes the elevated foreground window first (avoid the UIPI trap).
