@@ -1325,7 +1325,13 @@ async function onMessage(ev) {
     case "capture-mode":
       // The agent reported its live capture mode (elevated = SYSTEM / secure desktop). Settle the
       // Elevate toggle on the truth — confirming or correcting the optimistic flip from the click.
-      if (elevWaiting) {
+      if (msg.elev_error) {
+        // Elevation couldn't happen on the remote (e.g. the raw cap-worker never started). Surface
+        // it here — the agent's own log file is unreliable on some machines. Full reason to console.
+        console.warn("[elevation] unavailable on remote:", msg.elev_error);
+        elevWaiting = false;
+        setStatus(t("connect.status.elevateUnavailable"), "warn");
+      } else if (elevWaiting) {
         elevWaiting = false;
         setStatus(t("connect.status.connected"));
       }

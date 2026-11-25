@@ -710,7 +710,7 @@ _GUI_DPI_LOGGED = False   # one-time GUI-thread DPI-awareness + raw-rect diagnos
 _SHOT_SAVED = False       # one-time: save an mss screenshot on the first blocked click
 
 
-_AGENT_BUILD = "2026-11-25-elevdiag1"  # elevate-capture no longer no-ops SILENTLY when the raw cap-worker isn't up: it now logs `[diag elevate-capture IGNORED raw=.. capclient=..]` and reports the unchanged mode so the viewer pill/button un-stick instead of hanging on "Waiting for elevation...". Diagnoses the box where elevation never fires (cap-worker spawn fails -> raw=False -> in-process fallback). Carries stuckkey2 + elevwait1 + kbdfix1
+_AGENT_BUILD = "2026-11-25-elevreason1"  # elevation failures now travel to the VIEWER (elev_error on the capture-mode report): the raw-cap-worker-not-up no-op and a failed SYSTEM swap both set state["elev_error"], forwarded child->main->viewer, shown as "Elevation unavailable on the remote" + full reason in the browser console — because the agent's click.log/secure.log do not land on some machines. Carries elevdiag1 + stuckkey2 + elevwait1 + kbdfix1
 
 
 def _save_debug_shot(x, y):
@@ -1465,12 +1465,13 @@ class VideoChild:
                     cmsg = None
                 if cmsg and cmsg.get("type") == "capture-mode":
                     sysmode = bool(cmsg.get("system"))
+                    err = cmsg.get("elev_error")
                     try:
-                        self.loop.call_soon_threadsafe(self._on_capture_mode, sysmode)
+                        self.loop.call_soon_threadsafe(self._on_capture_mode, sysmode, err)
                     except Exception:
                         pass
 
-    def _on_capture_mode(self, system):
+    def _on_capture_mode(self, system, elev_error=None):
         """Loop thread: the encode child reported its live capture mode (SYSTEM = elevated / secure
         desktop). Relay it to the viewer so its Elevate control shows the real state and toggles, and
         notify the LOCAL agent UI so the remote user sees the privilege change (esp. when it DROPS)."""
@@ -1486,7 +1487,12 @@ class VideoChild:
             self.client._elev_owner_vtok = None
             self.client._elev_owner_vid = None
         try:
-            asyncio.ensure_future(self.client._send_json({"type": "capture-mode", "elevated": bool(system)}))
+            m = {"type": "capture-mode", "elevated": bool(system)}
+            if elev_error:
+                # The child couldn't elevate (e.g. no raw cap-worker). Surface the reason to the
+                # VIEWER, because on some machines the agent's log file never lands these diagnostics.
+                m["elev_error"] = str(elev_error)
+            asyncio.ensure_future(self.client._send_json(m))
         except Exception:
             pass
         try:
@@ -2214,9 +2220,14 @@ def _vc_capture_session(sock, state):
         while (state["capturing"] and not state["stop"] and state["gen"] == my_gen):
             if state.pop("report_mode", False):
                 # Tell the parent (-> viewer) the live capture mode so the Elevate control reflects it.
+                # Carry any elevation error so the viewer can SHOW why elevation didn't happen (the
+                # log file is unreliable on some machines).
                 try:
-                    _vc_send_frame(sock, _VC_CTL, json.dumps(
-                        {"type": "capture-mode", "system": bool(state.get("system"))}).encode())
+                    m = {"type": "capture-mode", "system": bool(state.get("system"))}
+                    er = state.pop("elev_error", None)
+                    if er:
+                        m["elev_error"] = er
+                    _vc_send_frame(sock, _VC_CTL, json.dumps(m).encode())
                 except Exception:
                     pass
             now = time.time()
@@ -2972,6 +2983,10 @@ def run_video_child(port, raw=False, system=False):
                 _click_log("[diag capture swap -> system=%s OK (no restart)]" % bool(target_system))
             else:
                 _click_log("[diag capture swap -> system=%s FAILED (UAC cancelled?)]" % bool(target_system))
+                if target_system:
+                    # Elevation specifically failed (the SYSTEM cap-worker never connected back:
+                    # UAC declined, blocked, or the worker couldn't come up). Tell the viewer.
+                    state["elev_error"] = "SYSTEM cap-worker failed to start (UAC declined/blocked?)"
         except Exception as e:
             _click_log("[diag capture swap raised %r]" % (e,))
         finally:
@@ -3032,6 +3047,8 @@ def run_video_child(port, raw=False, system=False):
                                       state.get("system"), _AGENT_BUILD))
                     except Exception:
                         pass
+                    state["elev_error"] = ("no raw capture (cap-worker didn't start): raw=%s capclient=%s"
+                                           % (state.get("raw"), state.get("capclient") is not None))
                     state["report_mode"] = True
             elif typ == "deelevate-capture":
                 # Viewer dropped elevation: swap SYSTEM->USER cap-worker live (no UAC). minimize_fg -> the
