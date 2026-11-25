@@ -2381,13 +2381,19 @@ function onKeyDown(e) {
     return;
   }
   e.preventDefault();
-  send({ t: "kd", key: e.key, code: e.code });
+  send({ t: "kd", key: e.key, code: e.code, ...altgrFlag(e) });
 }
 function onKeyUp(e) {
   if (modalOpen || !inSession || !kbToggle.checked) return;
   if (isPasteV(e)) return; // paired with the suppressed keydown
   e.preventDefault();
-  send({ t: "ku", key: e.key, code: e.code });
+  send({ t: "ku", key: e.key, code: e.code, ...altgrFlag(e) });
+}
+// AltGr (right-Alt) produces 3rd-level glyphs (@ € ~ \ | { } accented). The browser emits a
+// phantom Left-Control with AltGr, so the agent would hold Ctrl and swallow the glyph as a chord.
+// Flag the event so the agent lifts Ctrl/Alt and injects the glyph clean. Only sent when active.
+function altgrFlag(e) {
+  return e.getModifierState && e.getModifierState("AltGraph") ? { altgr: true } : {};
 }
 
 function bindWindowListeners() {

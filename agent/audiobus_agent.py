@@ -633,6 +633,41 @@ def resolve_key(ev):
     return None
 
 
+# Modifiers to lift before injecting an AltGr glyph. AltGr (right-Alt) is Ctrl+Alt at the OS
+# level, and a browser also emits a PHANTOM Left-Control keydown with it; both reach the agent
+# as held Ctrl/Alt. pynput Unicode-injects any char that needs a modifier on this layout, but a
+# held Ctrl turns that injection into Ctrl+<glyph> (swallowed), so clear every Ctrl/Alt first.
+_ALTGR_CLEAR = (Key.ctrl, Key.ctrl_l, Key.ctrl_r, Key.alt, Key.alt_l, Key.alt_r, Key.alt_gr)
+
+
+def _is_altgr_char(ev):
+    """True when this event is an AltGr-produced printable glyph (@ EUR ~ \\ | { } accented...).
+    The viewer sets ev['altgr'] from getModifierState('AltGraph'); we still require a single-char
+    `key` that is not a named special key so only real glyphs take the clean-inject path."""
+    key = ev.get("key")
+    return bool(ev.get("altgr")) and bool(key) and len(key) == 1 and key not in SPECIAL_KEYS
+
+
+def _type_altgr_char(ev):
+    """Inject one AltGr glyph as a clean tap. Lift every held Ctrl/Alt first so pynput's Unicode
+    injection lands the glyph itself instead of a Ctrl/Alt chord, then press+release the char
+    verbatim (case preserved; pynput Unicode-injects it whatever the agent's own layout is). Shift
+    is left alone: it does not alter a Unicode codepoint but may be legitimately held for the
+    uppercase form. The glyph is a tap, so nothing is left held and the key-set is untouched."""
+    char = ev.get("key")
+    for mk in _ALTGR_CLEAR:
+        try:
+            keyboard.release(mk)
+        except Exception:
+            pass
+    try:
+        k = KeyCode.from_char(char)
+        keyboard.press(k)
+        keyboard.release(k)
+    except Exception:
+        pass
+
+
 def _accumulate_wheel(dx, dy, accum):
     """Convert normalized wheel pixel deltas into integer scroll steps, carrying the
     fractional remainder in `accum` (a mutable {"x","y"} dict kept per session) so many
@@ -710,7 +745,7 @@ _GUI_DPI_LOGGED = False   # one-time GUI-thread DPI-awareness + raw-rect diagnos
 _SHOT_SAVED = False       # one-time: save an mss screenshot on the first blocked click
 
 
-_AGENT_BUILD = "2026-11-25-deskswitch1"  # ELEVATED-ONLY "left reads as right" + "keyboard halts": a click's down/up (or a held modifier) straddling a Default<->Winlogon hop stranded the primary button/modifier DOWN on the desktop we left -> next click chorded/secondary, letters became shortcuts. Fix: the input thread releases all held buttons/keys on the OLD desktop BEFORE SetThreadDesktop switches (via a new on_change hook), and _follow_input_desktop commits the new desktop name only when SetThreadDesktop SUCCEEDS (a failed attach now retries instead of leaving the thread stuck on the wrong desktop = total input halt). NOT swap (session-global, ruled out). Carries elevreason1 + elevdiag1 + stuckkey2 + elevwait1 + kbdfix1
+_AGENT_BUILD = "2026-11-25-altgr1"  # AltGr glyphs (@ EUR ~ \ | { } accented) now type on the remote. AltGr = Ctrl+Alt and the browser also emits a PHANTOM Left-Control with it, so the agent held Ctrl; pynput Unicode-injects any layout-modified char, but UNDER that held Ctrl it became Ctrl+<glyph> and was swallowed. Fix: the viewer flags each key event with altgr=getModifierState('AltGraph'); on an altgr single-char kd the agent lifts every held Ctrl/Alt and Unicode-taps the glyph clean (ku is then a no-op). Gated on altgr, so normal typing/shortcuts are byte-identical. Carries deskswitch1 + elevreason1 + elevdiag1 + stuckkey2 + elevwait1 + kbdfix1
 
 
 def _save_debug_shot(x, y):
@@ -958,6 +993,9 @@ def apply_event(ev, monitors=None, window_rects=None, blocked=None,
             if sink is not None:
                 sink(ev)
                 return
+            if _is_altgr_char(ev):
+                _type_altgr_char(ev)   # lift held Ctrl/Alt, Unicode-tap the glyph clean
+                return
             k = resolve_key(ev)
             if k is not None:
                 keyboard.press(k)
@@ -969,6 +1007,8 @@ def apply_event(ev, monitors=None, window_rects=None, blocked=None,
             if sink is not None:
                 sink(ev)
                 return
+            if _is_altgr_char(ev):
+                return   # the kd already tapped the glyph; no separate key is held
             k = resolve_key(ev)
             if k is not None:
                 keyboard.release(k)
