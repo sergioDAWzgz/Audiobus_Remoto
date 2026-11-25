@@ -710,7 +710,7 @@ _GUI_DPI_LOGGED = False   # one-time GUI-thread DPI-awareness + raw-rect diagnos
 _SHOT_SAVED = False       # one-time: save an mss screenshot on the first blocked click
 
 
-_AGENT_BUILD = "2026-11-25-elevreason1"  # elevation failures now travel to the VIEWER (elev_error on the capture-mode report): the raw-cap-worker-not-up no-op and a failed SYSTEM swap both set state["elev_error"], forwarded child->main->viewer, shown as "Elevation unavailable on the remote" + full reason in the browser console — because the agent's click.log/secure.log do not land on some machines. Carries elevdiag1 + stuckkey2 + elevwait1 + kbdfix1
+_AGENT_BUILD = "2026-11-25-deskswitch1"  # ELEVATED-ONLY "left reads as right" + "keyboard halts": a click's down/up (or a held modifier) straddling a Default<->Winlogon hop stranded the primary button/modifier DOWN on the desktop we left -> next click chorded/secondary, letters became shortcuts. Fix: the input thread releases all held buttons/keys on the OLD desktop BEFORE SetThreadDesktop switches (via a new on_change hook), and _follow_input_desktop commits the new desktop name only when SetThreadDesktop SUCCEEDS (a failed attach now retries instead of leaving the thread stuck on the wrong desktop = total input halt). NOT swap (session-global, ruled out). Carries elevreason1 + elevdiag1 + stuckkey2 + elevwait1 + kbdfix1
 
 
 def _save_debug_shot(x, y):
@@ -2417,14 +2417,17 @@ _DESKTOP_ALL = 0x01FF                     # all desktop rights: SendInput button
 #                                          which is why a read-only handle let moves through but not clicks)
 
 
-def _follow_input_desktop(cur, access=_DESKTOP_READ):
+def _follow_input_desktop(cur, access=_DESKTOP_READ, on_change=None):
     """Re-attach the CALLING thread to the current INPUT desktop — 'Default' normally, 'Winlogon'
     when the secure desktop (UAC / Ctrl-Alt-Del / lock) is up — so a SYSTEM thread's GDI grab and
     SendInput act on whatever the user is actually looking at. This is the AnyDesk/TeamViewer trick.
     `access` is the OpenInputDesktop mask: capture uses READ, the input thread uses ALL so SendInput
     clicks (not just SetCursorPos moves) land. `cur` tracks the last name (logged once on change).
-    Returns the current desktop name, or None. SetThreadDesktop is per-thread, so the capture loop
-    and the input reader each call this on their own thread."""
+    `on_change(old, new)` (input thread only) runs WHILE STILL ON THE OLD DESKTOP, just before the
+    switch, so the caller can release anything held there (a stranded primary button crosses every
+    later click; a stranded modifier turns letters into shortcuts). Returns the current desktop name,
+    or None. SetThreadDesktop is per-thread, so the capture loop and the input reader each call this
+    on their own thread."""
     user32 = ctypes.windll.user32
     user32.OpenInputDesktop.restype = wintypes.HANDLE
     hdesk = user32.OpenInputDesktop(0, False, access)   # follows the current input desktop
@@ -2439,10 +2442,21 @@ def _follow_input_desktop(cur, access=_DESKTOP_READ):
         # SetThreadDesktop persists until the next call, so only re-attach when the desktop actually
         # changed (the attach survives CloseDesktop of this probe handle). First call: name != None.
         if name != cur.get("name"):
+            if on_change is not None:
+                try:
+                    on_change(cur.get("name"), name)   # still on the OLD desktop: release held here
+                except Exception:
+                    pass
             ok = bool(user32.SetThreadDesktop(ctypes.c_void_p(hdesk)))
-            _worker_log("[diag %s desktop -> %r SetThreadDesktop=%s]"
-                        % (cur.get("tag", ""), name, ok))
-            cur["name"] = name
+            if ok:
+                cur["name"] = name   # commit ONLY on success; a failed attach retries next poll
+                cur.pop("fail", None)  # instead of leaving this thread stuck on the wrong desktop.
+                _worker_log("[diag %s desktop -> %r SetThreadDesktop=True]"
+                            % (cur.get("tag", ""), name))
+            elif cur.get("fail") != name:
+                cur["fail"] = name   # log each distinct failing target once (we still retry every poll)
+                _worker_log("[diag %s desktop -> %r SetThreadDesktop=False (retrying)]"
+                            % (cur.get("tag", ""), name))
     finally:
         user32.CloseDesktop(ctypes.c_void_p(hdesk))
     return name
@@ -2609,6 +2623,32 @@ def run_cap_worker(port):
         wheel = {"x": 0.0, "y": 0.0}
         fail_logged = set()           # event types whose inject failure was already logged
         inp_desktop = {"name": None, "tag": "input"}   # this (input) thread's current input desktop
+
+        def _release_before_desktop_switch(old, new):
+            """_follow_input_desktop on_change hook: still attached to the OLD input desktop here.
+            Release every held button/key so the desktop we leave keeps nothing stranded — a click
+            whose down landed here and whose up would land on the NEW desktop (a Default<->Winlogon
+            hop between md and mu) otherwise leaves the primary button logically DOWN, so the next
+            click reads as right; a held modifier left down turns later letters into shortcuts. The
+            presses landed here, so the releases must too. A drag cut by a secure-desktop switch
+            can't continue coherently anyway, and a stranded-down button is strictly worse."""
+            had = bool(pressed) or bool(keys)
+            for b in list(pressed):
+                try:
+                    mouse.release(BUTTONS.get(b, Button.left))
+                    _note_blocked_release(b)   # retry iff this release was UIPI-blocked
+                except Exception:
+                    pass
+            pressed.clear()
+            for kk in list(keys):
+                try:
+                    keyboard.release(kk)
+                except Exception:
+                    pass
+            keys.clear()
+            if old is not None and had:   # only when a real switch actually released something held
+                _worker_log("[diag input desktop %r->%r: released held before switch]" % (old, new))
+
         try:
             while not state["stop"]:
                 try:
@@ -2646,9 +2686,11 @@ def run_cap_worker(port):
                     continue
                 # Attach THIS thread to the live input desktop so SendInput reaches the secure
                 # desktop (Winlogon) when it is up — with FULL access so button events (not just
-                # cursor moves) are injected.
+                # cursor moves) are injected. The on_change hook releases anything held on the OLD
+                # desktop just before the switch so a down/up straddling a Default<->Winlogon hop
+                # can't strand its primary button (next click then reads as right) or a modifier.
                 if state["follow"]:
-                    _follow_input_desktop(inp_desktop, _DESKTOP_ALL)
+                    _follow_input_desktop(inp_desktop, _DESKTOP_ALL, _release_before_desktop_switch)
                 try:
                     apply_event(ev, state["monitors"], None, None, pressed, False, wheel,
                                 None, keys)
