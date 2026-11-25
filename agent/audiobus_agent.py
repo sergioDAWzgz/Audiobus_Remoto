@@ -710,7 +710,7 @@ _GUI_DPI_LOGGED = False   # one-time GUI-thread DPI-awareness + raw-rect diagnos
 _SHOT_SAVED = False       # one-time: save an mss screenshot on the first blocked click
 
 
-_AGENT_BUILD = "2026-11-25-elevwait1"  # viewer status during a no-PIN elevate: tell the viewer "waiting for approval on the remote" (local auth dialog + UAC can't be driven remotely) instead of a silent input freeze; cleared on the capture-mode report or a local decline. Carries kbdfix1: client-layout key, release held keys/modifiers on drop+end, per-monitor encode diag
+_AGENT_BUILD = "2026-11-25-stuckkey2"  # elevated/sink input: _release_held_buttons now FORWARDS a release-all to the cap-worker (the injector while elevated) instead of releasing on the main's pynput, so a modifier held when the VIEWER dropped (worker link still up, so the worker's own drop-release never fires) is cleared — fixes "letters act as functions / can't type" after an elevated reconnect. Carries elevwait1 + kbdfix1
 
 
 def _save_debug_shot(x, y):
@@ -2611,6 +2611,27 @@ def run_cap_worker(port):
                 try:
                     ev = json.loads(body)
                 except Exception:
+                    continue
+                if ev.get("t") == "release-all":
+                    # The main lost the viewer (or ended the session) with keys/buttons still held
+                    # and asked us to clear them. OUR input-link may still be UP (a viewer drop does
+                    # not drop the main<->worker link), so the drop-release in `finally` would NOT
+                    # fire — release on demand here, or a held modifier makes later letters act as
+                    # shortcuts ("letters don't pass, just functions").
+                    for b in list(pressed):
+                        try:
+                            mouse.release(BUTTONS.get(b, Button.left))
+                            _note_blocked_release(b)
+                        except Exception:
+                            pass
+                    pressed.clear()
+                    for kk in list(keys):
+                        try:
+                            keyboard.release(kk)
+                        except Exception:
+                            pass
+                    keys.clear()
+                    _release_stuck()
                     continue
                 # Attach THIS thread to the live input desktop so SendInput reaches the secure
                 # desktop (Winlogon) when it is up — with FULL access so button events (not just
@@ -5650,6 +5671,16 @@ class NetClient:
     def _release_held_buttons(self):
         """Release any mouse button the remote pressed but didn't release (e.g. the
         viewer disconnected mid-drag), so it can't stay stuck down on this machine."""
+        # When elevated / raw-capturing we FORWARD input to a cap-worker, so the WORKER is the
+        # injector and holds the keys — releasing on our own pynput below is a no-op for the stuck
+        # key. Tell the worker to release: a viewer drop does NOT drop the main<->worker link, so
+        # the worker's own drop-release would not fire. Without this a modifier held when the viewer
+        # dropped stays down in the worker and later letters act as shortcuts ("can't type letters").
+        if self._input_wsock is not None and getattr(self.args, "raw_capture", False):
+            try:
+                self._send_to_input_worker({"t": "release-all"})
+            except Exception:
+                pass
         for b in list(self._pressed_btns):
             try:
                 mouse.release(BUTTONS.get(b, Button.left))
