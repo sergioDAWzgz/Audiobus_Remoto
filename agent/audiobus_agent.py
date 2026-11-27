@@ -633,11 +633,14 @@ def resolve_key(ev):
     return None
 
 
-# Modifiers to lift before injecting an AltGr glyph. AltGr (right-Alt) is Ctrl+Alt at the OS
-# level, and a browser also emits a PHANTOM Left-Control keydown with it; both reach the agent
-# as held Ctrl/Alt. pynput Unicode-injects any char that needs a modifier on this layout, but a
-# held Ctrl turns that injection into Ctrl+<glyph> (swallowed), so clear every Ctrl/Alt first.
-_ALTGR_CLEAR = (Key.ctrl, Key.ctrl_l, Key.ctrl_r, Key.alt, Key.alt_l, Key.alt_r, Key.alt_gr)
+# Ctrl/Alt modifiers that, if actually held, would corrupt an AltGr glyph. AltGr (right-Alt) is
+# Ctrl+Alt at the OS level, and a browser also emits a PHANTOM Left-Control keydown with it; pynput
+# Unicode-injects any char that needs a modifier on this layout, but a held Ctrl turns that
+# injection into Ctrl+<glyph> (swallowed). We lift ONLY the ones genuinely held (the phantom
+# Left-Control = Key.ctrl), not the whole family: a keyup for a modifier that is already up is a
+# wasted SendInput per glyph that pokes the focused window's menu/focus state, which made AltGr
+# typing crawl. For AltGr the held set is just Key.ctrl.
+_ALTGR_MODS = (Key.ctrl, Key.ctrl_l, Key.ctrl_r, Key.alt, Key.alt_l, Key.alt_r, Key.alt_gr)
 
 
 def _is_altgr_char(ev):
@@ -648,18 +651,22 @@ def _is_altgr_char(ev):
     return bool(ev.get("altgr")) and bool(key) and len(key) == 1 and key not in SPECIAL_KEYS
 
 
-def _type_altgr_char(ev):
-    """Inject one AltGr glyph as a clean tap. Lift every held Ctrl/Alt first so pynput's Unicode
-    injection lands the glyph itself instead of a Ctrl/Alt chord, then press+release the char
-    verbatim (case preserved; pynput Unicode-injects it whatever the agent's own layout is). Shift
-    is left alone: it does not alter a Unicode codepoint but may be legitimately held for the
+def _type_altgr_char(ev, keys=None):
+    """Inject one AltGr glyph as a clean tap. Lift only the Ctrl/Alt modifiers ACTUALLY held
+    (`keys`, the viewer-injected held set) so pynput's Unicode injection lands the glyph itself
+    instead of a Ctrl/Alt chord, then press+release the char verbatim (case preserved; pynput
+    Unicode-injects it whatever the agent's own layout is). Lifting only held modifiers avoids a
+    spurious keyup per glyph for every up modifier, which was the source of the AltGr slowness.
+    Shift is left alone: it does not alter a Unicode codepoint but may be legitimately held for the
     uppercase form. The glyph is a tap, so nothing is left held and the key-set is untouched."""
     char = ev.get("key")
-    for mk in _ALTGR_CLEAR:
-        try:
-            keyboard.release(mk)
-        except Exception:
-            pass
+    held = keys if keys is not None else ()
+    for mk in _ALTGR_MODS:
+        if mk in held:
+            try:
+                keyboard.release(mk)
+            except Exception:
+                pass
     try:
         k = KeyCode.from_char(char)
         keyboard.press(k)
@@ -745,7 +752,7 @@ _GUI_DPI_LOGGED = False   # one-time GUI-thread DPI-awareness + raw-rect diagnos
 _SHOT_SAVED = False       # one-time: save an mss screenshot on the first blocked click
 
 
-_AGENT_BUILD = "2026-11-25-altgr1"  # AltGr glyphs (@ EUR ~ \ | { } accented) now type on the remote. AltGr = Ctrl+Alt and the browser also emits a PHANTOM Left-Control with it, so the agent held Ctrl; pynput Unicode-injects any layout-modified char, but UNDER that held Ctrl it became Ctrl+<glyph> and was swallowed. Fix: the viewer flags each key event with altgr=getModifierState('AltGraph'); on an altgr single-char kd the agent lifts every held Ctrl/Alt and Unicode-taps the glyph clean (ku is then a no-op). Gated on altgr, so normal typing/shortcuts are byte-identical. Carries deskswitch1 + elevreason1 + elevdiag1 + stuckkey2 + elevwait1 + kbdfix1
+_AGENT_BUILD = "2026-11-27-altgr2sas1"  # (1) AltGr glyphs (@ EUR ~ \ | { } accented) type on the remote; altgr1 fixed the swallowed glyph (held phantom Ctrl), altgr2 fixes AltGr typing being SLOW (_type_altgr_char lifted all 7 Ctrl/Alt family keys per glyph -> spurious Alt/Menu keyups poked the focused window; now lifts ONLY the held modifiers from `keys`). (2) sas1: the elevated install-capsvc helper sets HKLM SoftwareSASGeneration=3 so the SYSTEM cap-worker's SendSAS (viewer Ctrl+Alt+Del) works (default 0 = silent no-op); persists, only enables SIMULATING SAS. Carries deskswitch1 + elevreason1 + elevdiag1 + stuckkey2 + elevwait1 + kbdfix1
 
 
 def _save_debug_shot(x, y):
@@ -897,6 +904,29 @@ def _send_sas():
         pass
 
 
+def _enable_software_sas():
+    """Let software generate the Secure Attention Sequence so the viewer's Ctrl+Alt+Del works.
+    HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Policies\\System\\SoftwareSASGeneration
+    defaults to 0, which makes SendSAS silently no-op; 3 = Services and Ease of Access apps, which
+    covers the SYSTEM cap-worker that calls SendSAS while elevated. Needs admin (HKLM), so it runs
+    only from the elevated install-capsvc helper. It PERSISTS (not reverted on exit) so Ctrl+Alt+Del
+    keeps working across sessions. This only permits SIMULATING the SAS; it cannot fake the trusted
+    hardware Ctrl+Alt+Del / login path."""
+    try:
+        import winreg
+        key = winreg.CreateKeyEx(
+            winreg.HKEY_LOCAL_MACHINE,
+            r"SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System",
+            0, winreg.KEY_SET_VALUE | winreg.KEY_WOW64_64KEY)
+        try:
+            winreg.SetValueEx(key, "SoftwareSASGeneration", 0, winreg.REG_DWORD, 3)
+            _secure_log("[diag SoftwareSASGeneration=3 set]")
+        finally:
+            winreg.CloseKey(key)
+    except Exception as e:
+        _secure_log("[diag SoftwareSASGeneration set FAILED %r]" % (e,))
+
+
 def apply_event(ev, monitors=None, window_rects=None, blocked=None,
                 pressed=None, agent_foreground=False, wheel_accum=None, sink=None,
                 keys=None):
@@ -994,7 +1024,7 @@ def apply_event(ev, monitors=None, window_rects=None, blocked=None,
                 sink(ev)
                 return
             if _is_altgr_char(ev):
-                _type_altgr_char(ev)   # lift held Ctrl/Alt, Unicode-tap the glyph clean
+                _type_altgr_char(ev, keys)   # lift only held Ctrl/Alt, Unicode-tap the glyph clean
                 return
             k = resolve_key(ev)
             if k is not None:
@@ -8341,6 +8371,7 @@ def _install_capsvc(capport, svc_name, log_path):
         pass
     svc_name = svc_name or ("AudiobusCap_%d" % os.getpid())
     _secure_log("=== install-capsvc: svc=%s capport=%s ===" % (svc_name, capport))
+    _enable_software_sas()   # elevated: enable Ctrl+Alt+Del (SendSAS) for the SYSTEM cap-worker
     exe = sys.executable
     svc_args = ('--secure-service --capworker-port %d --secure-svcname "%s" --secure-log "%s"'
                 % (int(capport), svc_name, log_path))
