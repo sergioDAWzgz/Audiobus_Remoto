@@ -752,7 +752,7 @@ _GUI_DPI_LOGGED = False   # one-time GUI-thread DPI-awareness + raw-rect diagnos
 _SHOT_SAVED = False       # one-time: save an mss screenshot on the first blocked click
 
 
-_AGENT_BUILD = "2026-11-27-sas2"  # AltGr glyphs type on the remote (altgr1) + fast (altgr2: lift only held modifiers). sas2 fixes Ctrl+Alt+Del doing NOTHING even elevated: SendSAS(FALSE) is the LocalSystem path and needs SeTcbPrivilege ENABLED (the SYSTEM worker's token has it but off by default) - sas1 only set the SoftwareSASGeneration policy and only in the on-demand install-capsvc path, not the persistent AudiobusCapSvc (unattended) path. Now _send_sas enables SeTcbPrivilege + ensures the policy as SYSTEM + logs the attempt (SendSAS is void = no success signal); the policy write also added to _install_elevsvc. Carries deskswitch1 + elevreason1 + elevdiag1 + stuckkey2 + elevwait1 + kbdfix1
+_AGENT_BUILD = "2026-11-27-sas3"  # AltGr glyphs type on the remote (altgr1) + fast (altgr2). Ctrl+Alt+Del: sas1/sas2 failed because SendSAS ONLY fires from a real session-0 SERVICE process, never from the SYSTEM cap-worker in the user session (log proved it: tcb=True, SendSAS called, no Winlogon switch). sas3: the secure-service now stays RESIDENT for the elevated session (keyed to the cap-worker's process handle) and calls SendSAS itself; the worker SETs a global event (_sas_event_name, by capport) that the service WAITs on. _trigger_sas signals it (direct SendSAS fallback non-elevated). Removed on de-elevate (worker exits) or SCM stop. Carries deskswitch1 + elevreason1 + elevdiag1 + stuckkey2 + elevwait1 + kbdfix1
 
 
 def _save_debug_shot(x, y):
@@ -941,6 +941,35 @@ def _enable_software_sas():
         _secure_log("[diag SoftwareSASGeneration set FAILED %r]" % (e,))
 
 
+def _sas_event_name():
+    """Global auto-reset event the session-1 SYSTEM cap-worker SETs and the session-0 secure-service
+    WAITs on to fire SendSAS. Named by the capport, which both share, so it is unique per elevated
+    session and never crosses sessions."""
+    return "Global\\AudiobusRemoteSAS_%d" % (_CAPWORKER_PORT or 0)
+
+
+def _trigger_sas():
+    """Fire Ctrl+Alt+Del. SendSAS only works from a real session-0 SERVICE process, never from the
+    SYSTEM cap-worker that lives in the user session (proven: the worker called SendSAS, logged
+    success, and nothing happened). So when elevated the worker SIGNALS the resident secure-service via
+    a global event and the service calls SendSAS. If no service is listening (non-elevated, or the
+    event is absent), fall back to a direct call — best-effort; a non-elevated agent can't reach the
+    secure desktop anyway."""
+    try:
+        k = ctypes.windll.kernel32
+        k.OpenEventW.restype = wintypes.HANDLE
+        h = k.OpenEventW(0x0002, False, _sas_event_name())   # EVENT_MODIFY_STATE
+        if h:
+            k.SetEvent(ctypes.c_void_p(h))
+            k.CloseHandle(ctypes.c_void_p(h))
+            _worker_log("[diag sas signalled service evt=%s]" % _sas_event_name())
+            return
+        _worker_log("[diag sas no service evt=%s; direct fallback]" % _sas_event_name())
+    except Exception as e:
+        _worker_log("[diag sas signal raised %r]" % (e,))
+    _send_sas()
+
+
 def apply_event(ev, monitors=None, window_rects=None, blocked=None,
                 pressed=None, agent_foreground=False, wheel_accum=None, sink=None,
                 keys=None):
@@ -1060,9 +1089,9 @@ def apply_event(ev, monitors=None, window_rects=None, blocked=None,
                     keys.discard(k)
         elif t == "sas":
             if sink is not None:
-                sink(ev)      # the worker (SYSTEM in T3) can SendSAS; main often can't
+                sink(ev)      # forward to the SYSTEM worker; it signals the session-0 service to SendSAS
                 return
-            _send_sas()   # Ctrl+Alt+Del (sent as a dedicated event; SendInput can't do it)
+            _trigger_sas()   # Ctrl+Alt+Del: signal the resident secure-service (only it can SendSAS)
         elif t == "minimize-fg":
             # De-elevate helper: minimize the elevated FOREGROUND window. Forwarded to the SYSTEM worker
             # (sink) so it runs ELEVATED and on the input-desktop-attached input thread — the reliable
@@ -7909,6 +7938,7 @@ _ELEV_SDDL = ("D:(A;;CCLCSWRPWPDTLOCRRC;;;SY)(A;;CCDCLCSWRPWPDTLOCRSDRCWDWO;;;BA
 _svc_status_handle = None
 _svc_main_cb = None      # keep ctypes callbacks alive for the dispatcher's whole lifetime
 _svc_ctrl_cb = None
+_svc_stop_evt = None     # the resident SAS loop's stop event; the SCM control handler sets it
 
 if sys.platform == "win32":
     class _SERVICE_STATUS(ctypes.Structure):
@@ -7995,14 +8025,22 @@ def _spawn_helper_in_console_session(desktop):
                                   env_ptr, None, ctypes.byref(si), ctypes.byref(pi))
     _secure_log("CreateProcessAsUser ok=%s err=%s child_pid=%s"
                 % (ok, ctypes.GetLastError(), pi.dwProcessId))
-    return bool(ok)
+    if not ok:
+        return 0
+    try:
+        if pi.hThread:
+            ctypes.windll.kernel32.CloseHandle(pi.hThread)   # only the process handle is kept (waited on)
+    except Exception:
+        pass
+    return int(pi.hProcess) if pi.hProcess else 0   # caller waits on this to know when the worker exits
 
 
 def _secure_service_work():
-    """What the SYSTEM service does once RUNNING (phase 1): confirm it is SYSTEM and launch the
-    capture helper into the console session. Returns IMMEDIATELY — the helper is an independent
-    process that captures for ~25 s on its own; the service must NOT stay alive, or the dispatcher
-    never returns and the service hangs 'marked for deletion' and locks the exe."""
+    """What the SYSTEM service does once RUNNING: confirm it is SYSTEM and launch the capture helper
+    into the console session. For the --secure-helper phase-1 test (no capport) it returns IMMEDIATELY
+    — that helper runs on its own and the service must not stay alive. For the LIVE cap-worker path it
+    stays resident (see _secure_service_sas_loop): SendSAS (Ctrl+Alt+Del) only fires from a real
+    session-0 service, so this process must be alive to call it, keyed to the worker's lifetime."""
     try:
         ub = ctypes.create_unicode_buffer(256)
         sz = wintypes.DWORD(256)
@@ -8010,8 +8048,56 @@ def _secure_service_work():
         _secure_log("service running as user=%s (expect SYSTEM)" % ub.value)
     except Exception as e:
         _secure_log("service GetUserName failed %r" % (e,))
-    ok = _spawn_helper_in_console_session("WinSta0\\Default")  # helper follows to Winlogon itself
-    _secure_log("service spawned helper ok=%s; exiting (helper runs on its own)" % ok)
+    hproc = _spawn_helper_in_console_session("WinSta0\\Default")  # helper follows to Winlogon itself
+    if _CAPWORKER_PORT and hproc:
+        _secure_log("service spawned worker; staying resident for SAS (evt=%s)" % _sas_event_name())
+        _secure_service_sas_loop(hproc)
+        _secure_log("service resident loop ended; exiting")
+    else:
+        _secure_log("service spawned helper ok=%s; exiting (helper runs on its own)" % bool(hproc))
+
+
+def _secure_service_sas_loop(hproc):
+    """Resident session-0 SYSTEM service loop for the elevated session. SendSAS (Ctrl+Alt+Del) only
+    works from a real service process, so the session-1 cap-worker SETs a global event and we call
+    SendSAS here. Exit when the cap-worker process (hproc) exits (de-elevate / agent close) or the SCM
+    stops us. The service is 'marked for deletion' meanwhile and is removed when this returns; the exe
+    it holds is the already-running agent, so the lock is harmless for the session."""
+    global _svc_stop_evt
+    k = ctypes.windll.kernel32
+    k.CreateEventW.restype = wintypes.HANDLE
+    try:
+        sas_evt = k.CreateEventW(None, False, False, _sas_event_name())   # auto-reset, named
+        stop_evt = k.CreateEventW(None, True, False, None)                # manual-reset, unnamed
+    except Exception as e:
+        _secure_log("[sas-loop CreateEvent raised %r]" % (e,))
+        return
+    if not sas_evt or not stop_evt:
+        _secure_log("[sas-loop CreateEvent returned NULL sas=%s stop=%s]" % (sas_evt, stop_evt))
+        return
+    _svc_stop_evt = stop_evt
+    arr = (wintypes.HANDLE * 3)()
+    arr[0] = sas_evt       # WAIT_OBJECT_0: a SAS was requested
+    arr[1] = hproc         # +1: the cap-worker exited -> elevated session over
+    arr[2] = stop_evt      # +2: the SCM asked us to stop
+    try:
+        while True:
+            r = k.WaitForMultipleObjects(3, arr, False, 0xFFFFFFFF)  # INFINITE
+            if r == 0:
+                _send_sas()        # a real session-0 service -> SendSAS actually fires
+            elif r == 1:
+                _secure_log("[sas-loop cap-worker exited -> stop]")
+                break
+            else:
+                _secure_log("[sas-loop end r=%s]" % r)   # stop event, or WAIT_FAILED
+                break
+    finally:
+        _svc_stop_evt = None
+        for h in (sas_evt, stop_evt, hproc):
+            try:
+                k.CloseHandle(ctypes.c_void_p(h))
+            except Exception:
+                pass
 
 
 def run_secure_service():
@@ -8026,6 +8112,11 @@ def run_secure_service():
 
     def _ctrl(ctrl, evtype, evdata, ctx):
         if ctrl in (1, 5):   # SERVICE_CONTROL_STOP / SHUTDOWN
+            try:
+                if _svc_stop_evt:   # wake the resident SAS loop so the dispatcher returns promptly
+                    ctypes.windll.kernel32.SetEvent(ctypes.c_void_p(_svc_stop_evt))
+            except Exception:
+                pass
             _svc_set_status(0x01)   # STOPPED
         return 0
 
@@ -9090,6 +9181,7 @@ def main(argv=None):
     if getattr(args, "cap_worker", False):
         if getattr(args, "secure_log", None):
             _set_secure_paths(args.secure_log, getattr(args, "secure_png", None))
+        _set_capworker_port(args.capport)   # so _sas_event_name() matches the session-0 service's
         run_cap_worker(args.capport)
         return
     # Secure-desktop phase-1 helpers (run before the single-instance guard: the helper is a
