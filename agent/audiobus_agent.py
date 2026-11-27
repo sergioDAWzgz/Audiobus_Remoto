@@ -752,7 +752,7 @@ _GUI_DPI_LOGGED = False   # one-time GUI-thread DPI-awareness + raw-rect diagnos
 _SHOT_SAVED = False       # one-time: save an mss screenshot on the first blocked click
 
 
-_AGENT_BUILD = "2026-11-27-altgr2sas1"  # (1) AltGr glyphs (@ EUR ~ \ | { } accented) type on the remote; altgr1 fixed the swallowed glyph (held phantom Ctrl), altgr2 fixes AltGr typing being SLOW (_type_altgr_char lifted all 7 Ctrl/Alt family keys per glyph -> spurious Alt/Menu keyups poked the focused window; now lifts ONLY the held modifiers from `keys`). (2) sas1: the elevated install-capsvc helper sets HKLM SoftwareSASGeneration=3 so the SYSTEM cap-worker's SendSAS (viewer Ctrl+Alt+Del) works (default 0 = silent no-op); persists, only enables SIMULATING SAS. Carries deskswitch1 + elevreason1 + elevdiag1 + stuckkey2 + elevwait1 + kbdfix1
+_AGENT_BUILD = "2026-11-27-sas2"  # AltGr glyphs type on the remote (altgr1) + fast (altgr2: lift only held modifiers). sas2 fixes Ctrl+Alt+Del doing NOTHING even elevated: SendSAS(FALSE) is the LocalSystem path and needs SeTcbPrivilege ENABLED (the SYSTEM worker's token has it but off by default) - sas1 only set the SoftwareSASGeneration policy and only in the on-demand install-capsvc path, not the persistent AudiobusCapSvc (unattended) path. Now _send_sas enables SeTcbPrivilege + ensures the policy as SYSTEM + logs the attempt (SendSAS is void = no success signal); the policy write also added to _install_elevsvc. Carries deskswitch1 + elevreason1 + elevdiag1 + stuckkey2 + elevwait1 + kbdfix1
 
 
 def _save_debug_shot(x, y):
@@ -892,16 +892,30 @@ def _click_on_agent(x, y, rects):
 
 
 def _send_sas():
-    """Trigger the Secure Attention Sequence (Ctrl+Alt+Del) on the remote. SendInput cannot
-    inject it, so use sas.dll's SendSAS. This needs the SoftwareSASGeneration policy to permit
-    apps (HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Policies\\System\\
-    SoftwareSASGeneration = 2 or 3); it is best-effort and silently no-ops otherwise. Note:
-    Ctrl+Alt+Del opens the ISOLATED secure desktop, which the agent cannot capture or drive,
-    so the stream freezes on its last frame while that screen is up."""
+    """Trigger the Secure Attention Sequence (Ctrl+Alt+Del) on the remote. SendInput cannot inject
+    it; sas.dll's SendSAS does. SendSAS(FALSE) is the LocalSystem/service path and requires
+    SeTcbPrivilege ENABLED — the SYSTEM cap-worker's token HAS it but disabled by default, which is
+    why Ctrl+Alt+Del did nothing even elevated — so enable it first. Also ensure the
+    SoftwareSASGeneration policy (works here because we run as SYSTEM; covers the AsUser=TRUE path).
+    SendSAS returns VOID (no success signal), so log that we reached it; the menu opening is the only
+    proof. Only useful while elevated: Ctrl+Alt+Del opens the ISOLATED secure desktop, which only the
+    SYSTEM session can capture (a non-elevated agent freezes on its last frame while it is up)."""
+    _enable_software_sas()
+    tcb = False
     try:
-        ctypes.windll.sas.SendSAS(False)
-    except Exception:
-        pass
+        tcb = _enable_privilege("SeTcbPrivilege")
+    except Exception as e:
+        _worker_log("[diag sas SeTcbPrivilege enable raised %r]" % (e,))
+    try:
+        sas = ctypes.windll.sas
+    except Exception as e:
+        _worker_log("[diag sas load sas.dll FAILED %r]" % (e,))
+        return
+    try:
+        sas.SendSAS(ctypes.c_int(0))   # AsUser=FALSE: the privileged LocalSystem path
+        _worker_log("[diag sas SendSAS(AsUser=0) called tcb=%s]" % tcb)
+    except Exception as e:
+        _worker_log("[diag sas SendSAS raised %r tcb=%s]" % (e, tcb))
 
 
 def _enable_software_sas():
@@ -8435,6 +8449,7 @@ def _install_elevsvc(log_path):
     except Exception:
         pass
     _secure_log("=== install-elevsvc: svc=%s ===" % _ELEV_SVC)
+    _enable_software_sas()   # elevated: enable Ctrl+Alt+Del (SendSAS) for the SYSTEM cap-worker
     exe = sys.executable
     svc_args = '--secure-service --secure-svcname "%s" --secure-log "%s"' % (_ELEV_SVC, log_path)
     if getattr(sys, "frozen", False):
